@@ -84,7 +84,7 @@ envelopes) and reject what makes life hard on a 240-byte MTU: global routing sta
 per message, and client stacks nobody wants to use. Details and trade-offs:
 [ADR-0001](docs/adr/0001-own-protocol-vs-reticulum.md), [research notes](docs/research/).
 
-## Feature status (v0.3.0)
+## Feature status (v0.4.0)
 
 | Area | Status |
 | --- | --- |
@@ -103,7 +103,6 @@ per message, and client stacks nobody wants to use. Details and trade-offs:
 | Desktop packaging (Tauri 2, Linux/macOS/Windows) | ✅ config; build needs system webkit2gtk/WebView deps |
 | Firmware: 4 reference boards + golden-vector conformance | ✅ code complete, build matrix in CI |
 | Web + CLI flashers | ✅ |
-| Native Android app | ✅ GA: on-device engine, BLE/USB, media, QR, notifications (APK per release) |
 | OMP/2: forward secrecy, voice calls, directed routing | 🗺️ [roadmap](docs/ROADMAP.md) |
 | NomadNet / Reticulum gateway | 🗺️ [design](docs/research/nomadnet-bridge.md) |
 
@@ -164,10 +163,11 @@ tools/flash/openmesh-flash --board t1000e --uf2 build/t1000e.uf2
 tools/flash/openmesh-flash --board heltec_tracker --port /dev/ttyACM0
 ```
 
-## Beginner-friendly, and AI-native (v0.3)
+## Android, beginner-friendly, and AI-native (v0.3–v0.4)
 
 Mesh software is usually built for people who already understand radios, keys and airtime. OpenMesh
-v0.3 ships **two front doors and one source of truth**:
+v0.3 shipped **two front doors and one source of truth**; **v0.4 adds the phone** — the same engine
+and the same secure defaults, running natively on Android:
 
 - **A 3-minute secure setup.** A guided wizard asks three questions (what is this box, where are
   you, keep my location private?) and applies a **secure preset**: region from your country,
@@ -179,6 +179,9 @@ v0.3 ships **two front doors and one source of truth**:
 - **One help corpus, everywhere.** The same 16 help topics + glossary power the in-app **Help
   Center** (search, beginner/advanced filter, deep links from every tooltip), the bridge
   `GET /api/help` API, and the AI agent's `openmesh_help` tool. Docs, UI and agents cannot disagree.
+- **A phone that works offline.** The Android app runs the Rust engine on-device over BLE/USB,
+  keeps the mesh alive in a foreground service, and ships the same onboarding, modes and Help Center
+  (plus QR invites, images, voice notes and notifications).
 - **An AI-native control plane.** `openmesh-bridge mcp` exposes **27 tools** over the Model Context
   Protocol — status, nodes, messages, channels, contacts, config, backbone, setup, help, activity —
   so Claude Code, Cursor, DSH or any MCP client can manage a node with typed tools, read-only mode,

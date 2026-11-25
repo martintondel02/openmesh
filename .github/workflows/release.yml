@@ -157,8 +157,9 @@ jobs:
           (cd out && sha256sum *.apk > SHA256SUMS-android.txt)
       - uses: actions/upload-artifact@v4
         with:
+          # Paths are relative to the repository root, not the job's working-directory.
           name: openmesh-android-apks
-          path: out/*
+          path: apps/android/out/*
 
   publish:
     name: publish-release

@@ -1,6 +1,6 @@
 # OpenMesh roadmap
 
-**Status:** living document · v0.1.0 · **Last updated:** 2026-11-25
+**Status:** living document · v0.4.0 · **Last updated:** 2026-11-25
 **Calendar model:** one maintainer working with an AI agent team (DeepSeek Harness), roughly
 30–40 focused hours per week, with hardware available from M1 onward. Dates are *relative
 weeks from v0.1.0*, not promises; a 20 % buffer is included per milestone.
@@ -33,6 +33,7 @@ Related: [Architecture](architecture/ARCHITECTURE.md) ·
 | **M0** | v0.1.0: spec, core, bridge, web, firmware, simulator, flashers, docs, Android scaffold | 0 (delivered as this milestone) | repository/CI |
 | **v0.2** | Backbone mode: OBB/1 authenticated TCP relay, live control panel, installer + ops docs (ships alongside M1) | weeks 1–2 | infrastructure |
 | **v0.3** | Beginner-friendly + AI-native: guided setup, one help corpus, local MCP agent server, OpenAPI, QUICKSTART/guides | weeks 3–4 | product + developer experience |
+| **v0.4** | Android GA: on-device engine via UniFFI, BLE/USB companion sync, media/QR/notifications, shared presets; public-exposure guidance (Openflare/WireGuard/Tailscale) | weeks 5–8 (early, pulled from M2) | client + operations |
 | **M1** | Field-ready text mesh: hardware bring-up, store-forward tuning, OTA, invites, airtime caps | weeks 1–8 | hardware + tuning |
 | **M2** | Android GA + companion polish + background sync + media UX | weeks 9–20 | mobile product |
 | **M3** | OMP/2: ratchets, optional directed routing, voice calls (gated) | weeks 21–34 | protocol |
@@ -150,6 +151,40 @@ onboarding "validated"; per-tool agent permission scopes; external review of the
 multi-client MCP compatibility matrix; native TLS in OBB/2. See
 [ADR 0010](adr/0010-ai-native-and-beginner-ux.md).
 
+
+## 3d. v0.4 — Android GA + public-exposure guidance (shipped)
+
+**Theme:** the Rust protocol engine runs on the phone, and backbone operators get a safe, guided
+way to expose their node without opening firewall ports.
+
+**Shipped in the v0.4.0 tree:**
+
+* `crates/openmesh-ffi` is a real **UniFFI 0.28** surface (`OpenMeshNode`, typed events/outbound
+  frames, attachments, state export/import, typed errors), with generated Kotlin for `arm64-v8a`,
+  `armeabi-v7a` and `x86_64` and a host `uniffi-bindgen` build step.
+* `apps/android` is GA: on-device engine, foreground `MeshService` with BLE/USB companion sync,
+  notifications, QR invites, image/voice capture, beginner onboarding, bundled Help Center,
+  Room/DataStore persistence, Keystore-wrapped identity, env-based release signing; Android 14+
+  foreground-service rules handled (`connectedDevice`, with a `specialUse` fallback until a radio
+  permission is granted).
+* Shared **`content/presets/setup.json`** is the single source for beginner presets (bridge setup
+  APIs, Android onboarding, web demo).
+* `/api/backbone/setup` now returns an **exposure** object (Openflare recommended, steps,
+  alternatives, copyable loopback bind command, guide link) and the web setup wizard/panel render
+  it. New guide: [`docs/guides/backbone-exposure.md`](guides/backbone-exposure.md); spec:
+  [`docs/architecture/BACKBONE.md`](architecture/BACKBONE.md) §9b.
+* Android CI builds the debug APK (signed release when keystore secrets exist) and attaches it to
+  releases; a real-device QA pass (fresh install, onboarding, engine, channel/invite, message send,
+  offline Help, no crashes) is recorded in [`docs/design/android-ga.md`](design/android-ga.md).
+
+**Explicitly not in v0.4:** Play Store/F-Droid listing, iOS, real-radio field validation of the
+Android link (needs hardware + a second node), image/voice round-trip on device, OBB/2 native TLS,
+OMP/2. See M2/M3.
+
+**Exit criteria (met):** `cargo fmt/clippy -D warnings/test --workspace --all-targets`, web build +
+tests, firmware host vectors, docs/help/OpenAPI checkers, Android lint/unit tests/debug APK, and a
+real-device walkthrough all green.
+
 ## 4. M1 — Field-ready text mesh (weeks 1–8)
 
 **Goal:** two handhelds and a solar repeater survive a real week outdoors; store-and-forward and
@@ -206,6 +241,9 @@ duty-cycle behaviour are measured, not assumed.
 ---
 
 ## 5. M2 — Android GA and companion polish (weeks 9–20)
+
+**Status:** the core deliverables shipped early in **v0.4.0** (see §3d). Remaining items below are
+polish/store-readiness and hardware validation, not blockers.
 
 **Goal:** the Android app is a first-class client, not a scaffold: connect a radio over USB or
 BLE, chat/groups/contacts/QR/nodes/map/settings, send images and voice notes with airtime

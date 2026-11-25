@@ -28,6 +28,9 @@ explicitly.
   offline Help, all main screens, zero crashes. Missing radio permissions no longer crash the
   foreground service: it starts as `connectedDevice` when a Bluetooth/USB permission is held and
   falls back to the declared `specialUse` type otherwise.
+- Device-QA fixes: channel threads show the channel name (not the id), re-running setup reuses the
+  existing private channel instead of duplicating it, and Bluetooth permissions are requested
+  before scanning.
 - Build: `apps/android/scripts/build-ffi.sh` (cargo-ndk + uniffi-bindgen) and CI that installs
   JDK 21 + Android SDK 35 + NDK 27, builds the debug APK (and a signed release APK when keystore
   secrets are configured), tests, and attaches the APK to releases.
