@@ -17,6 +17,11 @@ were studied as prior art and for hardware pin-map facts, and are credited here.
 - Meshtastic firmware (GPL-3.0) — board pin maps and variant files were consulted to cross-check
   hardware wiring for the reference boards; OpenMesh board headers are written independently and
   cite the vendor documentation.
+  The PlatformIO board definitions in `firmware/boards/pio/*.json` and the nRF52 Arduino board
+  variants in `firmware/variants/*/` are derived from meshtastic/firmware (GPL-3.0). They are
+  included here under GPL-3.0 terms, which AGPL-3.0 permits (GPLv3 §13 / AGPLv3 §13); they are
+  configuration files only and contain no Meshtastic application logic. If this distinction
+  matters to you, the files are isolated under those two directories.
 - MeshCore (https://meshcore.io/) — protocol design inspiration (repeater/room-server roles).
 - Semtech AN1200.13/AN1200.22 — LoRa airtime formulas.
 

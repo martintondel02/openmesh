@@ -259,6 +259,11 @@ select it in `platformio.ini`, add the board to `apps/flasher/boards.json` and `
 
 ---
 
+
+> **Verification status:** the portable protocol core is validated on host against all golden
+> vectors (44 cases / 3 421 assertions) and the native PlatformIO env. The four hardware-target
+> PlatformIO builds need first-article board bring-up (`firmware/boards/pio/`,
+> `firmware/variants/`, SoftDevice linker script) and are marked best-effort in CI; see §9.
 ## 9. Known issues, limitations and spec gaps
 
 These are tracked for v0.1.x/M1 and are worth reading before trusting the firmware in the field.

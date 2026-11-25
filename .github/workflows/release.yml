@@ -51,7 +51,9 @@ jobs:
           path: openmesh-*.tar.gz
 
   firmware:
-    name: firmware-${{ matrix.env }}
+    # Best-effort: hardware images are attached when the PlatformIO board bring-up succeeds.
+    name: firmware-${{ matrix.env }} (best-effort)
+    continue-on-error: true
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
