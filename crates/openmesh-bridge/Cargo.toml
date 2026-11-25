@@ -20,6 +20,7 @@ path = "src/main.rs"
 openmesh-core = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+ciborium = { workspace = true }
 hex = { workspace = true }
 base64 = { workspace = true }
 tokio = { workspace = true }
@@ -30,6 +31,7 @@ clap = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
+thiserror = { workspace = true }
 rand = { workspace = true }
 # HTTP parsing for the hand-rolled loopback server (pure Rust; already transitively present).
 http = "1"
@@ -37,6 +39,8 @@ httparse = "1"
 sha2 = { workspace = true }
 # SO_REUSEADDR/SO_REUSEPORT for the LAN transport (pure Rust).
 socket2 = "0.6"
+# Pure-Rust QR code generator for the backbone setup panel.
+qrcodegen = "1"
 # Hardware serial transport: opt-in only so the default build needs no libudev.
 serialport = { workspace = true, optional = true }
 

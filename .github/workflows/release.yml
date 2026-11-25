@@ -112,6 +112,8 @@ jobs:
           set -euo pipefail
           mkdir -p release
           find artifacts -type f \( -name '*.tar.gz' -o -name '*.uf2' -o -name '*.bin' -o -name '*.zip' \) -exec cp {} release/ \;
+          cp scripts/install.sh release/install.sh
+          chmod +x release/install.sh
           (cd release && sha256sum * > SHA256SUMS.txt)
           ls -la release
       - uses: softprops/action-gh-release@v2

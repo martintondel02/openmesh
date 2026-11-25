@@ -1,2 +1,4 @@
-minimumReleaseAgeExclude:
-  - lucide-react@1.80.0
+# pnpm 12 reads build-script approvals from pnpm-workspace.yaml.
+# Vite needs esbuild's platform-binary postinstall step; allow only that package.
+allowBuilds:
+  esbuild: true

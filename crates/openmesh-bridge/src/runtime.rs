@@ -6,6 +6,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -15,7 +16,7 @@ use tokio::sync::{RwLock, broadcast, mpsc};
 use openmesh_core::services::{caps, group_signature_payload};
 use openmesh_core::{
     Ack, AckKind, AppMessage, Engine, EngineConfig, Event, MessageKind, NodeClass, NodeId,
-    Processed, PublicIdentity, ResourceKind, ResourceManifest, Target, util,
+    Processed, PublicIdentity, RelayConfig, ResourceKind, ResourceManifest, Role, Target, util,
 };
 
 use crate::attachments::AttachmentStore;
@@ -23,6 +24,7 @@ use crate::json::*;
 use crate::store::{
     ChannelRecord, ContactRecord, Store, StoredAttachment, StoredMessage, identity_b64,
 };
+use crate::transport::backbone::BackboneManager;
 use crate::transport::{Inbound, TransportFrame, TransportHandle};
 
 /// Features advertised in `hello` (documented list, extended when store-forward is enabled).
@@ -167,6 +169,8 @@ pub enum EngineInput {
         cmd: ClientCommand,
         reply: mpsc::UnboundedSender<Arc<str>>,
     },
+    /// Toggle store-and-forward (engine relay role) — backbone `store_forward` setting.
+    SetStoreForward(bool),
     Tick,
 }
 
@@ -178,6 +182,10 @@ pub struct Shared {
     pub events: broadcast::Sender<Arc<str>>,
     pub commands: mpsc::Sender<EngineInput>,
     pub started_at_ms: u64,
+    /// Backbone mode manager (server listener + outbound links + control surface).
+    pub backbone: Arc<BackboneManager>,
+    /// Live engine store-and-forward envelope count, surfaced in `backbone_status`.
+    pub backbone_envelopes: Arc<AtomicUsize>,
 }
 
 /// Emit one JSON event to every connected WebSocket/SSE client.
@@ -209,6 +217,8 @@ pub struct CoreRuntime {
     pub incoming_resources: HashMap<u32, (NodeId, u32)>,
     /// Resource bytes that arrived before their manifest message.
     pub pending_resources: HashMap<u32, (ResourceManifest, Vec<u8>)>,
+    pub backbone: Arc<BackboneManager>,
+    pub backbone_envelopes: Arc<AtomicUsize>,
     pub shutdown: tokio::sync::watch::Receiver<bool>,
 }
 
@@ -235,7 +245,13 @@ impl CoreRuntime {
 
     /// Transmit engine output frames and apply engine events.
     pub async fn process(&mut self, processed: Processed, now: u64) {
-        self.transmit(&processed);
+        self.process_from(processed, now, None).await;
+    }
+
+    /// Like [`CoreRuntime::process`], but records which peer a frame came from so point-to-point
+    /// transports (backbone) can avoid echoing it back.
+    pub async fn process_from(&mut self, processed: Processed, now: u64, exclude: Option<NodeId>) {
+        self.transmit(&processed, exclude);
         for event in processed.events {
             if let Err(e) = self.handle_event(event, now).await {
                 tracing::warn!(error = %e, "failed to handle engine event");
@@ -245,7 +261,7 @@ impl CoreRuntime {
 
     /// Send only the frames of a processing result. Used from event handlers (sending an ACK
     /// while handling an incoming message) to avoid recursing through the async event loop.
-    fn transmit(&self, processed: &Processed) {
+    fn transmit(&self, processed: &Processed, exclude: Option<NodeId>) {
         for outbound in &processed.outbound {
             let bytes = match outbound.frame.encode() {
                 Ok(bytes) => bytes,
@@ -254,10 +270,19 @@ impl CoreRuntime {
                     continue;
                 }
             };
+            // Only relayed copies of another node's frame must avoid the peer they arrived
+            // from; locally originated frames (ACKs, offers, our own announces) may target that
+            // same peer.
+            let exclude = if outbound.frame.src == self.node() {
+                None
+            } else {
+                exclude
+            };
             let frame = TransportFrame {
                 bytes,
                 mode: outbound.mode,
                 link: outbound.link,
+                exclude,
             };
             for transport in &self.transports {
                 transport.send(&frame);
@@ -1598,6 +1623,24 @@ impl CoreRuntime {
         Ok(())
     }
 
+    /// Enable/disable store-and-forward by switching the engine between relay and client role.
+    pub async fn set_store_forward(&mut self, enabled: bool) {
+        let mut config = self.engine.config().clone();
+        if enabled {
+            config.caps |= caps::STORE;
+            config.role = Role::Relay(RelayConfig {
+                store_capacity: 256,
+                store_ttl_ms: 72 * 3_600_000,
+                max_frames_per_min: 240,
+            });
+        } else {
+            config.caps &= !caps::STORE;
+            config.role = Role::Client;
+        }
+        self.engine.set_config(config);
+        self.refresh_snapshot().await;
+    }
+
     fn peer_identity(&self, node: NodeId) -> Option<PublicIdentity> {
         self.engine.node_info(node).map(|n| n.ident).or_else(|| {
             self.store
@@ -1633,6 +1676,8 @@ impl CoreRuntime {
 
     /// Rebuild the API snapshot from the engine + store.
     pub async fn refresh_snapshot(&mut self) {
+        self.backbone_envelopes
+            .store(self.engine.stats().stored_envelopes, Ordering::Relaxed);
         let snapshot = build_snapshot(SnapshotInput {
             engine: &self.engine,
             store: &self.store,
@@ -1642,6 +1687,8 @@ impl CoreRuntime {
             started_at_ms: self.started_at_ms,
             last_rssi: self.last_rssi,
             last_snr: self.last_snr,
+            backbone_configured: self.backbone.is_configured(),
+            backbone_running: self.backbone.is_running(),
         });
         *self.snapshot.write().await = snapshot;
     }
@@ -1855,6 +1902,10 @@ pub struct SnapshotInput<'a> {
     pub started_at_ms: u64,
     pub last_rssi: Option<i16>,
     pub last_snr: Option<f32>,
+    /// Whether backbone mode has been configured (show the backbone "radio" when true).
+    pub backbone_configured: bool,
+    /// Whether the backbone listener/client is live right now.
+    pub backbone_running: bool,
 }
 
 /// Build the JSON snapshot served by the API from live engine state.
@@ -1868,6 +1919,8 @@ pub fn build_snapshot(input: SnapshotInput<'_>) -> Snapshot {
         started_at_ms,
         last_rssi,
         last_snr,
+        backbone_configured,
+        backbone_running,
     } = input;
     let store_counts = StoreCountsJson {
         messages: store.message_count().unwrap_or(0),
@@ -1917,18 +1970,26 @@ pub fn build_snapshot(input: SnapshotInput<'_>) -> Snapshot {
         class: node_class_str(config.node_class()).to_string(),
         caps: engine.config().caps,
     };
-    let radios: Vec<RadioJson> = transports
+    let visible_transports: Vec<&TransportHandle> = transports
+        .iter()
+        .filter(|t| t.kind != "backbone" || backbone_configured)
+        .collect();
+    let radios: Vec<RadioJson> = visible_transports
         .iter()
         .map(|t| RadioJson {
             id: format!("{}", t.id),
             kind: t.kind.to_string(),
             label: t.label.clone(),
-            connected: true,
+            connected: if t.kind == "backbone" {
+                backbone_running
+            } else {
+                true
+            },
             profile: config.profile().name.to_string(),
             region: config.region().name.to_string(),
         })
         .collect();
-    let links: Vec<LinkJson> = transports
+    let links: Vec<LinkJson> = visible_transports
         .iter()
         .map(|t| LinkJson {
             link: t.id,

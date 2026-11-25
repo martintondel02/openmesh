@@ -1,0 +1,14 @@
+{
+  "enabled": true,
+  "bind": "0.0.0.0",
+  "port": 9443,
+  "auth": "token",
+  "token": "<REPLACE: 32 random bytes, base64url without padding; prefer letting the daemon generate it>",
+  "max_peers": 32,
+  "allowlist": [],
+  "store_forward": true,
+  "name": "oslo-backbone",
+  "public_host": "mesh.example.org",
+  "ping_interval_s": 30,
+  "stats_push_s": 30
+}

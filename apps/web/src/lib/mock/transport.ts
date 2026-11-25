@@ -10,6 +10,12 @@
  */
 
 import type {
+  BackboneConfig,
+  BackboneConfigPatch,
+  BackbonePeer,
+  BackboneStatus,
+} from '../../types/backbone';
+import type {
   AckData,
   ChannelCreatedData,
   ChannelsEventData,
@@ -29,6 +35,7 @@ import type { DemoDataset } from './data';
 import { createDemoDataset, demoChannelUrl, demoContactUrl } from './data';
 import { buildContactLink } from '../links';
 import { generateChannelPsk, bytesToBase64 } from '../utils';
+import { mergeBackboneConfig } from '../backbone';
 import { mulberry32 } from '../audio';
 import { estimateText } from '../airtime';
 import { bytesToHex } from '../utils';
@@ -86,6 +93,10 @@ export class MockTransport implements MeshTransport {
   private nodes: NodeData[];
   private config: ConfigData;
   private ownName: string;
+  private backboneConfig: BackboneConfig;
+  private backboneStatus: BackboneStatus;
+  private backbonePeers: BackbonePeer[];
+  private backboneTick = 0;
 
   constructor(options: MockTransportOptions = {}) {
     this.dataset = options.dataset ?? createDemoDataset();
@@ -94,6 +105,9 @@ export class MockTransport implements MeshTransport {
     this.contacts = structuredCloneSafe(this.dataset.contacts);
     this.nodes = structuredCloneSafe(this.dataset.nodes);
     this.ownName = this.dataset.ownName;
+    this.backboneConfig = structuredCloneSafe(this.dataset.backbone.config);
+    this.backboneStatus = structuredCloneSafe(this.dataset.backbone.status);
+    this.backbonePeers = structuredCloneSafe(this.dataset.backbone.peers);
     this.uptime = this.dataset.status.uptime_s;
     this.nextMsgId = 9000;
     this.statusIntervalMs = options.statusIntervalMs ?? 4_000;
@@ -158,6 +172,11 @@ export class MockTransport implements MeshTransport {
     this.later(() => this.emit('channels', { channels: this.channels }), 160);
     this.later(() => this.emit('status', status as unknown as Record<string, unknown>), 180);
     this.later(() => this.emit('sync_done', { messages: 12, nodes: this.nodes.length }), 220);
+    this.later(() => this.emit('backbone_status', this.backboneStatus as unknown as Record<string, unknown>), 240);
+    this.later(
+      () => this.emit('config', { ...this.config, backbone: this.backboneConfig } as unknown as Record<string, unknown>),
+      260,
+    );
 
     this.startStatusLoop();
     if (this.activityIntervalMs > 0) this.startActivityLoop();
@@ -186,6 +205,7 @@ export class MockTransport implements MeshTransport {
           },
         };
         this.emit('status', status as unknown as Record<string, unknown>);
+        this.tickBackbone();
         schedule();
       }, this.statusIntervalMs);
     };
@@ -312,6 +332,101 @@ export class MockTransport implements MeshTransport {
     };
   }
 
+  /* ---------------- backbone mode (demo) ---------------- */
+
+  private emitBackboneConfig(): void {
+    this.emit('config', { ...this.config, backbone: this.backboneConfig } as unknown as Record<string, unknown>);
+  }
+
+  private emitBackboneStatus(): void {
+    this.emit('backbone_status', this.backboneStatus as unknown as Record<string, unknown>);
+  }
+
+  private tickBackbone(): void {
+    this.backboneTick += 1;
+    const seconds = Math.max(1, Math.round(this.statusIntervalMs / 1000));
+    const framesIn = 18 + Math.round(this.rand() * 90);
+    const framesOut = 15 + Math.round(this.rand() * 80);
+    const bytesIn = framesIn * (70 + Math.round(this.rand() * 40));
+    const bytesOut = framesOut * (70 + Math.round(this.rand() * 40));
+    this.backboneStatus = {
+      ...this.backboneStatus,
+      uptime_s: this.backboneStatus.uptime_s + seconds,
+      frames_in: this.backboneStatus.frames_in + framesIn,
+      frames_out: this.backboneStatus.frames_out + framesOut,
+      bytes_in: this.backboneStatus.bytes_in + bytesIn,
+      bytes_out: this.backboneStatus.bytes_out + bytesOut,
+      throughput_in_bps: Math.round(((bytesIn * 8) / seconds) * (0.85 + this.rand() * 0.3)),
+      throughput_out_bps: Math.round(((bytesOut * 8) / seconds) * (0.85 + this.rand() * 0.3)),
+      store_forward_envelopes: Math.max(0, this.backboneStatus.store_forward_envelopes + (this.rand() < 0.18 ? 1 : this.rand() < 0.12 ? -1 : 0)),
+    };
+    if (!this.backboneConfig.running) {
+      this.backboneStatus = { ...this.backboneStatus, peers: 0, throughput_in_bps: 0, throughput_out_bps: 0 };
+      this.emitBackboneStatus();
+      return;
+    }
+    this.backboneStatus = { ...this.backboneStatus, peers: this.backbonePeers.length };
+    if (this.backbonePeers.length > 0 && this.backboneTick % 2 === 0) {
+      const index = Math.floor(this.rand() * this.backbonePeers.length) % this.backbonePeers.length;
+      const peer = this.backbonePeers[index]!;
+      const updated: BackbonePeer = {
+        ...peer,
+        frames_in: peer.frames_in + 4 + Math.round(this.rand() * 20),
+        frames_out: peer.frames_out + 3 + Math.round(this.rand() * 18),
+        bytes_in: peer.bytes_in + 320 + Math.round(this.rand() * 1600),
+        bytes_out: peer.bytes_out + 280 + Math.round(this.rand() * 1500),
+        rtt_ms: Math.max(1, Math.round((peer.rtt_ms ?? 40) + (this.rand() - 0.5) * 6)),
+        last_seen_ms: Date.now(),
+      };
+      this.backbonePeers = this.backbonePeers.map((candidate, candidateIndex) => (candidateIndex === index ? updated : candidate));
+      this.emit('backbone_peer', { action: 'updated', peer: updated });
+    }
+    this.emitBackboneStatus();
+  }
+
+  private handleGetBackbone(): void {
+    this.emitBackboneStatus();
+    this.emitBackboneConfig();
+  }
+
+  private handleSetBackboneConfig(patch: BackboneConfigPatch): void {
+    const wasEnabled = this.backboneConfig.enabled;
+    this.backboneConfig = mergeBackboneConfig(this.backboneConfig, patch);
+    const shouldRun = this.backboneConfig.enabled;
+    this.backboneConfig = { ...this.backboneConfig, running: shouldRun };
+    this.backboneStatus = { ...this.backboneStatus, running: shouldRun };
+    if (!wasEnabled && shouldRun) {
+      this.backbonePeers = structuredCloneSafe(this.dataset.backbone.peers);
+      this.backboneStatus = { ...this.backboneStatus, peers: this.backbonePeers.length };
+      for (const peer of this.backbonePeers) this.emit('backbone_peer', { action: 'joined', peer });
+    }
+    if (wasEnabled && !shouldRun) {
+      for (const peer of this.backbonePeers) this.emit('backbone_peer', { action: 'left', peer });
+      this.backbonePeers = [];
+      this.backboneStatus = { ...this.backboneStatus, peers: 0 };
+    }
+    this.emitBackboneConfig();
+    this.emitBackboneStatus();
+    this.emit('config', this.config as unknown as Record<string, unknown>);
+  }
+
+  private handleBackboneKick(nodeId: string): void {
+    const peer = this.backbonePeers.find((candidate) => candidate.node_id === nodeId);
+    if (!peer) return;
+    this.backbonePeers = this.backbonePeers.filter((candidate) => candidate.node_id !== nodeId);
+    this.backboneStatus = { ...this.backboneStatus, peers: this.backbonePeers.length };
+    this.emit('backbone_peer', { action: 'left', peer });
+    this.emitBackboneStatus();
+  }
+
+  private handleBackboneRotateToken(commandId: string): void {
+    // Demo-only token, clearly not a bearer secret (see src/lib/mock/data.ts).
+    const token = 'demo-rotated-token-not-a-real-secret';
+    this.backboneConfig = { ...this.backboneConfig, token_set: true, auth: 'token' };
+    this.emitBackboneConfig();
+    this.emit('backbone_token', { token }, commandId);
+  }
+
   disconnect(): void {
     this.connected = false;
     this.clearTimers();
@@ -409,6 +524,18 @@ export class MockTransport implements MeshTransport {
         return;
       case 'radio_scan':
         this.emit('error', { code: 'radio_busy', message: 'Scan is not supported by the simulated radio.' }, commandId);
+        return;
+      case 'get_backbone':
+        this.handleGetBackbone();
+        return;
+      case 'set_backbone_config':
+        this.handleSetBackboneConfig(data as BackboneConfigPatch);
+        return;
+      case 'backbone_kick':
+        this.handleBackboneKick(String(data.node_id ?? ''));
+        return;
+      case 'backbone_rotate_token':
+        this.handleBackboneRotateToken(commandId);
         return;
       default:
         this.emit('error', { code: 'bad_request', message: `Unknown command “${type}”` }, commandId);

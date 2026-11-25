@@ -1,0 +1,20 @@
+# Build-context exclusions for packaging/Dockerfile (BuildKit picks up <Dockerfile>.dockerignore).
+# Keep the context small: only the Rust workspace and apps/web are needed.
+.git/
+.github/
+target/
+**/*.rs.bk
+**/node_modules/
+**/dist/
+apps/android/
+apps/flasher/
+firmware/
+tools/
+protocol/
+scripts/
+CHANGELOG.md
+CONTRIBUTING.md
+SECURITY.md
+CODE_OF_CONDUCT.md
+packaging/
+apps/web/src-tauri/

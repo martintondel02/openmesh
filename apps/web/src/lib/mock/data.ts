@@ -12,6 +12,12 @@
  */
 
 import type {
+  BackboneConfig,
+  BackbonePeer,
+  BackboneSetup,
+  BackboneStatus,
+} from '../../types/backbone';
+import type {
   ConfigData,
   ConfigChannel,
   ContactData,
@@ -28,6 +34,7 @@ import { generateChannelPsk } from '../utils';
 import { bytesToBase64, hexToBytes } from '../utils';
 import { mulberry32 } from '../audio';
 import { buildChannelLink, buildContactLink } from '../links';
+import { buildBackboneConnectionString, buildFallbackSetup } from '../backbone';
 
 export interface DemoMessage extends MessageData {
   /** Local-only display URL (SVG data URL for seeded images, WAV for voice). */
@@ -51,6 +58,15 @@ export interface DemoMedia {
   name: string;
 }
 
+export interface DemoBackbone {
+  config: BackboneConfig;
+  status: BackboneStatus;
+  peers: BackbonePeer[];
+  setup: BackboneSetup;
+  /** Demo-only bearer token; the real API never returns it outside setup/rotate. */
+  token: string;
+}
+
 export interface DemoDataset {
   now: number;
   ownNodeId: string;
@@ -70,6 +86,7 @@ export interface DemoDataset {
   trailPhoto: DemoMedia;
   cabinMap: DemoMedia;
   voiceNote: { dataUrl: string; waveform: number[]; durationMs: number };
+  backbone: DemoBackbone;
 }
 
 /* ------------------------------------------------------------------ */
@@ -86,6 +103,8 @@ export const DEMO_T1000E_ID = '91a2b3c4d5e6f708';
 export const DEMO_TRAIL_TRACKER_ID = '5e6f7a8b9c0d1e2f';
 export const DEMO_KOLSAS_TRACKER_ID = '2f3e4d5c6b7a8091';
 
+export const DEMO_BACKBONE_PEER_LOFOTEN = '4a5b6c7d8e9f0a1b';
+export const DEMO_BACKBONE_PEER_TROMSO = '8f7e6d5c4b3a2019';
 export const DEMO_CHANNEL_FAMILY = 'f0e1d2c3b4a59687';
 export const DEMO_CHANNEL_TUR = '1a2b3c4d5e6f7081';
 
@@ -760,7 +779,7 @@ export function createDemoDataset(nowMs: number = Date.now()): DemoDataset {
         region: 'EU868',
       },
     ],
-    features: ['images', 'voice', 'map', 'groups', 'store_forward'],
+    features: ['images', 'voice', 'map', 'groups', 'store_forward', 'backbone'],
     store: { messages: messages.length + groupMessages.length, contacts: contacts.length, channels: channels.length },
   };
 
@@ -786,9 +805,109 @@ export function createDemoDataset(nowMs: number = Date.now()): DemoDataset {
   };
   positionHistories[ownId]!.push(ownPosition);
 
+  /* ---------------- backbone mode (OBB/1, v0.2) ---------------- */
+  // Deliberately obvious demo token — never a real-looking bearer secret.
+  const backboneToken = 'demo-backbone-token-not-a-real-secret';
+  const backboneConfig: BackboneConfig = {
+    enabled: true,
+    running: true,
+    bind: '0.0.0.0',
+    port: 9443,
+    auth: 'token',
+    token_set: true,
+    max_peers: 32,
+    allowlist: [],
+    store_forward: true,
+    name: 'oslo-backbone',
+    public_host: 'backbone.openmesh.example',
+    ping_interval_s: 30,
+    totals: { frames_in: 1_842_112, frames_out: 1_799_450, bytes_in: 41_889_120, bytes_out: 38_912_450, peers: 3 },
+  };
+  const backboneStatus: BackboneStatus = {
+    running: true,
+    peers: 3,
+    uptime_s: 1_234_567,
+    frames_in: 1_842_112,
+    frames_out: 1_799_450,
+    bytes_in: 41_889_120,
+    bytes_out: 38_912_450,
+    throughput_in_bps: 8_240,
+    throughput_out_bps: 7_610,
+    store_forward_envelopes: 12,
+    auth_failures: 17,
+    last_error: null,
+  };
+  const backboneConnectionString = buildBackboneConnectionString({
+    host: backboneConfig.public_host,
+    port: backboneConfig.port,
+    token: backboneToken,
+    nodeId: ownId,
+    name: backboneConfig.name,
+  });
+  const backbonePeers: BackbonePeer[] = [
+    {
+      node_id: DEMO_BACKBONE_PEER_LOFOTEN,
+      name: 'lofoten-gateway',
+      direction: 'inbound',
+      remote_addr: '84.209.44.19:51824',
+      connected_at_ms: nowMs - 2 * HOUR - 13 * MINUTE,
+      last_seen_ms: nowMs - 8_000,
+      frames_in: 642_118,
+      frames_out: 598_004,
+      bytes_in: 18_412_880,
+      bytes_out: 16_940_120,
+      rtt_ms: 38,
+      app_version: '0.2.0',
+      auth: 'token',
+    },
+    {
+      node_id: DEMO_BACKBONE_PEER_TROMSO,
+      name: 'tromso-relay',
+      direction: 'outbound',
+      remote_addr: 'vps-2.openmesh.example:9443',
+      connected_at_ms: nowMs - 47 * MINUTE,
+      last_seen_ms: nowMs - 31_000,
+      frames_in: 184_220,
+      frames_out: 201_988,
+      bytes_in: 4_912_400,
+      bytes_out: 5_388_120,
+      rtt_ms: 61,
+      app_version: '0.2.0',
+      auth: 'token',
+    },
+    {
+      node_id: DEMO_HYTTA_GATEWAY_ID,
+      name: 'hytta-gateway',
+      direction: 'inbound',
+      remote_addr: '192.168.1.44:60122',
+      connected_at_ms: nowMs - 6 * DAY,
+      last_seen_ms: nowMs - 2_000,
+      frames_in: 1_015_774,
+      frames_out: 999_458,
+      bytes_in: 18_563_840,
+      bytes_out: 16_584_210,
+      rtt_ms: 4,
+      app_version: '0.2.0',
+      auth: 'token',
+    },
+  ];
+  const backboneSetup: BackboneSetup = buildFallbackSetup({
+    config: backboneConfig,
+    connectionString: backboneConnectionString,
+    panelUrl: 'http://127.0.0.1:8787/backbone',
+  });
+  const backbone: DemoBackbone = {
+    config: backboneConfig,
+    status: backboneStatus,
+    peers: backbonePeers,
+    setup: backboneSetup,
+    token: backboneToken,
+  };
+
   return {
     now: nowMs,
     ownNodeId: ownId,
+    backbone,
     ownName: 'martin-nord',
     ownPosition,
     hello,

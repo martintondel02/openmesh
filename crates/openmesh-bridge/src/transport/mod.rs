@@ -18,6 +18,7 @@ use tokio::sync::mpsc;
 
 use openmesh_core::{LinkId, LinkInfo, SendMode};
 
+pub mod backbone;
 pub mod sim;
 pub mod tcp;
 pub mod udp;
@@ -33,6 +34,9 @@ pub struct TransportFrame {
     pub mode: SendMode,
     /// Preferred link when the engine is answering a link-bound peer.
     pub link: Option<LinkId>,
+    /// Peer this frame arrived from: point-to-point transports must not echo it back
+    /// (backbone mode delivers to every peer except the origin).
+    pub exclude: Option<openmesh_core::NodeId>,
 }
 
 /// Inbound data handed from a transport to the protocol engine.

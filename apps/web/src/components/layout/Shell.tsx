@@ -6,6 +6,7 @@ import {
   Map,
   MessageSquare,
   Radio,
+  RadioTower,
   RefreshCw,
   Settings,
   Users,
@@ -18,6 +19,7 @@ import type { LucideIcon } from 'lucide-react';
 import { useShallow } from 'zustand/react/shallow';
 import { useAppStore } from '../../store/app';
 import { selectMeshSummary, selectTotalUnread } from '../../store/selectors';
+import { selectBackboneAvailable } from '../../store/backbone-selectors';
 import { cn, formatNodeId, shortenNodeId } from '../../lib/utils';
 import { Avatar, Badge, Button } from '../ui/primitives';
 import { copyText } from '../ui/signals';
@@ -57,7 +59,7 @@ export function LogoMark({ size = 28, className }: { size?: number; className?: 
 /* ------------------------------------------------------------------ */
 
 interface NavItem {
-  screen: 'chats' | 'map' | 'nodes' | 'contacts' | 'settings';
+  screen: 'chats' | 'map' | 'nodes' | 'contacts' | 'backbone' | 'settings';
   label: string;
   icon: LucideIcon;
 }
@@ -67,6 +69,7 @@ const NAV_ITEMS: NavItem[] = [
   { screen: 'map', label: 'Map', icon: Map },
   { screen: 'nodes', label: 'Nodes', icon: Radio },
   { screen: 'contacts', label: 'Contacts', icon: Users },
+  { screen: 'backbone', label: 'Backbone', icon: RadioTower },
   { screen: 'settings', label: 'Settings', icon: Settings },
 ];
 
@@ -291,8 +294,12 @@ function Sidebar() {
   const connection = useAppStore((state) => state.connection);
   const mode = useAppStore((state) => state.mode);
   const bridgeVersion = useAppStore((state) => state.bridgeVersion);
+  const backboneAvailable = useAppStore((state) => selectBackboneAvailable(state));
 
   const meta = CONNECTION_META[connection] ?? CONNECTION_META.idle;
+  const mainItems = NAV_ITEMS.filter(
+    (item) => item.screen !== 'settings' && (item.screen !== 'backbone' || backboneAvailable),
+  );
 
   return (
     <aside className="hidden w-[74px] shrink-0 flex-col border-r border-white/[0.06] bg-ink-925/80 px-2.5 pb-3 pt-3 md:flex xl:w-[232px] xl:px-3.5">
@@ -305,7 +312,7 @@ function Sidebar() {
       </div>
 
       <nav aria-label="Primary" className="flex flex-col gap-0.5">
-        {NAV_ITEMS.slice(0, 4).map((item) => {
+        {mainItems.map((item) => {
           const Icon = item.icon;
           const active = screen === item.screen;
           return (
@@ -395,6 +402,7 @@ const SCREEN_TITLES: Record<string, { title: string; subtitle: string }> = {
   map: { title: 'Mesh map', subtitle: 'Live node positions and links' },
   nodes: { title: 'Nodes', subtitle: 'Everything your radio has heard' },
   contacts: { title: 'Contacts', subtitle: 'Verified identities you trust' },
+  backbone: { title: 'Backbone', subtitle: 'Always-on relay for distant meshes' },
   settings: { title: 'Settings', subtitle: 'Identity, radio and bridge' },
 };
 
@@ -404,6 +412,9 @@ function TopBar() {
   const bridgeStatus = useAppStore((state) => state.bridgeStatus);
   const config = useAppStore((state) => state.config);
   const summary = useAppStore(useShallow((state) => selectMeshSummary(state)));
+  const backboneConfig = useAppStore((state) => state.backboneConfig);
+  const backbonePeers = useAppStore((state) => state.backbonePeers.length);
+  const setScreen = useAppStore((state) => state.setScreen);
   const meta = SCREEN_TITLES[screen] ?? SCREEN_TITLES.chats!;
   const threadOpen = screen === 'chats' && Boolean(activeThread);
 
@@ -436,6 +447,17 @@ function TopBar() {
             <span className="h-1 w-1 rounded-full bg-emerald-400/70" />
             {config?.radio.profile.replace(/_/g, ' ') ?? '—'} · {config?.radio.region ?? '—'}
           </span>
+          {backboneConfig?.enabled ? (
+            <button
+              type="button"
+              onClick={() => setScreen('backbone')}
+              title="Open the backbone control panel"
+              className="focus-ring hidden items-center gap-1.5 rounded-full border border-sky-400/20 bg-sky-400/[0.07] px-2 py-0.5 text-3xs font-medium text-sky-300/90 hover:bg-sky-400/[0.12] xl:flex"
+            >
+              <RadioTower className="h-3 w-3" aria-hidden="true" />
+              backbone · {backbonePeers} peers
+            </button>
+          ) : null}
         </div>
         <ConnectionPill compact />
         <NodeIdentityChip />
@@ -494,13 +516,15 @@ function MobileNav() {
   const screen = useAppStore((state) => state.screen);
   const setScreen = useAppStore((state) => state.setScreen);
   const unread = useAppStore((state) => selectTotalUnread(state));
+  const backboneAvailable = useAppStore((state) => selectBackboneAvailable(state));
+  const items = NAV_ITEMS.filter((item) => item.screen !== 'backbone' || backboneAvailable);
 
   return (
     <nav
       aria-label="Primary"
       className="safe-bottom relative z-30 flex shrink-0 items-stretch border-t border-white/[0.07] bg-ink-925/95 backdrop-blur-md md:hidden"
     >
-      {NAV_ITEMS.map((item) => {
+      {items.map((item) => {
         const Icon = item.icon;
         const active = screen === item.screen;
         return (

@@ -1,0 +1,68 @@
+# OpenMesh backbone (system-wide unit).
+#
+# Install:
+#   sudo systemd-sysusers packaging/sysusers/openmesh.conf
+#   sudo install -m0644 packaging/systemd/openmesh-backbone.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now openmesh-backbone.service
+#
+# The binaries and web bundle are installed by docs/INSTALL.md (system install):
+#   /usr/local/bin/openmesh-bridge, /usr/local/bin/openmesh-cli
+#   /usr/share/openmesh/web
+#
+# Configuration (including the OBB/1 backbone token) is generated on first run at
+# /var/lib/openmesh/backbone.json (mode 0600). `--token-file` below is the *bridge API* token
+# used by the local panel/REST API (mode 0600), not the OBB secret. Neither file is created here:
+# StateDirectory/ConfigurationDirectory create the directories with the right ownership and
+# modes, and the daemon writes the secrets.
+[Unit]
+Description=OpenMesh backbone relay (openmesh-bridge)
+Documentation=https://github.com/martintondel02/openmesh/blob/main/docs/INSTALL.md
+Documentation=https://github.com/martintondel02/openmesh/blob/main/docs/operations/backbone-deployment.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=openmesh
+Group=openmesh
+ExecStart=/usr/local/bin/openmesh-bridge backbone \
+    --data-dir /var/lib/openmesh \
+    --token-file /etc/openmesh/bridge-token \
+    --listen 127.0.0.1:8787 \
+    --serve-web /usr/share/openmesh/web
+
+StateDirectory=openmesh
+StateDirectoryMode=0700
+ConfigurationDirectory=openmesh
+ConfigurationDirectoryMode=0750
+WorkingDirectory=/var/lib/openmesh
+Environment=RUST_LOG=info
+
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=20
+KillSignal=SIGTERM
+
+# Hardening. The backbone needs to accept TCP connections and write its data/config dirs only.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/openmesh /etc/openmesh
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+CapabilityBoundingSet=
+AmbientCapabilities=
+MemoryMax=512M
+TasksMax=256
+LimitNOFILE=4096
+
+[Install]
+WantedBy=multi-user.target

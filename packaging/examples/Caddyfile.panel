@@ -1,0 +1,34 @@
+# Caddyfile — TLS + HTTP basic auth in front of the OpenMesh panel/API (127.0.0.1:8787).
+#
+# Why: the bridge API token is a bearer secret and the panel is plain HTTP on loopback.
+# Terminate HTTPS here instead of exposing 8787. WebSocket upgrades (the panel uses /api/ws)
+# are proxied transparently by Caddy.
+#
+# Generate the password hash:  caddy hash-password --plaintext 'choose-a-strong-password'
+# Replace mesh.example.org, the email and the hash. Then:
+#   sudo cp Caddyfile.panel /etc/caddy/Caddyfile
+#   sudo systemctl reload caddy
+#
+# Note: Caddy manages the TLS certificate automatically (ports 80/443 must be reachable).
+
+{
+    email ops@example.org
+}
+
+mesh.example.org {
+    encode zstd gzip
+
+    basic_auth {
+        admin $2a$14$REPLACE_WITH_BCRYPT_HASH_FROM_caddy_hash-password
+    }
+
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains"
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "DENY"
+        Referrer-Policy "no-referrer"
+        -Server
+    }
+
+    reverse_proxy 127.0.0.1:8787
+}

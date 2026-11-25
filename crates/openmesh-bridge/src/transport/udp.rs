@@ -170,6 +170,7 @@ mod tests {
             bytes: frame_bytes(NodeId::new([1; 8]), NodeId::new([2; 8]), 1),
             mode: openmesh_core::SendMode::Flood,
             link: Some(99),
+            exclude: None,
         });
         shutdown_tx.send(true).unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;

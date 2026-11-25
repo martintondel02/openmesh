@@ -1,0 +1,38 @@
+# OpenMesh backbone (systemd --user unit template).
+#
+# Copy to ~/.config/systemd/user/openmesh-backbone.service and adjust the paths if your
+# binaries/web bundle are not in the installer's default locations, then:
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now openmesh-backbone.service
+#   loginctl enable-linger "$USER"    # optional: keep running after logout
+#
+# scripts/install.sh --service writes this unit with concrete absolute paths substituted.
+[Unit]
+Description=OpenMesh backbone relay (openmesh-bridge)
+Documentation=https://github.com/martintondel02/openmesh/blob/main/docs/INSTALL.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/openmesh-bridge backbone --data-dir %h/.openmesh --listen 127.0.0.1:8787 --serve-web %h/.local/share/openmesh/web
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=20
+WorkingDirectory=%h/.openmesh
+Environment=RUST_LOG=info
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/.openmesh %h/.config/openmesh
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryMax=512M
+
+[Install]
+WantedBy=default.target

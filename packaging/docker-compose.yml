@@ -1,0 +1,58 @@
+# OpenMesh backbone — Compose example.
+#
+#   cd packaging
+#   docker compose up -d --build
+#   curl -fsS http://127.0.0.1:8787/api/health
+#   open the panel at http://127.0.0.1:8787/backbone  (SSH tunnel or TLS proxy for remote)
+#
+# Networking: `network_mode: host` is used on Linux so the backbone sees each peer's real IP
+# (per-IP handshake rate limiting and firewalling depend on it) and so port 9443 is directly
+# reachable. On Docker Desktop (macOS/Windows) host networking is limited/unavailable; replace
+# it with `ports: ["9443:9443", "127.0.0.1:8787:8787"]` and accept that all peers appear to come
+# from the Docker gateway IP (rate limiting becomes global, not per-IP).
+#
+# State: the named volume holds identity.key, backbone.json, bridge-token, the redb store and
+# attachments. Back it up (docker run --rm -v volume:/data ... tar) or use a bind mount; see
+# docs/operations/backbone-deployment.md.
+#
+# The panel binds 127.0.0.1:8787 inside the host network namespace: reach it from the host, an
+# SSH tunnel, or a TLS reverse proxy. Never publish the API port directly.
+
+name: openmesh
+
+services:
+  backbone:
+    build:
+      context: ..
+      dockerfile: packaging/Dockerfile
+    image: openmesh-backbone:0.2.0
+    container_name: openmesh-backbone
+    restart: unless-stopped
+    network_mode: host
+    command:
+      - backbone
+      - --data-dir
+      - /var/lib/openmesh
+      - --serve-web
+      - /usr/share/openmesh/web
+      - --listen
+      - 127.0.0.1:8787
+    volumes:
+      - openmesh-data:/var/lib/openmesh
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    pids_limit: 256
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8787/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+volumes:
+  openmesh-data:

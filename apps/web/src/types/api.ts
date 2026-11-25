@@ -6,6 +6,8 @@
  * Per spec §7, clients MUST ignore unknown event types and unknown fields.
  */
 
+import type { BackboneConfig, BackbonePeerEvent, BackboneStatusEvent, BackboneTokenEvent } from './backbone';
+
 /** Every WS message in either direction (spec §2). */
 export interface Envelope<T = unknown> {
   v: number;
@@ -213,6 +215,8 @@ export interface ConfigData {
   };
   features: { auto_announce: boolean; store_forward: boolean; position_sharing: boolean };
   channels: ConfigChannel[];
+  /** Optional backbone section pushed with `config` after set_backbone_config (BACKBONE.md §7.2). */
+  backbone?: BackboneConfig;
 }
 
 export interface ContactData {
@@ -291,6 +295,9 @@ export interface ServerEventMap {
   telemetry: TelemetryData;
   store_offer: StoreOfferData;
   resource_progress: ResourceProgressData;
+  backbone_status: BackboneStatusEvent;
+  backbone_peer: BackbonePeerEvent;
+  backbone_token: BackboneTokenEvent;
   config: ConfigData;
   sync_done: SyncDoneData;
   nodes: NodesEventData;
@@ -360,7 +367,7 @@ export interface Contact extends ContactData {
   seeded?: boolean;
 }
 
-export type Screen = 'chats' | 'map' | 'nodes' | 'contacts' | 'settings';
+export type Screen = 'chats' | 'map' | 'nodes' | 'contacts' | 'backbone' | 'settings';
 
 /** A conversation row in the chats sidebar. */
 export interface Conversation {

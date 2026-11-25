@@ -31,6 +31,7 @@ Related: [Architecture](architecture/ARCHITECTURE.md) ·
 | Milestone | Theme | Target (weeks after v0.1.0) | Nature |
 | --- | --- | --- | --- |
 | **M0** | v0.1.0: spec, core, bridge, web, firmware, simulator, flashers, docs, Android scaffold | 0 (delivered as this milestone) | repository/CI |
+| **v0.2** | Backbone mode: OBB/1 authenticated TCP relay, live control panel, installer + ops docs (ships alongside M1) | weeks 1–2 | infrastructure |
 | **M1** | Field-ready text mesh: hardware bring-up, store-forward tuning, OTA, invites, airtime caps | weeks 1–8 | hardware + tuning |
 | **M2** | Android GA + companion polish + background sync + media UX | weeks 9–20 | mobile product |
 | **M3** | OMP/2: ratchets, optional directed routing, voice calls (gated) | weeks 21–34 | protocol |
@@ -90,6 +91,19 @@ repository that another person can pick up.
 * Multi-channel radio support (M5).
 
 ---
+
+## 3b. v0.2 — Backbone mode (shipped with M1)
+
+**Delivered:** OBB/1 authenticated TCP relay (`hello → challenge → HMAC(token) → welcome`), peer
+table with live frame/byte/RTT accounting, kick, token rotation, allowlist, max peers and
+store-and-forward toggle; a control panel at `/backbone` with a copy-button setup wizard; client
+mode (`openmesh-bridge join`), `install-service --backbone`, a sha256-verified one-line installer,
+hardened systemd units, Docker/compose, and deployment/TLS/monitoring guides.
+See [INSTALL.md](INSTALL.md), [operations/backbone-deployment.md](operations/backbone-deployment.md),
+[ADR 0009](adr/0009-backbone-mode.md). Wire protocol unchanged (OMP/1).
+
+**Still open from this theme:** native TLS in OBB/2, per-peer identity instead of a shared token,
+panel session hardening, multi-backbone auto-peering/federation (currently manual `join` links).
 
 ## 4. M1 — Field-ready text mesh (weeks 1–8)
 

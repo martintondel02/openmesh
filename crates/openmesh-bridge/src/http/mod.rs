@@ -20,6 +20,7 @@ use crate::attachments::MAX_ATTACHMENT_BYTES;
 use crate::json::{b64, error_json, event_json, parse_node_id};
 use crate::runtime::{self, Shared};
 use crate::store::Store;
+use crate::transport::backbone::BackboneManager;
 
 /// Maximum HTTP header block we accept.
 const MAX_HEADER_BYTES: usize = 64 * 1024;
@@ -30,6 +31,7 @@ const MAX_JSON_BODY: usize = 1024 * 1024;
 pub struct HttpState {
     pub token: Arc<String>,
     pub shared: Arc<Shared>,
+    pub backbone: Arc<BackboneManager>,
     pub web_root: Option<PathBuf>,
     pub shutdown: watch::Receiver<bool>,
 }
@@ -332,6 +334,67 @@ async fn route(request: &HttpRequest, state: &Arc<HttpState>) -> HttpResponse {
                 Ok(Some((meta, bytes))) => HttpResponse::bytes(200, meta.mime, bytes),
                 Ok(None) => HttpResponse::error(404, "not_found"),
                 Err(e) => internal_error(e),
+            }
+        }
+        ("GET", "/api/backbone") => HttpResponse::json(200, state.backbone.describe().await),
+        ("GET", "/api/backbone/peers") => {
+            HttpResponse::json(200, state.backbone.peers_view().await)
+        }
+        ("POST", "/api/backbone/config") => {
+            let body: serde_json::Value = match serde_json::from_slice(&request.body) {
+                Ok(value) => value,
+                Err(e) => {
+                    return HttpResponse::json(
+                        400,
+                        serde_json::json!({ "error": "bad_request", "message": e.to_string() }),
+                    );
+                }
+            };
+            match state.backbone.update_config(&body).await {
+                Ok((mut view, restarted)) => {
+                    if let Some(object) = view.as_object_mut() {
+                        object.insert("restarted".into(), serde_json::json!(restarted));
+                    }
+                    HttpResponse::json(200, view)
+                }
+                Err(e) => HttpResponse::json(
+                    400,
+                    serde_json::json!({ "error": "bad_request", "message": e }),
+                ),
+            }
+        }
+        ("POST", "/api/backbone/token/rotate") => match state.backbone.rotate_token().await {
+            Ok(Some(token)) => HttpResponse::json(200, serde_json::json!({ "token": token })),
+            Ok(None) => HttpResponse::json(200, serde_json::json!({ "enabled": false })),
+            Err(e) => HttpResponse::json(
+                500,
+                serde_json::json!({ "error": "internal", "message": e }),
+            ),
+        },
+        ("GET", "/api/backbone/setup") => HttpResponse::json(200, state.backbone.setup().await),
+        ("GET", "/api/backbone/qr.svg") => match state.backbone.setup_qr_svg().await {
+            Ok(Some(svg)) => HttpResponse::bytes(200, "image/svg+xml", svg.into_bytes()),
+            Ok(None) => HttpResponse::json(200, serde_json::json!({ "enabled": false })),
+            Err(e) => HttpResponse::json(
+                500,
+                serde_json::json!({ "error": "internal", "message": e }),
+            ),
+        },
+        ("DELETE", _) if path.starts_with("/api/backbone/peers/") => {
+            let id = &path["/api/backbone/peers/".len()..];
+            let Some(node) = crate::json::parse_node_id(id) else {
+                return HttpResponse::json(
+                    400,
+                    serde_json::json!({ "error": "bad_request", "message": "invalid node id" }),
+                );
+            };
+            match state.backbone.kick(node).await {
+                Some(true) => HttpResponse::json(200, serde_json::json!({ "disconnected": true })),
+                Some(false) => HttpResponse::json(
+                    404,
+                    serde_json::json!({ "disconnected": false, "error": "not_found" }),
+                ),
+                None => HttpResponse::json(200, serde_json::json!({ "enabled": false })),
             }
         }
         ("GET", _) if path.starts_with("/api/") => HttpResponse::error(404, "not_found"),

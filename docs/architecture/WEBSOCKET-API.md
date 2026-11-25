@@ -201,7 +201,13 @@ Same shape as `message`; only changed fields are present plus `msg_id`.
   "res_id": 42, "received": 12, "total": 29, "direction": "in" } }
 ```
 
-### 3.12 `config`
+### 3.12 `backbone_status` and `backbone_peer`
+
+Backbone-mode events are specified in [BACKBONE.md](BACKBONE.md) §7.2 and are only emitted when
+the bridge runs with a backbone interface (or has an outbound backbone link). Clients MUST ignore
+them when the `hello` payload does not list `"backbone"` in `features`.
+
+### 3.13 `config`
 
 Full configuration snapshot (reply to `get_config` and pushed after `set_config`).
 
@@ -282,6 +288,10 @@ The server replies with a sequence of `node`, `message`, `group_message`, `confi
 | `get_messages` | `{ "peer": "...", "before_ms": null, "limit": 100 }` | → `messages` event `{ "messages": [...] }`. |
 | `get_nodes_map` | `{}` | → `nodes` (clients can render from `node` events; this is the bulk fetch). |
 | `radio_scan` | `{}` | Reserved; → `error{code:"radio_busy"}` when unsupported. |
+| `get_backbone` | `{}` | → `backbone_status` + `config` (backbone section). See [BACKBONE.md](BACKBONE.md). |
+| `set_backbone_config` | partial config object | Applies live where possible; returns `config`. |
+| `backbone_kick` | `{ "node_id": "..." }` | Disconnects one backbone peer. |
+| `backbone_rotate_token` | `{}` | Rotates the backbone token; returns it **once** in `backbone_token`. |
 
 ### 4.6 Example exchange
 
@@ -339,3 +349,27 @@ Attachment ids are `att_<12 hex>`; storage lives under `~/.local/share/openmesh/
 * New event/command types MAY be added at any time; clients MUST ignore unknown `type`s.
 * Fields MAY be added to `data` objects; clients MUST ignore unknown fields.
 * Removing or renaming a field requires a `v` bump and a bridge release note.
+
+
+---
+
+## 8. Backbone control surface
+
+Backbone mode (always-on TCP relay with a public port and a control panel) adds a small set of
+REST endpoints and WS events on top of this API. The full contract — OBB/1 handshake, peer
+accounting, configuration fields, setup payload and security model — lives in
+[BACKBONE.md](BACKBONE.md).
+
+| Method | Path | Auth | Purpose |
+| --- | --- | --- | --- |
+| GET | `/api/backbone` | yes | Backbone config + live totals (token redacted) |
+| GET | `/api/backbone/peers` | yes | Connected peer list with per-peer counters |
+| POST | `/api/backbone/config` | yes | Partial live update (enable/bind/port/max_peers/allowlist/store_forward/public_host) |
+| POST | `/api/backbone/token/rotate` | yes | New token returned once; old token invalidated |
+| DELETE | `/api/backbone/peers/:node_id` | yes | Kick a peer |
+| GET | `/api/backbone/setup` | yes | Onboarding steps, firewall commands, systemd unit, connection string |
+| GET | `/api/backbone/qr.svg` | yes | QR code of the connection string |
+
+When the bridge is not in backbone mode these endpoints return
+`{"enabled": false}` (HTTP 200) rather than 404, so the panel can offer to enable backbone mode
+with one click (`POST /api/backbone/config {"enabled": true}`).

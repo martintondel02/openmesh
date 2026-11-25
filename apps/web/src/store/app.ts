@@ -34,6 +34,9 @@ import type {
   StoreOfferData,
   TransportMode,
 } from '../types/api';
+import type { BackboneConfig, BackboneConfigPatch, BackbonePeer, BackbonePeerEvent, BackboneSetup, BackboneStatus, BackboneStatusEvent } from '../types/backbone';
+import { BackboneRestClient } from '../lib/backbone-api';
+import { applyPeerEvent, buildBackboneConnectionString, buildFallbackSetup, mergeBackboneConfig, normalizeBackboneConfig, normalizeBackboneSetup } from '../lib/backbone';
 import type { ConfigPatch } from './reducers';
 import { deriveDelivery, mergeConfig, removeContact as removeContactReducer, upsertChannel, upsertGroupMessage, upsertMessage, upsertNode, applyAck, applyMessageUpdate, appendPositionHistory } from './reducers';
 import type { MeshTransport, TransportStatus } from '../lib/transport';
@@ -74,11 +77,13 @@ type Resolver<T> = { resolve: (value: T) => void; reject: (error: Error) => void
 
 const SETTINGS_KEY = 'openmesh.settings.v1';
 
-const SCREEN_NAMES: Screen[] = ['chats', 'map', 'nodes', 'contacts', 'settings'];
+const SCREEN_NAMES: Screen[] = ['chats', 'map', 'nodes', 'contacts', 'backbone', 'settings'];
 
 /** Allow deep links/screenshots: ?screen=map&demo=1 */
 function initialScreenFromUrl(): Screen {
   try {
+    // Deep link: /backbone (route form) or ?screen=backbone (query form).
+    if (/\/backbone\/?$/.test(window.location.pathname)) return 'backbone';
     const requested = new URLSearchParams(window.location.search).get('screen');
     if (requested && (SCREEN_NAMES as string[]).includes(requested)) return requested as Screen;
   } catch {
@@ -241,6 +246,20 @@ export interface AppState {
   resolveAttachmentUrl: (attachmentId: string, mime?: string | null) => Promise<string>;
   inspectNode: (nodeId: string | null) => void;
 
+  /* backbone mode (OBB/1, v0.2) */
+  backboneConfig: BackboneConfig | null;
+  backboneStatus: BackboneStatus | null;
+  backbonePeers: BackbonePeer[];
+  backboneSetup: BackboneSetup | null;
+  /** Bearer token only known after a rotate or from the demo seed; never persisted. */
+  backboneSessionToken: string | null;
+  /** True only when the session token came from a rotation in this panel session. */
+  backboneTokenFresh: boolean;
+  backboneLoading: boolean;
+  backboneSaving: boolean;
+  backboneError: string | null;
+  backboneLastUpdated: number | null;
+
   /* actions */
   bootstrap: () => Promise<void>;
   retryConnection: () => Promise<void>;
@@ -270,6 +289,13 @@ export interface AppState {
   clearInvite: () => void;
   resetIdentity: () => Promise<void>;
   setOwnPositionFromGeo: (position: Position, accuracyM?: number | null) => void;
+  loadBackbone: () => Promise<void>;
+  saveBackboneConfig: (patch: BackboneConfigPatch) => Promise<boolean>;
+  setBackboneEnabled: (enabled: boolean) => Promise<boolean>;
+  kickBackbonePeer: (nodeId: string) => Promise<void>;
+  kickAllBackbonePeers: () => Promise<number>;
+  rotateBackboneToken: () => Promise<string>;
+  loadBackboneSetup: () => Promise<BackboneSetup | null>;
   pushToast: (toast: Omit<Toast, 'id'>) => void;
   dismissToast: (id: string) => void;
   handleEvent: (event: Envelope) => void;
@@ -283,6 +309,57 @@ export interface AppState {
 
 type SetState = StoreApi<AppState>['setState'];
 type GetState = () => AppState;
+
+function cloneValue<T>(value: T): T {
+  if (value === undefined || value === null) return value;
+  if (typeof structuredClone === 'function') return structuredClone(value);
+  return JSON.parse(JSON.stringify(value)) as T;
+}
+
+function backboneRestClient(settings: AppSettings): BackboneRestClient {
+  return new BackboneRestClient({
+    baseUrl: settings.bridgeUrl,
+    token: settings.token || null,
+    timeoutMs: 6000,
+  });
+}
+
+function errorMessage(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  return String(error);
+}
+
+/** Best-effort connection string from the current panel state (token may be unknown). */
+function connectionStringFromState(state: Pick<AppState, 'backboneConfig' | 'backboneSessionToken' | 'ownNodeId' | 'backboneSetup'>): string {
+  const config = state.backboneConfig;
+  if (!config) return state.backboneSetup?.connection_string ?? '';
+  const token = config.auth === 'token' ? state.backboneSessionToken : null;
+  return buildBackboneConnectionString({
+    host: config.public_host || config.bind || '127.0.0.1',
+    port: config.port,
+    token,
+    nodeId: state.ownNodeId,
+    name: config.name,
+  });
+}
+
+function syncScreenUrl(screen: Screen): void {
+  if (typeof window === 'undefined' || !window.history?.pushState) return;
+  try {
+    const url = new URL(window.location.href);
+    const wantsBackbone = screen === 'backbone';
+    const isBackbone = /\/backbone\/?$/.test(url.pathname);
+    if (wantsBackbone && !isBackbone) {
+      url.pathname = `${url.pathname.replace(/\/+$/, '')}/backbone`;
+      window.history.pushState({ screen }, '', url.toString());
+    } else if (!wantsBackbone && isBackbone) {
+      url.pathname = url.pathname.replace(/\/backbone\/?$/, '/');
+      window.history.pushState({ screen }, '', url.toString());
+    }
+  } catch {
+    // History API unavailable (sandboxed webview) — deep links still work on load.
+  }
+}
 
 function demoChatMessage(message: DemoDataset['messages'][number]): ChatMessage {
   const { localUrl, waveform, demoDelivery, ...wire } = message;
@@ -435,6 +512,17 @@ export const useAppStore = create<AppState>()((set, get) => ({
   commandError: null,
   selectedNodeId: null,
 
+  backboneConfig: null,
+  backboneStatus: null,
+  backbonePeers: [],
+  backboneSetup: null,
+  backboneSessionToken: null,
+  backboneTokenFresh: false,
+  backboneLoading: false,
+  backboneSaving: false,
+  backboneError: null,
+  backboneLastUpdated: null,
+
   resolveAttachmentUrl: async (attachmentId, mime) => {
     if (!transport) throw new Error('Not connected');
     return transport.resolveAttachmentUrl(attachmentId, mime);
@@ -564,12 +652,25 @@ export const useAppStore = create<AppState>()((set, get) => ({
         Object.entries(dataset.positionHistories).map(([key, value]) => [key, [...value]]),
       ),
       readCursors,
+      backboneConfig: cloneValue(dataset.backbone.config),
+      backboneStatus: cloneValue(dataset.backbone.status),
+      backbonePeers: cloneValue(dataset.backbone.peers),
+      backboneSetup: cloneValue(dataset.backbone.setup),
+      backboneSessionToken: dataset.backbone.token,
+      backboneTokenFresh: false,
+      backboneLoading: false,
+      backboneSaving: false,
+      backboneError: null,
+      backboneLastUpdated: Date.now(),
     });
   },
 
   /* -------------------- navigation -------------------- */
 
-  setScreen: (screen) => set({ screen }),
+  setScreen: (screen) => {
+    set({ screen });
+    syncScreenUrl(screen);
+  },
 
   openThread: (thread) => {
     set({ activeThread: thread, replyTo: null });
@@ -982,6 +1083,195 @@ export const useAppStore = create<AppState>()((set, get) => ({
   },
 
 
+  /* -------------------- backbone mode (OBB/1) -------------------- */
+
+  loadBackbone: async () => {
+    const state = get();
+    if (state.connection === 'idle' || state.connection === 'connecting') return;
+    set({ backboneLoading: true, backboneError: null });
+    if (state.mode === 'demo') {
+      transport?.send('get_backbone', {});
+      set({ backboneLoading: false, backboneLastUpdated: Date.now() });
+      return;
+    }
+    const client = backboneRestClient(state.settings);
+    try {
+      const config = await client.getConfig();
+      if (!config.enabled) {
+        set({
+          backboneConfig: config,
+          backboneStatus: null,
+          backbonePeers: [],
+          backboneLoading: false,
+          backboneError: null,
+          backboneLastUpdated: Date.now(),
+        });
+        return;
+      }
+      const [peersResult, setupResult] = await Promise.allSettled([client.getPeers(), client.getSetup()]);
+      const fallback = buildFallbackSetup({
+        config,
+        connectionString: buildBackboneConnectionString({
+          host: config.public_host || config.bind,
+          port: config.port,
+          token: null,
+          nodeId: state.ownNodeId,
+          name: config.name,
+        }),
+      });
+      set({
+        backboneConfig: config,
+        backbonePeers: peersResult.status === 'fulfilled' ? peersResult.value : get().backbonePeers,
+        backboneSetup:
+          setupResult.status === 'fulfilled' ? normalizeBackboneSetup(setupResult.value, fallback) : fallback,
+        backboneLoading: false,
+        backboneError: null,
+        backboneLastUpdated: Date.now(),
+      });
+    } catch (error) {
+      const message = errorMessage(error);
+      set({
+        backboneLoading: false,
+        backboneError:
+          message.includes('401') || /unauthori[sz]ed/i.test(message)
+            ? 'The bridge rejected the token. Add the bridge bearer token in Settings, then retry.'
+            : message,
+      });
+    }
+  },
+
+  saveBackboneConfig: async (patch) => {
+    const state = get();
+    const previous = state.backboneConfig;
+    if (!previous) return false;
+    set({ backboneConfig: mergeBackboneConfig(previous, patch), backboneSaving: true, backboneError: null });
+    try {
+      if (state.mode === 'demo') {
+        transport?.send('set_backbone_config', patch as Record<string, unknown>);
+        set({ backboneSaving: false, backboneLastUpdated: Date.now() });
+        get().pushToast({
+          kind: 'success',
+          title: 'Backbone config applied',
+          message: 'Demo backbone — changes are simulated locally.',
+        });
+        return true;
+      }
+      const response = await backboneRestClient(state.settings).updateConfig(patch);
+      set({
+        backboneConfig: { ...response, totals: response.totals ?? previous.totals },
+        backboneSaving: false,
+        backboneLastUpdated: Date.now(),
+      });
+      if (patch.enabled !== undefined || response.restarted) void get().loadBackbone();
+      get().pushToast({
+        kind: 'success',
+        title: 'Backbone config saved',
+        message: response.restarted ? 'Listener restarted with the new settings.' : 'Applied live — no restart needed.',
+      });
+      return true;
+    } catch (error) {
+      set({ backboneConfig: previous, backboneSaving: false, backboneError: errorMessage(error) });
+      get().pushToast({ kind: 'error', title: 'Could not save backbone config', message: errorMessage(error) });
+      return false;
+    }
+  },
+
+  setBackboneEnabled: async (enabled) => {
+    const ok = await get().saveBackboneConfig({ enabled });
+    if (ok) {
+      get().pushToast({
+        kind: enabled ? 'success' : 'info',
+        title: enabled ? 'Backbone enabled' : 'Backbone disabled',
+        message: enabled ? 'Listening for authenticated peers on the configured port.' : 'The public listener is now closed.',
+      });
+    }
+    return ok;
+  },
+
+  kickBackbonePeer: async (nodeId) => {
+    const state = get();
+    const peer = state.backbonePeers.find((candidate) => candidate.node_id === nodeId);
+    if (!peer) return;
+    set({ backbonePeers: state.backbonePeers.filter((candidate) => candidate.node_id !== nodeId) });
+    try {
+      if (state.mode === 'demo') {
+        transport?.send('backbone_kick', { node_id: nodeId });
+      } else {
+        await backboneRestClient(state.settings).kickPeer(nodeId);
+      }
+      set({ backboneLastUpdated: Date.now() });
+      get().pushToast({ kind: 'info', title: 'Peer disconnected', message: peer.name || nodeId });
+    } catch (error) {
+      set({ backbonePeers: state.backbonePeers, backboneError: errorMessage(error) });
+      get().pushToast({ kind: 'error', title: 'Could not kick peer', message: errorMessage(error) });
+    }
+  },
+
+  kickAllBackbonePeers: async () => {
+    const state = get();
+    const peers = [...state.backbonePeers];
+    if (peers.length === 0) return 0;
+    set({ backbonePeers: [] });
+    if (state.mode === 'demo') {
+      for (const peer of peers) transport?.send('backbone_kick', { node_id: peer.node_id });
+    } else {
+      const client = backboneRestClient(state.settings);
+      await Promise.allSettled(peers.map((peer) => client.kickPeer(peer.node_id)));
+    }
+    set({ backboneLastUpdated: Date.now() });
+    return peers.length;
+  },
+
+  rotateBackboneToken: async () => {
+    const state = get();
+    try {
+      let token: string;
+      if (state.mode === 'demo') {
+        if (!transport) throw new Error('Demo transport is not connected');
+        const commandId = transport.send('backbone_rotate_token', {});
+        const result = await registerCommand<{ token: string }>(commandId, 6000);
+        token = result.token;
+      } else {
+        token = await backboneRestClient(state.settings).rotateToken();
+      }
+      set({
+        backboneSessionToken: token,
+        backboneTokenFresh: true,
+        backboneConfig: state.backboneConfig ? { ...state.backboneConfig, token_set: true, auth: 'token' } : state.backboneConfig,
+        backboneLastUpdated: Date.now(),
+      });
+      get().pushToast({
+        kind: 'warn',
+        title: 'Backbone token rotated',
+        message: 'The old token is invalid immediately. Show the new token once, then update your gateways.',
+      });
+      return token;
+    } catch (error) {
+      get().pushToast({ kind: 'error', title: 'Token rotation failed', message: errorMessage(error) });
+      throw error;
+    }
+  },
+
+  loadBackboneSetup: async () => {
+    const state = get();
+    const connectionString = connectionStringFromState(state);
+    const fallback = buildFallbackSetup({ config: state.backboneConfig, connectionString });
+    if (state.mode === 'demo') {
+      const setup = normalizeBackboneSetup(state.backboneSetup ?? fallback, fallback);
+      set({ backboneSetup: setup });
+      return setup;
+    }
+    try {
+      const setup = normalizeBackboneSetup(await backboneRestClient(state.settings).getSetup(), fallback);
+      set({ backboneSetup: setup });
+      return setup;
+    } catch {
+      // Setup endpoint may be unavailable on older/disabled bridges — the local template is honest and usable.
+      set({ backboneSetup: fallback });
+      return fallback;
+    }
+  },
+
   /* -------------------- toasts + errors -------------------- */
 
   pushToast: (toast) => {
@@ -1122,6 +1412,51 @@ export const useAppStore = create<AppState>()((set, get) => ({
         });
         break;
       }
+      case 'backbone_status': {
+        const data = event.data as BackboneStatusEvent;
+        // The bridge may piggyback the redacted config on responses (get_backbone,
+        // set_backbone_config) — BACKBONE.md §7.2 / runtime contract.
+        const pushedConfig = data.config ? normalizeBackboneConfig(data.config) : null;
+        const configNow = pushedConfig ?? state.backboneConfig;
+        set({
+          backboneStatus: {
+            running: data.running,
+            peers: data.peers,
+            uptime_s: data.uptime_s,
+            frames_in: data.frames_in,
+            frames_out: data.frames_out,
+            bytes_in: data.bytes_in,
+            bytes_out: data.bytes_out,
+            throughput_in_bps: data.throughput_in_bps,
+            throughput_out_bps: data.throughput_out_bps,
+            store_forward_envelopes: data.store_forward_envelopes,
+            auth_failures: data.auth_failures,
+            last_error: data.last_error ?? null,
+          },
+          backboneLoading: false,
+          backboneLastUpdated: Date.now(),
+          ...(configNow && data.running && !configNow.enabled
+            ? { backboneConfig: { ...configNow, enabled: true, running: true } }
+            : configNow
+              ? { backboneConfig: { ...configNow, running: data.running } }
+              : {}),
+        });
+        break;
+      }
+      case 'backbone_peer': {
+        const data = event.data as BackbonePeerEvent;
+        set({
+          backbonePeers: applyPeerEvent(state.backbonePeers, data),
+          backboneLastUpdated: Date.now(),
+        });
+        break;
+      }
+      case 'backbone_token': {
+        const data = event.data as { token?: string };
+        if (data?.token) set({ backboneSessionToken: data.token, backboneLastUpdated: Date.now() });
+        if (event.id) resolveCommand(event.id, data);
+        break;
+      }
       case 'config': {
         const data = event.data as ConfigData;
         const channels: Record<string, Channel> = {};
@@ -1136,12 +1471,19 @@ export const useAppStore = create<AppState>()((set, get) => ({
           config: data,
           channels,
           ...(data.node?.name ? { ownName: data.node.name } : {}),
+          ...(data.backbone ? { backboneConfig: data.backbone } : {}),
         });
         break;
       }
-      case 'sync_done':
+      case 'sync_done': {
         set({ syncing: false });
+        // Backbone events are pushed while connected; only ask when advertised (§3.12).
+        const features = get().hello?.features ?? [];
+        if (get().mode === 'demo' || features.includes('backbone')) {
+          transport?.send('get_backbone', {});
+        }
         break;
+      }
       case 'nodes': {
         const data = event.data as { nodes: NodeData[] };
         let nodes = state.nodes;

@@ -19,7 +19,10 @@ JS · Vitest. Packaged for desktop with Tauri 2 (`src-tauri/`).
 [Contacts](docs/screenshots/contacts.png) ·
 [Settings](docs/screenshots/settings.png) ·
 [Mobile list](docs/screenshots/mobile-chats.png) ·
-[Mobile thread](docs/screenshots/mobile-thread.png)
+[Mobile thread](docs/screenshots/mobile-thread.png) ·
+[**Backbone panel**](docs/screenshots/backbone.png) ·
+[Backbone setup wizard](docs/screenshots/backbone-wizard.png) ·
+[Backbone on mobile](docs/screenshots/backbone-mobile.png)
 
 ---
 
@@ -36,6 +39,8 @@ open "http://127.0.0.1:5173/?demo=1"
 # deep-link directly to a screen or conversation (handy for screenshots)
 open "http://127.0.0.1:5173/?demo=1&screen=map"
 open "http://127.0.0.1:5173/?demo=1&thread=anne"          # or ?thread=familien
+open "http://127.0.0.1:5173/?demo=1&screen=backbone"      # or the /backbone route
+open "http://127.0.0.1:5173/backbone?demo=1" 
 
 pnpm --dir apps/web test         # vitest (119 unit tests)
 pnpm --dir apps/web build        # tsc -b && vite build
@@ -72,6 +77,27 @@ Demo mode is a first-class review mode, not a stub:
 Forced with `?demo=1`, `localStorage.openmesh.demo = '1'`, or the Settings toggle. The URL
 parameter wins over everything, so screenshots are reproducible.
 
+### Backbone demo (v0.2)
+
+`/?demo=1&screen=backbone` (or the route `/backbone?demo=1`) opens a seeded backbone:
+`oslo-backbone` running on `0.0.0.0:9443` with a public host, three peers (`hytta-gateway`,
+`lofoten-gateway`, `tromso-relay`), ticking frame/byte counters, live throughput sparkline,
+12 stored envelopes and 17 rejected handshakes so every statistic tells a story.
+
+Screenshot flow (works with no backend):
+
+1. Open `http://127.0.0.1:4173/?demo=1&screen=backbone` (wait ~1 s for the demo mesh).
+2. The panel, peer table, connection QR, stats and controls are visible immediately — no clicks.
+3. **Setup wizard:** click **Set up your backbone** → numbered steps, firewall tabs, systemd unit,
+   install section, panel URL (see `docs/screenshots/backbone-wizard.png`).
+4. **Token rotation:** click **Rotate** → confirm → the new 32-byte base64url token is shown exactly
+   once with a "disconnect all peers" toggle; close it to see the peers drop.
+5. Mobile: load the same URL at 390×844; the panel stacks with a 6-item bottom nav.
+
+In demo mode every control works locally: toggling the listener, editing the config and saving,
+kicking peers, rotating the token and the enable/disable states are simulated by the mock transport
+(`src/lib/mock/transport.ts`) so the whole flow can be reviewed offline.
+
 ---
 
 ## What is implemented
@@ -84,6 +110,7 @@ parameter wins over everything, so screenshots are reproducible.
 | **Groups** | Create channel (generated 256-bit PSK shown once with copy + `openmesh://channel` invite link + QR), join via pasted link or name+PSK, channel invite modal (QR + share sheet), per-message Ed25519 signature badge, leave channel with confirmation. |
 | **Images** | File picker / drag-drop / paste → canvas downscale + WebP (JPEG fallback) encode loop until the target size fits the profile cap; slider from 1 KiB to the profile cap with Fastest/Balanced/Max presets; chunks, airtime, transfer time and % of the region duty-cycle budget shown before sending; progress overlay for incoming resources. |
 | **Voice** | `MediaRecorder` with `audio/ogg;codecs=opus` preferred (WebM fallback), live timer + waveform from a WebAudio analyser, auto-stop at the profile voice cap, review with playback, then bubble with waveform bars, seek, playback progress and duration. |
+| **Backbone (v0.2)** | Control panel for an always-on OBB/1 relay: live stats cards (peers, frames, throughput sparkline, bytes, store-forward envelopes, auth failures), peer table with direction/remote/RTT/traffic and kick, live config form (enable, bind, port, max peers, auth token/open with red typed confirmation, allowlist editor, store-forward, name/public host/ping), connection string + QR with token reveal/copy, token rotation flow (new token shown once + kick-all), setup wizard from `GET /api/backbone/setup` (numbered copy-button steps, firewalld/ufw tabs, systemd unit, gateway join command, verify step), install section (Linux/macOS/Windows), panel URL hint, graceful disabled/one-click-enable state. Data over `backbone_status`/`backbone_peer` WS events + the 7 REST endpoints. |
 | **Map** | MapLibre GL with a **bundled offline schematic basemap** of the Oslo area (fjord, lakes, Nordmarka, roads — no tile requests, no glyph server). Node markers coloured by role (DOM markers, hover labels), own-position pulse + accuracy circle, position-history polyline, mesh link lines, role filters, selected-node popover, fit-to-nodes, geolocation locate/share, optional online OSM raster with automatic "tiles unavailable" fallback. |
 | **Nodes** | Table (desktop) / cards (mobile) with role, caps icons, hops, RSSI bars + dBm, SNR, battery, last heard; filters + search; detail drawer with 72-byte identity, contact QR, raw identity copy, position, link metrics, contact add/remove, message action. |
 | **Contacts** | Contact cards with verified badge and last seen; add via invite link or 72-byte identity + node id (auto-derived); QR display; delete with confirmation; own contact QR + explicit "no camera scanner in the browser" note. |
@@ -116,11 +143,15 @@ caps documented in `src/lib/airtime.ts`.
 pnpm --dir apps/web test
 ```
 
-119 Vitest tests cover: LoRa airtime + chunk/transfer math and protocol worked examples, image
+169 Vitest tests cover: LoRa airtime + chunk/transfer math and protocol worked examples, image
 compression planning (dimensions, quality, slider mapping, Opus sizes), formatting/Unicode/focus
 helpers, `openmesh://` link parsing + identity validation, WebSocket envelope parsing + reconnect
 transport (fake socket), store reducers (optimistic send, acks, merge semantics, conversations),
-seeded demo-dataset invariants, geo helpers and the offline map style.
+seeded demo-dataset invariants (including the seeded backbone), geo helpers, the offline map style,
+plus the v0.2 backbone surface: connection-string build/redact/QR helpers, REST client for all seven
+backbone endpoints (with a fake fetch), config normalize/merge/diff, allowlist validation, peer
+event reducers, status pills, setup-payload normalization/fallback rendering, install options and
+panel selectors.
 
 **Integration smoke check** (headless Firefox via WebDriver BiDi, production build served by
 `vite preview`): opens all five demo conversations and all five tabs, opens the new-conversation
@@ -141,6 +172,8 @@ apps/web/
 │   ├── types/api.ts            wire types copied from WEBSOCKET-API.md
 │   ├── lib/
 │   │   ├── ws.ts               envelope parser + reconnecting LiveTransport
+│   │   ├── backbone.ts         OBB/1 connection strings, config/peer/setup helpers
+│   │   ├── backbone-api.ts     REST client for the 7 backbone endpoints
 │   │   ├── transport.ts        transport abstraction (live + demo)
 │   │   ├── mock/               seeded Oslo dataset + MockTransport
 │   │   ├── airtime.ts          LoRa airtime, chunks, caps, duty cycle
@@ -153,7 +186,8 @@ apps/web/
 │   │   └── __tests__/
 │   ├── store/                  zustand store, reducers, selectors (+ tests)
 │   ├── components/             hand-rolled UI primitives, shell, QR
-│   └── screens/                chats/, map, nodes, contacts, settings
+│   ├── store/backbone-selectors.ts  panel view models (stats, pills, setup)
+│   └── screens/                chats/, backbone/, map, nodes, contacts, settings
 └── src-tauri/                  Tauri 2 desktop shell (see its README)
 ```
 
@@ -182,6 +216,24 @@ Implemented exactly against the doc; these gaps are worth resolving in the spec:
    attachment/voice caps; derived conservatively and labelled in code.
 9. **`message_update` with `attachment.progress`** is used as documented; the demo transport also
    emits it during simulated uploads so the progress UI is exercised.
+10. **`get_backbone` config reply is under-specified.** §4.5 says it returns `backbone_status` +
+   `config` ("backbone section") but not how the section is carried. The client accepts a `config`
+   event with an optional `backbone` object and, for the live panel, loads the full config from
+   `GET /api/backbone` (which *is* specified).
+11. **`backbone_token` event payload** is named in §4.5 but not specified; the client accepts
+   `{token}` from either the REST rotate response (primary live path) or a `backbone_token` WS event
+   (demo/fallback).
+12. **`direction` semantics** in the peer table are not defined (`inbound` vs `outbound` assumed);
+   unknown values are shown verbatim and sorted after inbound links.
+13. **`totals` in `GET /api/backbone`** has no documented shape; the panel types the same counters as
+   `backbone_status` and falls back to summing peers until the first status event arrives.
+14. **Setup step `note`** may be absent/`null`; typed `string | null` and rendered conditionally.
+15. **CORS:** the panel's REST calls are cross-origin when the SPA is served by Vite/preview instead
+   of the bridge (`:5173` → `:8787`). The release bridge serves the built panel same-origin; for
+   dev against a remote bridge, enable CORS or use a proxy. WS already uses `?token=`.
+16. **`GET /api/backbone/qr.svg`** is implemented and tested in the REST client, but the panel draws
+   its own QR from the connection string so invites work without a second round-trip and in demo
+   mode (no bridge).
 
 ---
 
@@ -226,6 +278,8 @@ firefox --headless --window-size=1440,900 \
   --screenshot=/tmp/openmesh-map.png "http://127.0.0.1:5173/?demo=1&screen=map"
 firefox --headless --window-size=390,844 \
   --screenshot=/tmp/openmesh-mobile.png "http://127.0.0.1:5173/?demo=1"
+firefox --headless --window-size=1440,900 \
+  --screenshot=/tmp/openmesh-backbone.png "http://127.0.0.1:5173/?demo=1&screen=backbone"
 ```
 
 ---
@@ -240,3 +294,9 @@ firefox --headless --window-size=390,844 \
   purposes.
 - Map is a hand-drawn schematic, not a survey-accurate basemap; online OSM tiles are opt-in.
 - No message search inside a thread, no group read receipts (not in the v1 API).
+- Backbone transport TLS is out of scope for v0.2 (front the port with Caddy/nginx/stunnel or run
+  inside WireGuard/Tailscale, as BACKBONE.md §10 documents). The panel surfaces this in setup notes.
+- Live Backbone REST calls need bridge CORS if the web client is not served by the bridge itself;
+  the release setup serves the panel from `/backbone` on the bridge origin.
+- The rotated backbone token lives only in panel memory; after a reload the connection string falls
+  back to the setup payload/CLI (the API never re-returns tokens by design).

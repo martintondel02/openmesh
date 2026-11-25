@@ -5,6 +5,33 @@ All notable changes to this project are documented here. The format follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Protocol changes are called out
 explicitly.
 
+## [0.2.0] - 2026-11-25
+
+### Added — Backbone mode
+
+OpenMesh bridges can now run as an always-on **backbone**: an authenticated TCP relay with a
+live control panel, so a VPS, Raspberry Pi or home server can join distant meshes into one
+network without any central service.
+
+- **OBB/1 backbone protocol** (`docs/architecture/BACKBONE.md`): length-prefixed TCP framing,
+  `hello → challenge → HMAC-SHA256(token) → welcome` handshake, open/allowlist/token auth modes,
+  max peers, handshake rate limits, ping/RTT, per-peer frame/byte accounting, graceful kick.
+  OMP payloads stay end-to-end encrypted; the backbone relays ciphertext and routing metadata only.
+- **Backbone control API + panel**: `/api/backbone`, peers, live config, token rotation, setup
+  payload and QR; web UI "Backbone" screen with stats cards, peer table/kick, live enable/disable,
+  port/bind/max-peer/allowlist/store-forward controls and a copy-button setup wizard.
+- **Client mode**: `openmesh-bridge join 'openmesh://backbone?…'` connects a gateway/repeater over
+  the internet with reconnect/backoff and shows up in the backbone peer table.
+- **Installer & deployment**: `scripts/install.sh` release installer (sha256-verified, no root by
+  default, optional systemd user service), hardened systemd units, Docker/compose example,
+  `docs/INSTALL.md` and a backbone operations guide (sizing, monitoring, TLS termination, WireGuard).
+- `openmesh-bridge install-service --backbone` and `openmesh-cli backbone …` commands.
+
+### Changed
+- Bumped workspace version to 0.2.0; bridge API gained the backbone surface (backwards compatible:
+  v1 API, additive events/commands).
+- Release assets now include `install.sh` alongside binaries, web bundle and `SHA256SUMS.txt`.
+
 ## [0.1.0] - 2026-11-25
 
 First public scaffold of OpenMesh.

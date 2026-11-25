@@ -371,6 +371,69 @@ async fn dispatch(
         "announce" => {
             return forward_command(state, reply_tx, id, Ok(CommandKind::Announce)).await;
         }
+        // 8. Backbone control surface (`BACKBONE.md` §7.2).
+        "get_backbone" => {
+            let mut data = state.shared.backbone.status_view().await;
+            let config = state.shared.backbone.describe().await;
+            if let Some(object) = data.as_object_mut() {
+                object.insert("config".into(), config);
+            }
+            return vec![response_json("backbone_status", id, Some(data))];
+        }
+        "set_backbone_config" => {
+            return match state.shared.backbone.update_config(&msg.data).await {
+                Ok((config, restarted)) => {
+                    let mut data = state.shared.backbone.status_view().await;
+                    if let Some(object) = data.as_object_mut() {
+                        object.insert("config".into(), config);
+                        object.insert("restarted".into(), serde_json::json!(restarted));
+                    }
+                    vec![response_json("backbone_status", id, Some(data))]
+                }
+                Err(e) => vec![error_json(id, "bad_request", &e)],
+            };
+        }
+        "backbone_kick" => {
+            let data: NodeIdData = match serde_json::from_value(msg.data.clone()) {
+                Ok(data) => data,
+                Err(e) => return vec![error_json(id, "bad_request", &e.to_string())],
+            };
+            let Some(node) = parse_node_id(&data.node_id) else {
+                return vec![error_json(id, "bad_request", "invalid node id")];
+            };
+            return match state.shared.backbone.kick(node).await {
+                Some(true) => {
+                    let mut status = state.shared.backbone.status_view().await;
+                    if let Some(object) = status.as_object_mut() {
+                        object.insert("disconnected".into(), serde_json::json!(true));
+                    }
+                    vec![response_json("backbone_status", id, Some(status))]
+                }
+                Some(false) => vec![error_json(id, "not_found", "peer is not connected")],
+                None => vec![response_json(
+                    "backbone_status",
+                    id,
+                    Some(serde_json::json!({ "enabled": false })),
+                )],
+            };
+        }
+        "backbone_rotate_token" => {
+            return match state.shared.backbone.rotate_token().await {
+                Ok(Some(token)) => {
+                    vec![response_json(
+                        "backbone_token",
+                        id,
+                        Some(serde_json::json!({ "token": token })),
+                    )]
+                }
+                Ok(None) => vec![response_json(
+                    "backbone_status",
+                    id,
+                    Some(serde_json::json!({ "enabled": false })),
+                )],
+                Err(e) => vec![error_json(id, "internal", &e)],
+            };
+        }
         _ => {}
     }
 

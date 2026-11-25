@@ -28,6 +28,7 @@ pub mod transport;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::AtomicUsize;
 
 use anyhow::{Context, Result};
 use tokio::sync::{RwLock, broadcast, mpsc, watch};
@@ -40,6 +41,7 @@ use json::{NodeSelfJson, RadioJson, StoreCountsJson};
 use runtime::{CoreRuntime, EngineInput, RuntimeConfig, Shared, Snapshot};
 use store::Store;
 use transport::TransportHandle;
+use transport::backbone::{BackboneManager, BackboneStartup, ConfigOverrides, JoinTarget};
 use transport::sim::MeshConfig;
 
 /// Options for [`Bridge::start`]. Use the CLI for the usual daemon entry point.
@@ -74,6 +76,12 @@ pub struct BridgeOptions {
     pub serve_web: Option<PathBuf>,
     /// Diagnostics mode: serve the API without running the protocol engine.
     pub api_only: bool,
+    /// Start a backbone listener for this run (`openmesh-bridge backbone`).
+    pub backbone_enabled: bool,
+    /// CLI overrides applied on top of `<data-dir>/backbone.json`.
+    pub backbone_overrides: ConfigOverrides,
+    /// Outbound link to dial (`openmesh-bridge join <url>`).
+    pub backbone_join: Option<JoinTarget>,
 }
 
 impl Default for BridgeOptions {
@@ -99,6 +107,9 @@ impl Default for BridgeOptions {
             serial_port: None,
             serve_web: None,
             api_only: false,
+            backbone_enabled: false,
+            backbone_overrides: ConfigOverrides::default(),
+            backbone_join: None,
         }
     }
 }
@@ -111,6 +122,8 @@ pub struct Bridge {
     pub snapshot: Arc<RwLock<Snapshot>>,
     pub events: broadcast::Sender<Arc<str>>,
     pub shared: Arc<Shared>,
+    /// Backbone mode control surface.
+    pub backbone: Arc<BackboneManager>,
     shutdown: watch::Sender<bool>,
     tasks: Vec<tokio::task::JoinHandle<()>>,
 }
@@ -162,6 +175,25 @@ impl Bridge {
         let (inbound_tx, inbound_rx) = mpsc::channel::<transport::Inbound>(1024);
         let (events, _) = broadcast::channel::<Arc<str>>(1024);
         let snapshot = Arc::new(RwLock::new(Snapshot::default()));
+        // Bind the local API early so the backbone setup payload reports the real port even when
+        // `--listen 127.0.0.1:0` was requested.
+        let api_listener = tokio::net::TcpListener::bind(options.listen)
+            .await
+            .with_context(|| format!("binding API listener on {}", options.listen))?;
+        let addr = api_listener.local_addr()?;
+        let backbone_envelopes = Arc::new(AtomicUsize::new(0));
+        let backbone = BackboneManager::new(
+            options.data_dir.clone(),
+            node_id,
+            addr,
+            std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("openmesh-bridge")),
+            options.serve_web.clone(),
+            Some(options.token_file.clone()),
+            events.clone(),
+            commands_tx.clone(),
+            shutdown_rx.clone(),
+            backbone_envelopes.clone(),
+        );
 
         // 5. Transports.
         let mut transports: Vec<TransportHandle> = Vec::new();
@@ -251,6 +283,8 @@ impl Bridge {
                 );
             }
         }
+        transports.push(backbone.transport_handle(link_id));
+        link_id = link_id.wrapping_add(1);
         let _ = link_id;
         if transports.is_empty() && !options.api_only {
             tracing::warn!("no transports configured: the bridge will only serve its local API");
@@ -273,18 +307,22 @@ impl Bridge {
             }
         }
 
-        // 7. API snapshot + engine task.
-        let shared = Arc::new(Shared {
-            snapshot: snapshot.clone(),
-            store: store.clone(),
-            attachments: attachments.clone(),
-            events: events.clone(),
-            commands: commands_tx.clone(),
-            started_at_ms,
-        });
+        // 7. Backbone mode: load config, start listener/client before the engine task takes
+        // ownership (the manager only queues engine inputs and broadcasts events).
+        let startup = BackboneStartup {
+            enabled: options.backbone_enabled,
+            overrides: options.backbone_overrides.clone(),
+            join: options.backbone_join.clone(),
+            token_from_file: None,
+            explicit: options.backbone_enabled || options.backbone_join.is_some(),
+        };
+        backbone
+            .startup(&startup)
+            .await
+            .map_err(anyhow::Error::msg)?;
 
-        // Seed the API snapshot synchronously so the first HTTP/WS request already sees the
-        // persisted nodes/messages instead of racing the engine task.
+        // 8. API snapshot + engine task. Seed the snapshot synchronously so the first HTTP/WS
+        // request already sees persisted state instead of racing the engine task.
         {
             let initial = runtime::build_snapshot(runtime::SnapshotInput {
                 engine: &engine,
@@ -295,9 +333,22 @@ impl Bridge {
                 started_at_ms,
                 last_rssi: None,
                 last_snr: None,
+                backbone_configured: backbone.is_configured(),
+                backbone_running: backbone.is_running(),
             });
             *snapshot.write().await = initial;
         }
+
+        let shared = Arc::new(Shared {
+            snapshot: snapshot.clone(),
+            store: store.clone(),
+            attachments: attachments.clone(),
+            events: events.clone(),
+            commands: commands_tx.clone(),
+            started_at_ms,
+            backbone: backbone.clone(),
+            backbone_envelopes: backbone_envelopes.clone(),
+        });
 
         if options.api_only {
             drop(engine);
@@ -314,6 +365,8 @@ impl Bridge {
                 started_at_ms,
                 commands_rx,
                 shutdown_rx.clone(),
+                backbone.clone(),
+                backbone_envelopes.clone(),
             );
             task_handles.push(tokio::spawn(engine_task));
 
@@ -336,11 +389,7 @@ impl Bridge {
             }));
         }
 
-        // 8. HTTP/WS API server.
-        let listener = tokio::net::TcpListener::bind(options.listen)
-            .await
-            .with_context(|| format!("binding API listener on {}", options.listen))?;
-        let addr = listener.local_addr()?;
+        // 9. HTTP/WS API server (listener bound early above).
         let web_root = http::resolve_web_root(options.serve_web.clone());
         if let Some(root) = &web_root {
             tracing::info!(path = %root.display(), "serving web client");
@@ -348,16 +397,17 @@ impl Bridge {
         let http_state = Arc::new(HttpState {
             token: Arc::new(token.clone()),
             shared: shared.clone(),
+            backbone: backbone.clone(),
             web_root,
             shutdown: shutdown_rx.clone(),
         });
         task_handles.push(tokio::spawn(async move {
-            if let Err(e) = http::serve(listener, http_state).await {
+            if let Err(e) = http::serve(api_listener, http_state).await {
                 tracing::error!(error = %e, "HTTP server stopped unexpectedly");
             }
         }));
 
-        // 9. Demo virtual peers join the sim mesh after the bridge transport exists.
+        // 10. Demo virtual peers join the sim mesh after the bridge transport exists.
         if options.demo {
             let peers = demo::spawn_peers(&mesh_hub, &bridge_ident, shutdown_rx.clone());
             tracing::info!(peers = peers.len(), "demo virtual peers running");
@@ -371,6 +421,7 @@ impl Bridge {
             snapshot,
             events,
             shared,
+            backbone,
             shutdown: shutdown_tx,
             tasks: task_handles,
         })
@@ -402,9 +453,10 @@ impl Bridge {
         self.snapshot.read().await.radios.clone()
     }
 
-    /// Stop all bridge tasks and release the listener.
+    /// Stop all bridge tasks and release the listeners.
     pub async fn shutdown(self) {
         let _ = self.shutdown.send(true);
+        self.backbone.shutdown().await;
         let tasks = self.tasks;
         let join_all = futures_util::future::join_all(tasks);
         if tokio::time::timeout(std::time::Duration::from_secs(3), join_all)
@@ -429,6 +481,8 @@ async fn core_task(
     started_at_ms: u64,
     mut commands: mpsc::Receiver<EngineInput>,
     mut shutdown: watch::Receiver<bool>,
+    backbone: Arc<BackboneManager>,
+    backbone_envelopes: Arc<AtomicUsize>,
 ) {
     let mut runtime = CoreRuntime {
         engine,
@@ -445,6 +499,8 @@ async fn core_task(
         outgoing_resources: std::collections::HashMap::new(),
         incoming_resources: std::collections::HashMap::new(),
         pending_resources: std::collections::HashMap::new(),
+        backbone,
+        backbone_envelopes,
         shutdown: shutdown.clone(),
     };
     // Introduce ourselves immediately so nearby nodes learn the identity.
@@ -462,6 +518,7 @@ async fn core_task(
                 let now = util::now_ms();
                 match input {
                     EngineInput::Inbound(inbound) => {
+                        let exclude = inbound.link.as_ref().and_then(|link| link.peer);
                         if let Some(link) = &inbound.link {
                             if link.rssi.is_some() {
                                 runtime.last_rssi = link.rssi;
@@ -471,8 +528,11 @@ async fn core_task(
                             }
                         }
                         let processed = runtime.engine.ingest(&inbound.bytes, inbound.link, now);
-                        runtime.process(processed, now).await;
+                        runtime.process_from(processed, now, exclude).await;
                         runtime.refresh_snapshot().await;
+                    }
+                    EngineInput::SetStoreForward(enabled) => {
+                        runtime.set_store_forward(enabled).await;
                     }
                     EngineInput::Command { cmd, reply } => {
                         runtime.handle_command(cmd, reply, now).await;

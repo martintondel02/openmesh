@@ -93,6 +93,7 @@ per message, and client stacks nobody wants to use. Details and trade-offs:
 | Position sharing + map | ✅ |
 | Repeater store-and-forward | ✅ protocol + firmware |
 | Bridge daemon (WS/REST, redb persistence, attachments) | ✅ |
+| **Backbone mode** (authenticated TCP relay + live control panel + installer) | ✅ v0.2 |
 | Web / PWA client (chat, groups, map, voice, images, demo mode) | ✅ |
 | Desktop packaging (Tauri 2, Linux/macOS/Windows) | ✅ config; build needs system webkit2gtk/WebView deps |
 | Firmware: 4 reference boards + golden-vector conformance | ✅ code complete, build matrix in CI |
@@ -115,6 +116,10 @@ Pin maps, power budgets and flashing instructions: [docs/hardware/boards.md](doc
 ## Quick start
 
 ```bash
+# 0. Or install a prebuilt release (Linux/macOS; Windows tarball in Releases)
+curl -fsSL https://github.com/martintondel02/openmesh/releases/latest/download/install.sh | sh
+openmesh-bridge --version
+
 git clone https://github.com/martintondel02/openmesh.git
 cd openmesh
 
@@ -154,6 +159,50 @@ tools/flash/openmesh-flash --board t1000e --uf2 build/t1000e.uf2
 tools/flash/openmesh-flash --board heltec_tracker --port /dev/ttyACM0
 ```
 
+## Run a backbone (v0.2)
+
+A bridge can act as an always-on **backbone**: an authenticated TCP relay with a live control
+panel that stitches distant meshes into one network — no central service, no account, no cloud.
+Perfect for a VPS, Raspberry Pi or a box on a shelf.
+
+```bash
+curl -fsSL https://github.com/martintondel02/openmesh/releases/latest/download/install.sh | sh
+openmesh-bridge backbone --data-dir ~/.openmesh
+```
+
+First run generates a 32-byte token, persists `~/.openmesh/backbone.json` (mode 0600) and prints a
+step-by-step onboarding guide: your listen address, connection string, `firewalld`/`ufw` commands
+and a ready-to-install systemd unit. The panel lives at **http://127.0.0.1:8787/backbone**:
+
+![OpenMesh backbone control panel](docs/assets/screenshots/backbone.jpg)
+
+*The built-in setup wizard turns a fresh box into a backbone in six copy-paste steps:*
+
+![Backbone setup wizard](docs/assets/screenshots/backbone-setup.jpg)
+
+- **Live statistics** — peers, frames/bytes in and out, throughput, RTT, store-and-forward queue,
+  auth failures, uptime.
+- **Peer management** — who is connected, from where, how much they relay, one-click kick.
+- **Controls** — enable/disable the listener, bind address and port, max peers, token vs open
+  (with a big red warning), allowlist, store-and-forward relay, token rotation (shown once).
+- **Setup wizard** — install → firewall → systemd → share the `openmesh://backbone?…` link or QR →
+  connect a gateway, all with copy buttons.
+
+Remote gateways and repeaters join with one command; they appear in the peer table and relay
+traffic both ways:
+
+```bash
+openmesh-bridge join 'openmesh://backbone?host=mesh.example.org&port=9443&token=…&node=…'
+openmesh-bridge install-service --backbone      # keep it running across reboots
+```
+
+OMP frames stay **end-to-end encrypted**: the backbone relays ciphertext and routing metadata
+only. Transport access is protected by a shared secret; put TLS/WireGuard in front for hostile
+networks. Guides: [install](docs/INSTALL.md) ·
+[deployment, sizing, TLS, monitoring](docs/operations/backbone-deployment.md) ·
+[protocol + security model](docs/architecture/BACKBONE.md) ·
+[why these choices (ADR 0009)](docs/adr/0009-backbone-mode.md).
+
 ## Repository layout
 
 ```
@@ -188,6 +237,8 @@ docs/                    Architecture, protocol, ADRs, research, hardware
 * [OMP/1 protocol specification](docs/architecture/PROTOCOL.md) — normative
 * [Bridge WebSocket + REST API](docs/architecture/WEBSOCKET-API.md) — normative
 * [Companion (radio ⇄ app) API](docs/architecture/COMPANION-API.md)
+* [Backbone mode (OBB/1) — relay + control panel](docs/architecture/BACKBONE.md) · [ADR 0009](docs/adr/0009-backbone-mode.md)
+* [Install guide](docs/INSTALL.md) · [Backbone deployment & operations](docs/operations/backbone-deployment.md)
 * [Hardware support and flashing](docs/hardware/boards.md)
 * [ADRs](docs/adr/) · [Research](docs/research/) · [Roadmap](docs/ROADMAP.md)
 

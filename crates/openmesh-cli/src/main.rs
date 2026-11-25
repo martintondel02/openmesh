@@ -12,6 +12,16 @@
 //! openmesh-cli nodes
 //! openmesh-cli airtime --profile MEDIUM_FAST --bytes 5120
 //! openmesh-cli --sim send --to local --text "hello"       # no bridge needed
+//!
+//! Backbone diagnostics (token from ~/.config/openmesh/bridge-token, --token or $OPENMESH_TOKEN):
+//!
+//! ```text
+//! openmesh-cli backbone info
+//! openmesh-cli backbone peers
+//! openmesh-cli backbone kick <node_id>
+//! openmesh-cli backbone rotate-token
+//! openmesh-cli backbone connect 'openmesh://backbone?host=...&port=9443&token=...'
+//! openmesh-cli backbone disconnect <node_id>
 //! ```
 
 use std::process::ExitCode;
@@ -40,6 +50,10 @@ struct Cli {
     #[arg(long, global = true, value_name = "URL")]
     ws: Option<String>,
 
+    /// Bridge REST API base URL (default http://127.0.0.1:8787, or derived from --ws).
+    #[arg(long, global = true, value_name = "URL")]
+    api: Option<String>,
+
     /// API bearer token (overrides the token file).
     #[arg(long, global = true, value_name = "TOKEN")]
     token: Option<String>,
@@ -58,6 +72,31 @@ struct Cli {
 
     #[command(subcommand)]
     command: Command,
+}
+
+#[derive(Debug, Clone, Subcommand)]
+enum BackboneCommand {
+    /// Show backbone configuration, mode and live totals.
+    Info,
+    /// List connected backbone peers.
+    Peers,
+    /// Disconnect one peer by node id.
+    Kick {
+        /// Peer node id (hex, 8 bytes).
+        node_id: String,
+    },
+    /// Rotate the backbone token (returned once; old token invalid for new handshakes).
+    RotateToken,
+    /// Add an outbound link to a backbone connection string.
+    Connect {
+        /// `openmesh://backbone?host=...&port=...&token=...` URL.
+        url: String,
+    },
+    /// Disconnect an outbound backbone link by node id.
+    Disconnect {
+        /// Backbone server node id (hex).
+        node_id: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -97,6 +136,11 @@ enum Command {
     Stats,
     /// List joined channels.
     Channels,
+    /// Inspect and control backbone mode through the bridge REST API.
+    Backbone {
+        #[command(subcommand)]
+        command: Option<BackboneCommand>,
+    },
     /// Estimate LoRa airtime for a payload.
     Airtime {
         /// Radio profile: LONG_SLOW, LONG_FAST, MEDIUM_FAST, SHORT_FAST, SHORT_TURBO.
@@ -134,6 +178,7 @@ fn main() -> ExitCode {
 
 async fn run(cli: Cli) -> Result<u8> {
     match &cli.command {
+        Command::Backbone { command } => backbone_command(&cli, command.as_ref()).await,
         Command::Airtime {
             profile,
             bytes,
@@ -622,6 +667,11 @@ fn resolve_token(cli: &Cli) -> Result<String> {
     if let Some(token) = &cli.token {
         return Ok(token.clone());
     }
+    if let Ok(token) = std::env::var("OPENMESH_TOKEN") {
+        if !token.trim().is_empty() {
+            return Ok(token.trim().to_string());
+        }
+    }
     let path = cli.token_file.clone().unwrap_or_else(default_token_path);
     let token = std::fs::read_to_string(&path).with_context(|| {
         format!(
@@ -1078,6 +1128,293 @@ fn mime_for_path(path: &std::path::Path) -> String {
         _ => "application/octet-stream",
     }
     .to_string()
+}
+
+// ---------------------------------------------------------------------------------------------
+// Backbone diagnostics (REST)
+// ---------------------------------------------------------------------------------------------
+
+/// Resolve the REST API base URL, deriving it from `--ws` when `--api` is not given.
+fn api_base(cli: &Cli) -> String {
+    if let Some(api) = &cli.api {
+        return api.trim_end_matches('/').to_string();
+    }
+    if let Some(ws) = &cli.ws {
+        let rest = ws
+            .strip_prefix("ws://")
+            .or_else(|| ws.strip_prefix("wss://"))
+            .unwrap_or(ws);
+        if let Some((authority, _)) = rest.split_once('/') {
+            return format!("http://{authority}");
+        }
+        return format!("http://{rest}");
+    }
+    "http://127.0.0.1:8787".to_string()
+}
+
+async fn http_json(
+    method: &str,
+    base: &str,
+    path: &str,
+    token: &str,
+    body: Option<Value>,
+) -> Result<Value> {
+    let rest = base
+        .strip_prefix("http://")
+        .or_else(|| base.strip_prefix("https://"))
+        .unwrap_or(base);
+    let (authority, prefix) = rest.split_once('/').unwrap_or((rest, ""));
+    let mut stream = TcpStream::connect(authority)
+        .await
+        .with_context(|| format!("connecting to bridge API at {base}"))?;
+    let payload = body.map(|value| value.to_string()).unwrap_or_default();
+    let mut request = format!(
+        "{method} {prefix}{path} HTTP/1.1\r\nHost: {authority}\r\nAuthorization: Bearer {token}\r\nConnection: close\r\n"
+    );
+    if !payload.is_empty() {
+        request.push_str("Content-Type: application/json\r\n");
+        request.push_str(&format!("Content-Length: {}\r\n", payload.len()));
+    }
+    request.push_str("\r\n");
+    request.push_str(&payload);
+    stream.write_all(request.as_bytes()).await?;
+    let mut response = Vec::new();
+    stream.read_to_end(&mut response).await?;
+    let text = String::from_utf8_lossy(&response);
+    let (head, body) = text.split_once("\r\n\r\n").unwrap_or((text.as_ref(), ""));
+    let status: u16 = head
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .and_then(|code| code.parse().ok())
+        .unwrap_or(0);
+    let value: Value = serde_json::from_str(body).unwrap_or(Value::Null);
+    if !(200..300).contains(&status) {
+        let message = value
+            .get("message")
+            .and_then(|v| v.as_str())
+            .or_else(|| value.get("error").and_then(|v| v.as_str()))
+            .unwrap_or(body.trim());
+        bail!("bridge API {method} {path} failed with HTTP {status}: {message}");
+    }
+    Ok(value)
+}
+
+fn print_backbone_info(info: &Value, json: bool) -> Result<()> {
+    if json {
+        println!("{}", serde_json::to_string_pretty(info)?);
+        return Ok(());
+    }
+    let mode = info
+        .get("mode")
+        .and_then(|v| v.as_str())
+        .unwrap_or("disabled");
+    if info.get("enabled").and_then(|v| v.as_bool()) == Some(false) && mode == "disabled" {
+        println!("Backbone mode is disabled on this bridge.");
+        println!(
+            "Enable it with: openmesh-cli backbone connect '<openmesh://backbone?...>' or from the web panel."
+        );
+        return Ok(());
+    }
+    println!(
+        "backbone     mode={} enabled={} running={} bind={}:{} auth={} token_set={}",
+        mode,
+        info.get("enabled")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        info.get("running")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        info.get("bind").and_then(|v| v.as_str()).unwrap_or(""),
+        info.get("port").and_then(|v| v.as_u64()).unwrap_or(0),
+        info.get("auth").and_then(|v| v.as_str()).unwrap_or(""),
+        info.get("token_set")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+    );
+    println!(
+        "name         {}   public_host={}   max_peers={}   store_forward={}",
+        info.get("name").and_then(|v| v.as_str()).unwrap_or(""),
+        info.get("public_host")
+            .and_then(|v| v.as_str())
+            .unwrap_or("(auto)"),
+        info.get("max_peers").and_then(|v| v.as_u64()).unwrap_or(0),
+        info.get("store_forward")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+    );
+    if let Some(allowlist) = info.get("allowlist").and_then(|v| v.as_array()) {
+        println!(
+            "allowlist    {}",
+            if allowlist.is_empty() {
+                "(empty: token only)".to_string()
+            } else {
+                allowlist
+                    .iter()
+                    .filter_map(|v| v.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            }
+        );
+    }
+    if let Some(totals) = info.get("totals") {
+        println!(
+            "peers        {}   frames in/out {}/{}   bytes in/out {}/{}   auth_failures={}",
+            info.get("peers").and_then(|v| v.as_u64()).unwrap_or(0),
+            totals
+                .get("frames_in")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0),
+            totals
+                .get("frames_out")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0),
+            totals.get("bytes_in").and_then(|v| v.as_u64()).unwrap_or(0),
+            totals
+                .get("bytes_out")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0),
+            totals
+                .get("auth_failures")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0),
+        );
+    }
+    Ok(())
+}
+
+async fn backbone_command(cli: &Cli, command: Option<&BackboneCommand>) -> Result<u8> {
+    let base = api_base(cli);
+    let token = resolve_token(cli)?;
+    match command {
+        None | Some(BackboneCommand::Info) => {
+            let info = http_json("GET", &base, "/api/backbone", &token, None).await?;
+            print_backbone_info(&info, cli.json)?;
+        }
+        Some(BackboneCommand::Peers) => {
+            let value = http_json("GET", &base, "/api/backbone/peers", &token, None).await?;
+            if cli.json {
+                println!("{}", serde_json::to_string_pretty(&value)?);
+            } else if value.get("enabled").and_then(|v| v.as_bool()) == Some(false) {
+                println!("Backbone mode is disabled on this bridge.");
+            } else {
+                let peers = value.as_array().cloned().unwrap_or_default();
+                if peers.is_empty() {
+                    println!("(no backbone peers)");
+                } else {
+                    println!(
+                        "{:<18} {:<14} {:<9} {:<21} {:>7} {:>7} {:>6} auth",
+                        "node id", "name", "direction", "remote", "frames", "bytes", "rtt"
+                    );
+                    for peer in peers {
+                        println!(
+                            "{:<18} {:<14} {:<9} {:<21} {:>7} {:>7} {:>6} {}",
+                            peer.get("node_id").and_then(|v| v.as_str()).unwrap_or(""),
+                            peer.get("name").and_then(|v| v.as_str()).unwrap_or(""),
+                            peer.get("direction").and_then(|v| v.as_str()).unwrap_or(""),
+                            peer.get("remote_addr")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or(""),
+                            peer.get("frames_in").and_then(|v| v.as_u64()).unwrap_or(0)
+                                + peer.get("frames_out").and_then(|v| v.as_u64()).unwrap_or(0),
+                            peer.get("bytes_in").and_then(|v| v.as_u64()).unwrap_or(0)
+                                + peer.get("bytes_out").and_then(|v| v.as_u64()).unwrap_or(0),
+                            peer.get("rtt_ms")
+                                .and_then(|v| v.as_u64())
+                                .map(|rtt| format!("{rtt}ms"))
+                                .unwrap_or_else(|| "-".to_string()),
+                            peer.get("auth").and_then(|v| v.as_str()).unwrap_or(""),
+                        );
+                    }
+                }
+            }
+        }
+        Some(BackboneCommand::Kick { node_id }) => {
+            let value = http_json(
+                "DELETE",
+                &base,
+                &format!("/api/backbone/peers/{node_id}"),
+                &token,
+                None,
+            )
+            .await?;
+            if cli.json {
+                println!("{}", serde_json::to_string_pretty(&value)?);
+            } else {
+                println!(
+                    "peer {node_id}: disconnected={}",
+                    value
+                        .get("disconnected")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false)
+                );
+            }
+        }
+        Some(BackboneCommand::RotateToken) => {
+            let value = http_json(
+                "POST",
+                &base,
+                "/api/backbone/token/rotate",
+                &token,
+                Some(json!({})),
+            )
+            .await?;
+            if cli.json {
+                println!("{}", serde_json::to_string_pretty(&value)?);
+            } else if let Some(new_token) = value.get("token").and_then(|v| v.as_str()) {
+                println!(
+                    "New backbone token (shown once, old token is now invalid for new handshakes):"
+                );
+                println!("{new_token}");
+                println!(
+                    "Update any `openmesh-bridge join` gateways; connected peers stay up until they reconnect or are kicked."
+                );
+            } else {
+                println!("Backbone mode is disabled on this bridge.");
+            }
+        }
+        Some(BackboneCommand::Connect { url }) => {
+            let value = http_json(
+                "POST",
+                &base,
+                "/api/backbone/config",
+                &token,
+                Some(json!({ "join_url": url })),
+            )
+            .await?;
+            if cli.json {
+                println!("{}", serde_json::to_string_pretty(&value)?);
+            } else {
+                println!("Outbound backbone link requested; it reconnects with backoff.");
+                if let Some(mode) = value.get("mode").and_then(|v| v.as_str()) {
+                    println!("  mode        {mode}");
+                }
+                println!("  inspect     openmesh-cli backbone peers");
+            }
+        }
+        Some(BackboneCommand::Disconnect { node_id }) => {
+            let value = http_json(
+                "DELETE",
+                &base,
+                &format!("/api/backbone/peers/{node_id}"),
+                &token,
+                None,
+            )
+            .await?;
+            if cli.json {
+                println!("{}", serde_json::to_string_pretty(&value)?);
+            } else {
+                println!(
+                    "backbone link {node_id}: disconnected={}",
+                    value
+                        .get("disconnected")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false)
+                );
+            }
+        }
+    }
+    Ok(0)
 }
 
 #[cfg(test)]
