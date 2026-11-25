@@ -1,5 +1,7 @@
 package org.openmesh.android.data.transport
 
+import android.annotation.SuppressLint
+
 import android.Manifest
 import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothDevice
@@ -42,6 +44,7 @@ import kotlin.coroutines.resume
  *
  * Service/characteristic UUIDs and MTU guidance: docs/architecture/COMPANION-API.md §1.
  */
+@SuppressLint("MissingPermission")
 class BleTransport(
     private val context: Context,
     private val deviceNamePrefix: String = "OpenMesh",

@@ -134,6 +134,30 @@ export interface BackboneFirewallCommands {
   ufw: string[];
 }
 
+/** Public-exposure provider (BACKBONE.md §8/§9b). */
+export interface BackboneExposureProvider {
+  name: string;
+  url: string;
+  description?: string;
+}
+
+/**
+ * Optional exposure guidance added to the v0.4 setup payload. Older bridges omit
+ * it entirely; the client then renders the built-in Openflare-style fallback.
+ */
+export interface BackboneExposure {
+  /** e.g. `openflare`; informational — the UI always offers the tunnel path. */
+  recommended?: string | null;
+  provider?: BackboneExposureProvider | null;
+  when_to_use?: string | null;
+  steps?: string[];
+  alternatives?: string[];
+  /** Optional command override from the bridge; generated locally when absent. */
+  bind_command?: string | null;
+  /** Optional guide URL override; defaults to docs/guides/backbone-exposure.md on GitHub. */
+  guide_url?: string | null;
+}
+
 /** GET /api/backbone/setup payload (§8). */
 export interface BackboneSetup {
   listen: string;
@@ -146,6 +170,8 @@ export interface BackboneSetup {
   firewall: BackboneFirewallCommands;
   notes: string[];
   panel_url: string;
+  /** Public-exposure guidance (v0.4); optional for backwards compatibility. */
+  exposure?: BackboneExposure | null;
 }
 
 /** Response shape of GET /api/backbone/peers is a bare array. */

@@ -231,6 +231,16 @@ Everything the panel needs to onboard a user without reading docs:
   ],
   "systemd_unit": "[Unit]\n...",
   "firewall": { "firewalld": ["..."], "ufw": ["..."] },
+  "exposure": {
+    "recommended": "openflare",
+    "provider": { "name": "Openflare", "url": "https://github.com/martintondel02/openflare",
+                  "description": "Self-hosted tunnel, reverse proxy and control plane with outbound-only connectors and one public edge." },
+    "when_to_use": "Your backbone is behind NAT/CGNAT, or you do not want to open an inbound port.",
+    "steps": ["bind the backbone to 127.0.0.1", "create a TCP tunnel to 127.0.0.1:9443", "set public_host to the tunnel hostname", "share the connection string"],
+    "alternatives": ["WireGuard", "Tailscale", "Cloudflare Tunnel", "Caddy/nginx stream TLS"],
+    "bind_command": "openmesh-bridge backbone --bind 127.0.0.1 --port 9443 --public-host <host>",
+    "guide_url": "https://github.com/martintondel02/openmesh/blob/main/docs/guides/backbone-exposure.md"
+  },
   "notes": ["OpenMesh payloads are end-to-end encrypted; the backbone relays ciphertext only."],
   "panel_url": "http://127.0.0.1:8787/backbone"
 }
@@ -271,6 +281,44 @@ openmesh-cli backbone disconnect <node_id>
 `$OPENMESH_TOKEN`) and talks to `--api http://127.0.0.1:8787`.
 
 ---
+
+## 9b. Public exposure (NAT, firewalls and Openflare)
+
+A backbone is only useful to remote gateways if they can reach its OBB/1 port. Options, in order of
+preference:
+
+| Situation | Recommended |
+| --- | --- |
+| Gateways are on a VPN/WireGuard/Tailscale mesh | Keep the backbone bound to the VPN interface; no public exposure |
+| Behind NAT/CGNAT, or you refuse to open an inbound port | **Openflare** (outbound-only connector + one public TCP edge) or another tunnel |
+| You control the firewall and DNS | Port-forward 9443/tcp and terminate TLS in front (Caddy/nginx stream) |
+| Temporary testing only | `ssh -L`/WireGuard from the gateway host |
+
+`/api/backbone/setup` exposes an `exposure` object with the recommended provider, ready-to-copy
+steps, alternatives, an optional copyable `bind_command` and a documentation `guide_url`, so the
+panel and CLI can walk a user through it without external docs. `provider` is
+`{name, url, description}`; `steps` and `alternatives` are arrays of strings. Clients MUST tolerate
+the whole object being absent (older bridges) and fall back to local guidance.
+
+**Openflare** (<https://github.com/martintondel02/openflare>) is a self-hosted tunnel, reverse proxy
+and control plane with outbound-only connectors and one public edge: run a connector next to the
+backbone, point a TCP service at `127.0.0.1:9443`, and give the backbone the resulting public
+hostname via `--public-host` (or in the panel). It handles certificates and the public edge, so no
+inbound port needs to be opened. The repository is being prepared for public launch; until it is
+available, the WireGuard/Tailscale and Caddy/nginx recipes in
+[`docs/guides/backbone-exposure.md`](../guides/backbone-exposure.md) work today.
+
+Hard rules when exposing a backbone:
+
+1. Expose **only the OBB/1 TCP port**. The bridge API/panel (`:8787`) stays loopback-only.
+2. Keep `auth: token` (never `open`) and rotate the token if it ever leaked; allowlist known peer
+   node ids when the set is small.
+3. End-to-end encryption is unchanged by exposure: the tunnel operator sees ciphertext and
+   metadata only, never message contents. The token is the transport access control.
+4. If a tunnel terminates TLS at the edge, keep the token regardless — TLS is transport hygiene,
+   not peer authentication.
+5. Watch the panel's peer table and `auth_failures`; enable activity review and alerts for unknown
+   peers.
 
 ## 10. Security model
 

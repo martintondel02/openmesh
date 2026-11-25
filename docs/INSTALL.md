@@ -237,6 +237,72 @@ New-Item -ItemType Directory -Force "$env:USERPROFILE\.openmesh" | Out-Null
 
 ---
 
+## 3b. Android app
+
+The Android app is a standalone mesh client: the protocol engine runs on the phone, and it talks
+to a radio over BLE or USB. No bridge is needed.
+
+### Install from a release (sideload)
+
+1. On your phone, download the APK from the release page:
+   `https://github.com/martintondel02/openmesh/releases/latest` → `openmesh-<version>-android-debug.apk`
+   (or `…-android-release.apk` if the release is signed).
+2. Allow installs from the browser/file manager when prompted (Android "Install unknown apps" for
+   that one app), then open the APK to install.
+3. First run: pick *phone/laptop* (or your role), country, node name, privacy → **Secure my node**.
+   The app applies the same secure preset as the desktop/web clients and creates a private channel.
+4. Connect your radio:
+   * **USB:** plug the radio in, allow USB access, choose it under *Radio → USB*.
+   * **BLE:** power the radio, *Radio → Bluetooth*, pick the OpenMesh device.
+   The radio must be flashed with OpenMesh firmware supporting the companion link (see
+   [`docs/hardware/boards.md`](hardware/boards.md) and `firmware/README.md`).
+5. Invite someone: **Channels → share invite** (QR or copy), then send a message.
+
+### Requirements
+
+* Android 8.0 (API 26) or newer, Bluetooth LE and/or USB-OTG depending on the link.
+* The phone does **not** need internet. Map tiles are optional/offline.
+
+### Building the APK yourself
+
+```bash
+# Rust + Android SDK/NDK + cargo-ndk are required (CI installs them automatically)
+export ANDROID_HOME=$HOME/android-sdk
+export ANDROID_NDK_HOME=$ANDROID_HOME/ndk/27.0.12077973
+apps/android/scripts/build-ffi.sh          # Rust engine for arm64-v8a/armeabi-v7a/x86_64 + Kotlin
+cd apps/android && ./gradlew assembleDebug  # app/build/outputs/apk/debug/app-debug.apk
+```
+
+### Signing a release APK
+
+CI signs `assembleRelease` when these repository secrets exist (never commit a keystore):
+
+| Secret | Meaning |
+| --- | --- |
+| `ANDROID_KEYSTORE_BASE64` | base64 of your `.jks` keystore |
+| `ANDROID_KEYSTORE_PASSWORD` | keystore password |
+| `ANDROID_KEY_ALIAS` | key alias |
+| `ANDROID_KEY_PASSWORD` | key password |
+
+Generate one with:
+
+```bash
+keytool -genkeypair -v -keystore openmesh-release.jks -keyalg RSA -keysize 4096 \
+  -validity 10000 -alias openmesh
+base64 -w0 openmesh-release.jks   # paste as ANDROID_KEYSTORE_BASE64
+```
+
+Without the secrets, CI still produces an unsigned release APK and a debug APK. The app is
+sideload-only for now (no Play Store/F-Droid listing); the manifest is F-Droid-friendly (no
+proprietary dependencies for the mesh path, Play Services not required).
+
+### Known limits
+
+* No background sync when Android force-stops the app; the foreground service keeps the link alive
+  while the app is running/foregrounded normally.
+* Voice notes are AAC/MP4 on Android (web uses Opus/OGG); both clients can play both.
+* Battery: the foreground service keeps a BLE/USB link; expect phone-typical drain while connected.
+
 ## 4. Docker
 
 A multi-stage image (web build → Rust build → non-root runtime) lives in

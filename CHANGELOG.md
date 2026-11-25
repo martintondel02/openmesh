@@ -5,6 +5,52 @@ All notable changes to this project are documented here. The format follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Protocol changes are called out
 explicitly.
 
+## [0.4.0] - 2026-11-25
+
+### Added — Android GA and public-exposure guidance
+
+**Android app (GA)**
+- The Compose app now runs the real Rust protocol engine on the phone via **UniFFI**
+  (`crates/openmesh-ffi`): `OpenMeshNode` object, typed events/outbound frames, attachment
+  send/receive, export/import state, generated Kotlin bindings for `arm64-v8a`, `armeabi-v7a`
+  and `x86_64`.
+- Foreground `MeshService` keeps the mesh alive over **BLE (Nordic UART) or USB CDC** companion
+  links, reconnects with backoff, persists messages in Room, stores the identity seed
+  Keystore-wrapped, and posts message notifications that open the right thread.
+- Screens: beginner onboarding applying the shared secure preset, chats (text/image/voice,
+  delivery ticks, retry, replies), channels with invite QR, nodes, osmdroid map, contacts with
+  QR scan/display, radio connect/status, settings with beginner/advanced modes, bundled Help
+  corpus, agent/backbone tips.
+- Media: in-app camera/gallery images compressed to the profile's airtime budget; voice notes
+  recorded as small AAC/MP4 with playback; QR rendering for invites.
+- Verified end-to-end on a real Android phone (Pixel-class, Android 17): fresh install,
+  notification-permission prompt, onboarding, engine start, channel + invite QR, message send,
+  offline Help, all main screens, zero crashes. Missing radio permissions no longer crash the
+  foreground service: it starts as `connectedDevice` when a Bluetooth/USB permission is held and
+  falls back to the declared `specialUse` type otherwise.
+- Build: `apps/android/scripts/build-ffi.sh` (cargo-ndk + uniffi-bindgen) and CI that installs
+  JDK 21 + Android SDK 35 + NDK 27, builds the debug APK (and a signed release APK when keystore
+  secrets are configured), tests, and attaches the APK to releases.
+
+**Shared presets and machine-readable setup**
+- Beginner secure presets moved to `content/presets/setup.json`, embedded by the bridge and
+  shipped as an Android asset; `/api/setup/*` behaviour is unchanged and unit-tested against the
+  file (60 country codes, 4 roles).
+
+**Public exposure guidance (Openflare)**
+- Backbone setup payload (`GET /api/backbone/setup`) now includes an `exposure` object:
+  recommended **Openflare** provider (outbound-only tunnel, no open inbound port), when to use it,
+  steps, alternatives (WireGuard, Tailscale, Cloudflare Tunnel, Caddy/nginx), copyable loopback
+  bind command and a guide link.
+- Web backbone panel and setup wizard render the new "Expose it publicly (optional)" step and an
+  Exposure card; new `docs/guides/backbone-exposure.md` covers Openflare, generic tunnels,
+  VPN alternatives, a security checklist and troubleshooting.
+- BACKBONE.md §8-§9b specify the payload and exposure rules.
+
+### Changed
+- Workspace version 0.4.0; Android `versionName` 0.4.0 (`versionCode` 4). No protocol or API
+  breaking changes (FFI is new, bridge API additive).
+
 ## [0.3.0] - 2026-11-25
 
 ### Added — beginner-friendly UX and an AI-native control plane

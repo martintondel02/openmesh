@@ -1,16 +1,15 @@
 package org.openmesh.android.data.repository
 
-import android.net.Uri
 import org.openmesh.android.util.Hex
+import java.net.URI
+import java.net.URLDecoder
+import java.net.URLEncoder
 
 /**
  * `openmesh://contact?...` and `openmesh://channel?...` invite URIs (WEBSOCKET-API.md §4.3/4.4).
  *
- * Example contact:
- * `openmesh://contact?node_id=<16 hex>&name=Alice&identity=<base64 72B>`
- *
- * Example channel:
- * `openmesh://channel?id=<16 hex>&name=family&psk=<base64 32B>&profile=MEDIUM_FAST&region=EU868`
+ * Implemented with `java.net.URI` + explicit query encoding (not `android.net.Uri`) so the same
+ * parser runs in JVM unit tests. Every scanned invite is validated before use.
  */
 data class QrInvite(
     val kind: Kind,
@@ -25,37 +24,32 @@ data class QrInvite(
 
     companion object {
         fun parse(raw: String): QrInvite {
-            val uri = Uri.parse(raw.trim())
+            val trimmed = raw.trim()
+            val uri = runCatching { URI(trimmed) }.getOrElse { throw IllegalArgumentException("Not a valid URL: $trimmed") }
             require(uri.scheme == "openmesh") { "Not an openmesh:// link" }
-            val kind = when (uri.host) {
+            val kind = when (uri.host?.lowercase()) {
                 "contact", "channel" -> uri.host!!.uppercase()
-                else -> error("Unsupported invite type: ${uri.host}")
+                else -> throw IllegalArgumentException("Unsupported invite type: ${uri.host}")
             }
-            val id = uri.getQueryParameter("node_id") ?: uri.getQueryParameter("id")
-                ?: error("Invite is missing a node/channel id")
+            val params = parseQuery(uri.rawQuery)
+            val id = params["node_id"] ?: params["id"]
+                ?: throw IllegalArgumentException("Invite is missing a node/channel id")
             require(id.length == 16 && Hex.decodeOrNull(id) != null) {
                 "Invite id must be 16 hex characters"
             }
             return QrInvite(
                 kind = Kind.valueOf(kind),
                 nodeId = id.lowercase(),
-                name = uri.getQueryParameter("name")?.take(32) ?: id.take(8),
-                identityBase64 = uri.getQueryParameter("identity").orEmpty(),
-                pskBase64 = uri.getQueryParameter("psk").orEmpty(),
-                profile = uri.getQueryParameter("profile"),
-                region = uri.getQueryParameter("region"),
+                name = (params["name"] ?: id.take(8)).take(32),
+                identityBase64 = params["identity"].orEmpty(),
+                pskBase64 = params["psk"].orEmpty(),
+                profile = params["profile"],
+                region = params["region"],
             )
         }
 
         fun contact(nodeId: String, name: String, identityBase64: String): String =
-            Uri.Builder()
-                .scheme("openmesh")
-                .authority("contact")
-                .appendQueryParameter("node_id", nodeId)
-                .appendQueryParameter("name", name)
-                .appendQueryParameter("identity", identityBase64)
-                .build()
-                .toString()
+            build("contact", listOf("node_id" to nodeId, "name" to name, "identity" to identityBase64))
 
         fun channel(
             channelId: String,
@@ -63,15 +57,38 @@ data class QrInvite(
             pskBase64: String,
             profile: String,
             region: String,
-        ): String = Uri.Builder()
-            .scheme("openmesh")
-            .authority("channel")
-            .appendQueryParameter("id", channelId)
-            .appendQueryParameter("name", name)
-            .appendQueryParameter("psk", pskBase64)
-            .appendQueryParameter("profile", profile)
-            .appendQueryParameter("region", region)
-            .build()
-            .toString()
+        ): String = build(
+            "channel",
+            listOf(
+                "id" to channelId,
+                "name" to name,
+                "psk" to pskBase64,
+                "profile" to profile,
+                "region" to region,
+            ),
+        )
+
+        private fun build(host: String, params: List<Pair<String, String>>): String {
+            val query = params.joinToString("&") { (key, value) ->
+                "${encode(key)}=${encode(value)}"
+            }
+            return "openmesh://$host?$query"
+        }
+
+        private fun parseQuery(query: String?): Map<String, String> {
+            if (query.isNullOrBlank()) return emptyMap()
+            return query.split('&').mapNotNull { part ->
+                if (part.isBlank()) return@mapNotNull null
+                val idx = part.indexOf('=')
+                if (idx <= 0) return@mapNotNull null
+                decode(part.substring(0, idx)) to decode(part.substring(idx + 1))
+            }.toMap()
+        }
+
+        private fun encode(value: String): String =
+            URLEncoder.encode(value, Charsets.UTF_8.name()).replace("+", "%20")
+
+        private fun decode(value: String): String =
+            runCatching { URLDecoder.decode(value, Charsets.UTF_8.name()) }.getOrDefault(value)
     }
 }

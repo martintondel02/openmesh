@@ -84,12 +84,14 @@ class FramedCompanionClient(
     private val decoder = SlipFraming.Decoder()
     private val writeMutex = Mutex()
     private var job: Job? = null
+    private var scope: CoroutineScope? = null
     private var helloAck = CompletableDeferred<HelloAck>()
     private var pingNonce = 1L
 
     /** Start the read/handshake loop in [scope]; idempotent. */
     fun start(scope: CoroutineScope) {
         if (job?.isActive == true) return
+        this.scope = scope
         job = scope.launch {
             launch {
                 transport.connected.collectLatest { connected ->
@@ -205,7 +207,7 @@ class FramedCompanionClient(
                 _session.value = _session.value.copy(ready = true, hello = ack, lastError = null)
                 helloAck.complete(ack)
                 _events.tryEmit(CompanionEvent.HelloReceived(ack))
-                runCatching { sendConfigGet() }
+                scope?.launch { runCatching { sendConfigGet() } }
             }
             Type.CONFIG -> {
                 val entries = parseStringEntries(map)

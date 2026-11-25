@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { Fragment, useEffect, useMemo, useState } from 'react';
 import {
   ArrowUpRight,
   Check,
@@ -19,12 +19,16 @@ import type { BackboneSetup, BackboneSetupStep } from '../../types/backbone';
 import { useAppStore } from '../../store/app';
 import {
   INSTALL_OPTIONS,
+  buildFallbackExposure,
+  exposureStepInsertIndex,
   formatAuthMode,
   isFirewallStep,
   isGatewayStep,
   panelUrlHint,
+  portFromListen,
   redactConnectionString,
 } from '../../lib/backbone';
+import { BackboneExposureSetupStep, exposureCopyLines } from './BackboneExposure';
 import { cn } from '../../lib/utils';
 import { Badge, Button, IconButton, SegmentedControl } from '../../components/ui/primitives';
 import { CopyButton, copyText } from '../../components/ui/signals';
@@ -54,6 +58,8 @@ export function BackboneSetupDrawer({
 }) {
   const loadBackboneSetup = useAppStore((state) => state.loadBackboneSetup);
   const pushToast = useAppStore((state) => state.pushToast);
+  const mode = useAppStore((state) => state.mode);
+  const connection = useAppStore((state) => state.connection);
   const [setup, setSetup] = useState<BackboneSetup | null>(setupProp);
   const [loading, setLoading] = useState(false);
   const [revealed, setRevealed] = useState(demo);
@@ -63,6 +69,16 @@ export function BackboneSetupDrawer({
   useEffect(() => {
     if (!open) return;
     setRevealed(demo);
+    // Demo mode has a seeded payload; never probe the live REST API before hydration.
+    if (mode === 'demo') {
+      if (setupProp) setSetup(setupProp);
+      setLoading(false);
+      return;
+    }
+    if (mode === 'live' && connection !== 'connected') {
+      setLoading(false);
+      return;
+    }
     setLoading(true);
     void loadBackboneSetup()
       .then((loaded) => {
@@ -70,16 +86,37 @@ export function BackboneSetupDrawer({
       })
       .finally(() => setLoading(false));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open]);
+  }, [open, mode, connection]);
 
   useEffect(() => {
     if (setupProp) setSetup(setupProp);
   }, [setupProp]);
 
+  // Screenshot/deep-link helper: ?setup=backbone&focus=exposure opens the drawer
+  // and scrolls the exposure step into view once the payload is rendered.
+  useEffect(() => {
+    if (!open || !setup) return;
+    let focus = false;
+    try {
+      focus = new URLSearchParams(window.location.search).get('focus') === 'exposure';
+    } catch {
+      focus = false;
+    }
+    if (!focus) return;
+    const timer = setTimeout(() => {
+      document
+        .querySelector('[aria-label="Expose it publicly (optional)"]')
+        ?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }, 250);
+    return () => clearTimeout(timer);
+  }, [open, setup]);
+
   const install = INSTALL_OPTIONS.find((option) => option.id === platform) ?? INSTALL_OPTIONS[0]!;
   const panelUrl = panelUrlHint(setup?.panel_url);
   const connectionString = setup?.connection_string ?? '';
   const isOpenAuth = setup?.auth === 'open';
+  const exposure = setup ? setup.exposure ?? buildFallbackExposure(portFromListen(setup.listen), setup.public_host) : null;
+  const exposureInsertIndex = setup ? exposureStepInsertIndex(setup.steps) : 0;
 
   const copyAll = async (): Promise<void> => {
     if (!setup) return;
@@ -90,6 +127,7 @@ export function BackboneSetupDrawer({
       `Connection string: ${connectionString}`,
       '',
       ...setup.steps.flatMap((step, index) => [`${index + 1}. ${step.title}`, ...step.commands.map((command) => `   ${command}`), '']),
+      ...exposureCopyLines(exposure, setup.listen, setup.public_host),
       '## systemd unit',
       setup.systemd_unit,
       '',
@@ -188,23 +226,41 @@ export function BackboneSetupDrawer({
             <div className="mb-2 flex items-center gap-2">
               <ListChecks className="h-4 w-4 text-emerald-300/80" aria-hidden="true" />
               <h3 className="text-sm font-semibold text-slate-100">Onboarding steps</h3>
-              <span className="text-3xs text-slate-500">{setup.steps.length + (extraVerify ? 1 : 0)} steps</span>
+              <span className="text-3xs text-slate-500">{setup.steps.length + (exposure ? 1 : 0) + (extraVerify ? 1 : 0)} steps</span>
             </div>
             <ol className="space-y-3">
-              {setup.steps.map((step, index) => (
-                <SetupStep
-                  key={`${step.title}-${index}`}
-                  index={index + 1}
-                  step={step}
-                  firewall={firewall}
-                  onFirewallChange={setFirewall}
-                  firewallCommands={isFirewallStep(step) ? setup.firewall : null}
-                  highlight={isGatewayStep(step)}
-                />
-              ))}
+              {(() => {
+                let displayIndex = 0;
+                return setup.steps.map((step, index) => {
+                  displayIndex += 1;
+                  return (
+                    <Fragment key={`${step.title}-${index}`}>
+                      <SetupStep
+                        index={displayIndex}
+                        step={step}
+                        firewall={firewall}
+                        onFirewallChange={setFirewall}
+                        firewallCommands={isFirewallStep(step) ? setup.firewall : null}
+                        highlight={isGatewayStep(step)}
+                      />
+                      {exposure && index === exposureInsertIndex - 1 ? (() => {
+                        displayIndex += 1;
+                        return (
+                          <BackboneExposureSetupStep
+                            index={displayIndex}
+                            exposure={exposure}
+                            listen={setup.listen}
+                            publicHost={setup.public_host}
+                          />
+                        );
+                      })() : null}
+                    </Fragment>
+                  );
+                });
+              })()}
               {extraVerify ? (
                 <SetupStep
-                  index={setup.steps.length + 1}
+                  index={setup.steps.length + (exposure ? 2 : 1)}
                   step={extraVerify}
                   firewall={firewall}
                   onFirewallChange={setFirewall}

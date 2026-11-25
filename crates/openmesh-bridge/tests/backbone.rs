@@ -352,9 +352,102 @@ async fn disabled_by_default_then_enabled_via_rest_and_setup_payload() {
     assert!(connection.contains("token="));
     assert!(connection.contains(&format!("node={node_id}")));
     let steps = setup["steps"].as_array().expect("steps");
-    assert_eq!(steps.len(), 5);
+    assert_eq!(steps.len(), 6);
     assert_eq!(steps[0]["title"], "Install OpenMesh");
+    let titles: Vec<&str> = steps
+        .iter()
+        .filter_map(|step| step["title"].as_str())
+        .collect();
+    assert_eq!(
+        titles,
+        vec![
+            "Install OpenMesh",
+            "Start the backbone",
+            "Open the firewall",
+            "Expose it publicly (optional)",
+            "Keep it running",
+            "Connect a gateway",
+        ]
+    );
     assert!(steps.iter().all(|step| step["commands"].is_array()));
+    let exposure_step = &steps[3];
+    assert!(
+        exposure_step["commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|command| command.as_str().unwrap_or("").contains("--bind 127.0.0.1"))
+    );
+    assert!(
+        exposure_step["note"]
+            .as_str()
+            .unwrap_or("")
+            .contains("loopback")
+    );
+
+    // BACKBONE.md §8/§9b exposure block (pinned shape; no secrets).
+    let exposure = &setup["exposure"];
+    assert_eq!(exposure["recommended"], "openflare");
+    assert_eq!(exposure["provider"]["name"], "Openflare");
+    assert_eq!(
+        exposure["provider"]["url"],
+        "https://github.com/martintondel02/openflare"
+    );
+    assert!(
+        exposure["provider"]["description"]
+            .as_str()
+            .unwrap_or("")
+            .contains("outbound-only")
+    );
+    assert!(
+        exposure["when_to_use"]
+            .as_str()
+            .unwrap_or("")
+            .contains("NAT")
+    );
+    assert_eq!(exposure["steps"].as_array().unwrap().len(), 4);
+    assert!(
+        exposure["steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|step| step.is_string())
+    );
+    let alternatives: Vec<&str> = exposure["alternatives"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|value| value.as_str())
+        .collect();
+    assert!(alternatives.contains(&"WireGuard"));
+    assert!(alternatives.contains(&"Tailscale"));
+    assert!(alternatives.contains(&"Cloudflare Tunnel"));
+    assert_eq!(
+        exposure["bind_command"],
+        format!("openmesh-bridge backbone --bind 127.0.0.1 --port {port} --public-host <host>")
+    );
+    assert!(
+        exposure["guide_url"]
+            .as_str()
+            .unwrap_or("")
+            .ends_with("docs/guides/backbone-exposure.md")
+    );
+    // The exposure object contains no secrets (the connection string with the token is a
+    // sibling field, not part of exposure).
+    let exposure_text = exposure.to_string();
+    let connection = setup["connection_string"].as_str().unwrap_or("");
+    let connection_token = connection
+        .split("token=")
+        .nth(1)
+        .and_then(|rest| rest.split('&').next())
+        .unwrap_or("");
+    assert!(
+        !connection_token.is_empty(),
+        "test expects a token connection string"
+    );
+    assert!(!exposure_text.contains(connection_token));
+    assert!(!exposure_text.contains("token="));
+    assert!(!exposure_text.contains("psk"));
     assert!(
         setup["systemd_unit"]
             .as_str()

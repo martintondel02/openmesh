@@ -97,11 +97,13 @@ per message, and client stacks nobody wants to use. Details and trade-offs:
 | **Backbone mode** (authenticated TCP relay + live control panel + installer) | ✅ v0.2 |
 | **Beginner UX** (guided secure setup, beginner/advanced modes, Help Center, glossary) | ✅ v0.3 |
 | **AI-native** (MCP server, 27 agent tools, activity log, OpenAPI 3.1, prompt pack) | ✅ v0.3 |
+| **Android app** (on-device Rust engine via UniFFI, BLE/USB, images, voice, QR, notifications) | ✅ v0.4 |
+| **Public exposure guidance** (Openflare tunnel, WireGuard/Tailscale/TLS alternatives) | ✅ v0.4 |
 | Web / PWA client (chat, groups, map, voice, images, demo mode) | ✅ |
 | Desktop packaging (Tauri 2, Linux/macOS/Windows) | ✅ config; build needs system webkit2gtk/WebView deps |
 | Firmware: 4 reference boards + golden-vector conformance | ✅ code complete, build matrix in CI |
 | Web + CLI flashers | ✅ |
-| Native Android app | 🚧 full Compose scaffold + BLE/USB companion client (CI-built) |
+| Native Android app | ✅ GA: on-device engine, BLE/USB, media, QR, notifications (APK per release) |
 | OMP/2: forward secrecy, voice calls, directed routing | 🗺️ [roadmap](docs/ROADMAP.md) |
 | NomadNet / Reticulum gateway | 🗺️ [design](docs/research/nomadnet-bridge.md) |
 
@@ -247,11 +249,44 @@ openmesh-bridge install-service --backbone      # keep it running across reboots
 ```
 
 OMP frames stay **end-to-end encrypted**: the backbone relays ciphertext and routing metadata
-only. Transport access is protected by a shared secret; put TLS/WireGuard in front for hostile
-networks. Guides: [install](docs/INSTALL.md) ·
+only. Transport access is protected by a shared secret. If your backbone is behind NAT or you'd
+rather not open a port, use the built-in exposure guidance: **Openflare** (outbound-only tunnel,
+[repo](https://github.com/martintondel02/openflare) — public launch in progress) or the
+WireGuard/Tailscale/Caddy alternatives. Guides:
+[exposing your backbone](docs/guides/backbone-exposure.md) · [install](docs/INSTALL.md) ·
 [deployment, sizing, TLS, monitoring](docs/operations/backbone-deployment.md) ·
 [protocol + security model](docs/architecture/BACKBONE.md) ·
 [why these choices (ADR 0009)](docs/adr/0009-backbone-mode.md).
+
+## Android app (v0.4)
+
+The Android app is a **standalone client**: the Rust protocol engine runs on the phone (UniFFI),
+the radio is a connected pipe over BLE or USB, and a foreground service keeps the mesh alive in
+your pocket. No bridge, no server, no account.
+
+```bash
+# from the releases page: openmesh-v0.4.0-android-debug.apk (or a signed release APK)
+adb install openmesh-v0.4.0-android-debug.apk
+# then: open the app -> onboarding -> pair your radio (BLE or USB) -> send a message
+```
+
+- On-device engine: direct + channel messaging, images, voice notes, positions, retry/acks, and
+  encrypted store-and-forward through radios — same OMP/1 protocol as the desktop bridge.
+- Identity seed generated on the phone, Keystore-wrapped; contacts and channels survive restarts.
+- Beginner onboarding applies the same secure preset as the web client (shared
+  `content/presets/setup.json`), with a beginner/advanced mode switch, bundled Help Center and QR
+  invites.
+- Sideload only for now (no Play Store/F-Droid listing yet); debug APKs are built in CI, signed
+  release APKs when keystore secrets are configured. Build/signing notes:
+  [`apps/android/README.md`](apps/android/README.md).
+
+| Onboarding (real device) | Chats & channels | Help (offline) |
+| --- | --- | --- |
+| ![Android onboarding](docs/assets/screenshots/android-onboarding-role.jpg) | ![Android chats](docs/assets/screenshots/android-chats.jpg) | ![Android help](docs/assets/screenshots/android-help.jpg) |
+
+| Radio link | Settings (advanced) | Invite QR |
+| --- | --- | --- |
+| ![Android radio](docs/assets/screenshots/android-radio.jpg) | ![Android settings](docs/assets/screenshots/android-settings.jpg) | ![Android invite](docs/assets/screenshots/android-onboarding-invite.jpg) |
 
 ## Repository layout
 

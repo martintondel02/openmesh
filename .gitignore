@@ -34,3 +34,9 @@ build/
 artifacts/
 # generated help bundle for the web client demo/offline mode
 apps/web/public/help/
+# Android build outputs and generated FFI bindings
+apps/android/app/src/main/jniLibs/
+apps/android/app/src/main/java/uniffi/
+apps/android/app/src/main/assets/help/
+apps/android/app/src/main/assets/presets/
+apps/android/local.properties

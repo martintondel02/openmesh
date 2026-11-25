@@ -34,7 +34,7 @@ object DemoData {
         NodeInfo("0badc0de0badc0de", "Valley gateway", NodeClass.GATEWAY, setOf("RELAY", "WIFI", "ETHERNET", "STORE"),
             hops = 1, lastSeenMs = BASE_MS - 3_600_000, rssi = -76, snr = 8.0f, batteryPct = null),
         NodeInfo("deadbeefdeadbeef", "NomadNet bridge", NodeClass.GATEWAY, setOf("RELAY", "ETHERNET"),
-            hops = 3, lastSeenMs = BASE_MS - 7_200_000, rssi = -118, snr = -6.0f, bridged = false),
+            hops = 3, lastSeenMs = BASE_MS - 7_200_000, rssi = -118, snr = -6.0f),
     )
 
     val channels: List<Channel> = listOf(

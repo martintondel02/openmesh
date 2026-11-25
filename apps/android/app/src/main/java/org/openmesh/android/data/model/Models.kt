@@ -135,6 +135,7 @@ data class RadioStatus(
 /** Settings persisted locally; mirrors the subset of companion config keys we expose. */
 data class AppSettings(
     val nodeName: String = "openmesh-android",
+    val role: String = "client",
     val profile: String = "MEDIUM_FAST",
     val region: String = "EU868",
     val announceIntervalSec: Int = 1800,
@@ -143,5 +144,9 @@ data class AppSettings(
     val autoConnect: Boolean = true,
     val preferUsb: Boolean = true,
     val showAirtimeEstimates: Boolean = true,
-    val demoMode: Boolean = true,
+    val demoMode: Boolean = false,
+    val uiMode: String = "beginner",
+    val notificationsEnabled: Boolean = true,
+    val setupCompleted: Boolean = false,
+    val radioKind: String = "none",
 )

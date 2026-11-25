@@ -18,6 +18,8 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.HelpOutline
+import androidx.compose.material3.IconButton
 import androidx.compose.material.icons.filled.Tag
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -57,6 +59,8 @@ fun ChatListScreen(
     radio: RadioStatus,
     onOpenThread: (peerId: String, channel: Boolean) -> Unit,
     onOpenSettings: () -> Unit,
+    onOpenChannels: () -> Unit = {},
+    onOpenHelp: () -> Unit = {},
 ) {
     val conversations by repository.conversations.collectAsState()
     val channels by repository.channels.collectAsState()
@@ -77,6 +81,12 @@ fun ChatListScreen(
                     style = MaterialTheme.typography.bodyMedium,
                     color = MeshOnSurfaceVariant,
                 )
+            }
+            IconButton(onClick = onOpenChannels) {
+                Icon(Icons.Filled.Tag, contentDescription = "Channels", tint = MeshPrimary)
+            }
+            IconButton(onClick = onOpenHelp) {
+                Icon(Icons.Filled.HelpOutline, contentDescription = "Help", tint = MeshPrimary)
             }
             Button(onClick = { showNewChat = true }) {
                 Icon(Icons.Filled.Edit, contentDescription = null, modifier = Modifier.size(18.dp))

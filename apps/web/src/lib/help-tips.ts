@@ -405,6 +405,11 @@ export const HELP_TIPS: Record<string, HelpTipContent> = {
     topic: 'backbone',
     term: 'Peer',
   },
+  'backbone.exposure': {
+    what: 'How remote gateways reach this backbone when it sits behind NAT or a firewall.',
+    why: 'A private network is safest; otherwise use an outbound-only tunnel so the panel/API stay loopback-only and only the backbone port is published.',
+    topic: 'backbone',
+  },
   'backbone.setup': {
     what: 'A numbered walkthrough for installing the relay on a server or Raspberry Pi.',
     why: 'It includes firewall rules, a systemd service and the gateway join command.',

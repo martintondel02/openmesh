@@ -9,6 +9,7 @@
 import type {
   BackboneConfig,
   BackboneConfigPatch,
+  BackboneExposure,
   BackbonePeer,
   BackbonePeerEvent,
   BackboneSetup,
@@ -23,6 +24,32 @@ export const BACKBONE_DEFAULT_MAX_PEERS = 32;
 export const BACKBONE_DEFAULT_PING_INTERVAL_S = 30;
 export const BACKBONE_RELEASES_URL = 'https://github.com/martintondel02/openmesh/releases/latest';
 export const BACKBONE_INSTALL_URL = 'https://github.com/martintondel02/openmesh/releases/latest/download/install.sh';
+
+/* ------------------------------------------------------------------ */
+/* Public exposure (BACKBONE.md §8/§9b, docs/guides/backbone-exposure) */
+/* ------------------------------------------------------------------ */
+
+export const OPENFLARE_URL = 'https://github.com/martintondel02/openflare';
+export const BACKBONE_EXPOSURE_GUIDE_URL =
+  'https://github.com/martintondel02/openmesh/blob/main/docs/guides/backbone-exposure.md';
+
+/** Chips shown under the tunnel suggestion; all link to the exposure guide. */
+export const EXPOSURE_ALTERNATIVES = [
+  'WireGuard',
+  'Tailscale',
+  'Cloudflare Tunnel',
+  'Caddy/nginx stream TLS',
+] as const;
+
+export const OPENFLARE_PROVIDER = {
+  name: 'Openflare',
+  url: OPENFLARE_URL,
+  description:
+    'Self-hosted tunnel, reverse proxy and control plane with outbound-only connectors and one public edge.',
+} as const;
+
+export const OPENFLARE_LAUNCH_NOTE =
+  'The Openflare repository is being prepared for public launch. Until it is available, the WireGuard/Tailscale and Caddy/nginx recipes in the exposure guide work today.';
 
 /* ------------------------------------------------------------------ */
 /* Connection string (BACKBONE.md §6)                                 */
@@ -407,6 +434,182 @@ export const INSTALL_OPTIONS: InstallOption[] = [
   },
 ];
 
+/** Fallback exposure guidance mirroring the bridge's v0.4 `exposure` object. */
+export function buildFallbackExposure(port = BACKBONE_DEFAULT_PORT, publicHost = ''): BackboneExposure {
+  return {
+    recommended: 'openflare',
+    provider: { ...OPENFLARE_PROVIDER },
+    when_to_use:
+      'Your backbone is behind NAT/CGNAT, or you do not want to open an inbound port.',
+    steps: [
+      'bind the backbone to 127.0.0.1',
+      `create a TCP tunnel to 127.0.0.1:${port}`,
+      `set public_host to the tunnel hostname${publicHost ? ` (currently ${publicHost})` : ''}`,
+      'share the connection string',
+    ],
+    alternatives: [...EXPOSURE_ALTERNATIVES],
+    bind_command: buildLoopbackBindCommand({ port, publicHost }),
+    guide_url: BACKBONE_EXPOSURE_GUIDE_URL,
+  };
+}
+
+/** Defensive normalization of the optional exposure object (absent on old bridges). */
+export function normalizeBackboneExposure(
+  raw: unknown,
+  fallback: BackboneExposure = buildFallbackExposure(),
+): BackboneExposure {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return fallback;
+  const source = raw as Record<string, unknown>;
+  const providerRaw = source.provider && typeof source.provider === 'object' ? (source.provider as Record<string, unknown>) : null;
+  const provider =
+    providerRaw && typeof providerRaw.name === 'string' && providerRaw.name
+      ? {
+          name: providerRaw.name,
+          url: typeof providerRaw.url === 'string' && /^https?:\/\//.test(providerRaw.url) ? providerRaw.url : fallback.provider?.url ?? OPENFLARE_URL,
+          description:
+            typeof providerRaw.description === 'string' && providerRaw.description
+              ? providerRaw.description
+              : fallback.provider?.description ?? OPENFLARE_PROVIDER.description,
+        }
+      : fallback.provider ?? { ...OPENFLARE_PROVIDER };
+  const steps = toStringList(source.steps);
+  const alternatives = toStringList(source.alternatives);
+  return {
+    recommended:
+      typeof source.recommended === 'string' && source.recommended ? source.recommended : fallback.recommended ?? 'openflare',
+    provider,
+    when_to_use:
+      typeof source.when_to_use === 'string' && source.when_to_use ? source.when_to_use : fallback.when_to_use ?? null,
+    steps: steps.length ? steps : fallback.steps ?? [],
+    alternatives: alternatives.length ? alternatives : fallback.alternatives ?? [...EXPOSURE_ALTERNATIVES],
+    bind_command:
+      typeof source.bind_command === 'string' && source.bind_command.trim()
+        ? source.bind_command.trim()
+        : fallback.bind_command ?? buildLoopbackBindCommand(),
+    guide_url:
+      typeof source.guide_url === 'string' && /^https?:\/\//.test(source.guide_url)
+        ? source.guide_url
+        : fallback.guide_url ?? BACKBONE_EXPOSURE_GUIDE_URL,
+  };
+}
+
+function toStringList(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === 'string' && entry.trim().length > 0) : [];
+}
+
+/** `openmesh-bridge backbone --bind 127.0.0.1 --port 9443 --public-host <host>`. */
+export function buildLoopbackBindCommand(options: {
+  port?: number;
+  publicHost?: string | null;
+  binary?: string;
+} = {}): string {
+  const port = Number.isFinite(options.port) && (options.port ?? 0) > 0 ? Math.floor(options.port as number) : BACKBONE_DEFAULT_PORT;
+  const host = (options.publicHost ?? '').trim().split(/\s+/)[0] || '<public-host>';
+  const binary = (options.binary ?? 'openmesh-bridge').trim() || 'openmesh-bridge';
+  return `${binary} backbone --bind 127.0.0.1 --port ${port} --public-host ${host}`;
+}
+
+export function isLoopbackAddress(host: string | null | undefined): boolean {
+  const value = (host ?? '').trim().toLowerCase().replace(/^\[|\]$/g, '');
+  return value === '127.0.0.1' || value === 'localhost' || value === '::1' || value.startsWith('127.');
+}
+
+/** Parse the port from `listen` (`0.0.0.0:9443`) with the documented default. */
+export function portFromListen(listen: string | null | undefined): number {
+  const match = (listen ?? '').match(/:(\d{1,5})\s*$/);
+  const port = match ? Number(match[1]) : NaN;
+  return Number.isFinite(port) && port > 0 && port <= 65535 ? port : BACKBONE_DEFAULT_PORT;
+}
+
+export type ExposureState = 'tunnel' | 'public' | 'bound';
+
+export interface ExposureAdvice {
+  state: ExposureState;
+  badge: string;
+  title: string;
+  body: string;
+  providerName: string;
+  providerUrl: string;
+  guideUrl: string;
+  bindCommand: string;
+  alternatives: string[];
+  publicEndpoint: string | null;
+}
+
+/** Advice for the panel callout and the setup wizard, derived from live config/setup. */
+export function buildExposureAdvice(input: {
+  bind?: string | null;
+  port?: number | null;
+  publicHost?: string | null;
+  exposure?: BackboneExposure | null;
+}): ExposureAdvice {
+  const port = input.port && input.port > 0 ? input.port : BACKBONE_DEFAULT_PORT;
+  const publicHost = (input.publicHost ?? '').trim();
+  const hasPublicHost = Boolean(publicHost) && !isLoopbackAddress(publicHost);
+  const bind = (input.bind ?? '').trim();
+  const loopbackBind = !bind || isLoopbackAddress(bind);
+  const provider = input.exposure?.provider ?? OPENFLARE_PROVIDER;
+  const guideUrl = input.exposure?.guide_url ?? BACKBONE_EXPOSURE_GUIDE_URL;
+  const alternatives = input.exposure?.alternatives?.length
+    ? input.exposure.alternatives
+    : [...EXPOSURE_ALTERNATIVES];
+  const bindCommand =
+    input.exposure?.bind_command ?? buildLoopbackBindCommand({ port, publicHost });
+
+  if (hasPublicHost) {
+    return {
+      state: 'public',
+      badge: 'public endpoint configured',
+      title: `Peers can reach ${publicHost}:${port}`,
+      body:
+        'The connection string and QR already use this public hostname. Keep the panel/API loopback-only, keep token auth on and watch auth failures.',
+      providerName: provider.name,
+      providerUrl: provider.url || OPENFLARE_URL,
+      guideUrl,
+      bindCommand,
+      alternatives,
+      publicEndpoint: `${publicHost}:${port}`,
+    };
+  }
+
+  if (!loopbackBind) {
+    return {
+      state: 'bound',
+      badge: 'bound to all interfaces',
+      title: `Listening on ${bind}:${port}`,
+      body:
+        'The backbone accepts peers on every interface. Put it behind a firewall or VPN, or switch to loopback plus a tunnel so only the tunnel connector can reach it.',
+      providerName: provider.name,
+      providerUrl: provider.url || OPENFLARE_URL,
+      guideUrl,
+      bindCommand,
+      alternatives,
+      publicEndpoint: null,
+    };
+  }
+
+  return {
+    state: 'tunnel',
+    badge: 'tunnel recommended',
+    title: 'Behind NAT? Use an outbound-only tunnel',
+    body:
+      input.exposure?.when_to_use ||
+      'Your backbone is behind NAT/CGNAT, or you do not want to open an inbound port. Run a connector next to it, point TCP at 127.0.0.1 and set the resulting public hostname.',
+    providerName: provider.name,
+    providerUrl: provider.url || OPENFLARE_URL,
+    guideUrl,
+    bindCommand,
+    alternatives,
+    publicEndpoint: null,
+  };
+}
+
+/** Index in `setup.steps` after which the exposure step should render (after firewall). */
+export function exposureStepInsertIndex(steps: BackboneSetupStep[]): number {
+  const index = steps.findIndex((step) => /firewall/i.test(step.title));
+  return index === -1 ? Math.min(steps.length, 3) : index + 1;
+}
+
 /** Firewall command fallbacks when GET /api/backbone/setup is unavailable. */
 export function buildFallbackFirewall(port: number): { firewalld: string[]; ufw: string[] } {
   return {
@@ -492,6 +695,7 @@ export function buildFallbackSetup(options: {
       'Native TLS is not built in yet: front the port with Caddy/nginx/stunnel or run the link inside WireGuard/Tailscale.',
     ],
     panel_url: options.panelUrl ?? 'http://127.0.0.1:8787/backbone',
+    exposure: buildFallbackExposure(port, config.public_host),
   };
 }
 
@@ -530,6 +734,7 @@ export function normalizeBackboneSetup(raw: unknown, fallback: BackboneSetup): B
     firewall: { firewalld, ufw },
     notes: notes.length > 0 ? notes : fallback.notes,
     panel_url: typeof source.panel_url === 'string' && source.panel_url ? source.panel_url : fallback.panel_url,
+    exposure: normalizeBackboneExposure(source.exposure, fallback.exposure ?? buildFallbackExposure(portFromListen(fallback.listen), fallback.public_host)),
   };
 }
 

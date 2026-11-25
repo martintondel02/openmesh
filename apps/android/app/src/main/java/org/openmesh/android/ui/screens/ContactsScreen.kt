@@ -18,6 +18,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ContentPaste
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.QrCode
 import androidx.compose.material.icons.filled.QrCodeScanner
 import androidx.compose.material.icons.filled.Verified
 import androidx.compose.material3.AlertDialog
@@ -56,11 +57,12 @@ import org.openmesh.android.ui.theme.MeshTertiary
 
 /** Contacts tab: QR scan/import, verification state, bridged contacts. */
 @Composable
-fun ContactsScreen(repository: MeshRepository, onScan: () -> Unit) {
+fun ContactsScreen(repository: MeshRepository, onScan: () -> Unit, onOpenHelp: (String) -> Unit = {}) {
     val contacts by repository.contacts.collectAsState()
     var showPaste by remember { mutableStateOf(false) }
     var pasteText by remember { mutableStateOf("") }
     var error by remember { mutableStateOf<String?>(null) }
+    var showMyQr by remember { mutableStateOf(false) }
 
     Column(Modifier.fillMaxSize()) {
         Column(Modifier.padding(horizontal = 16.dp, vertical = 12.dp)) {
@@ -82,9 +84,17 @@ fun ContactsScreen(repository: MeshRepository, onScan: () -> Unit) {
                     Spacer(Modifier.width(6.dp))
                     Text("Paste link")
                 }
+                OutlinedButton(onClick = { showMyQr = true }) {
+                    Icon(Icons.Filled.QrCode, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text("My QR")
+                }
             }
         }
 
+        if (showMyQr) {
+            MyContactQrDialog(repository = repository) { showMyQr = false }
+        }
         LazyColumn(
             Modifier.fillMaxSize(),
             contentPadding = androidx.compose.foundation.layout.PaddingValues(start = 16.dp, end = 16.dp, bottom = 24.dp),
@@ -190,4 +200,31 @@ private fun ContactRow(contact: Contact, onRemove: () -> Unit) {
             Icon(Icons.Filled.Delete, contentDescription = "Remove contact", tint = MeshOnSurfaceVariant)
         }
     }
+}
+
+@Composable
+private fun MyContactQrDialog(repository: MeshRepository, onDismiss: () -> Unit) {
+    val invite = repository.selfContactInvite()
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("My contact QR") },
+        text = {
+            if (invite == null) {
+                Text("Start the mesh first: the identity is created when the engine starts.")
+            } else {
+                androidx.compose.foundation.layout.Column(
+                    horizontalAlignment = androidx.compose.ui.Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    org.openmesh.android.ui.components.InviteQr(invite)
+                    Text(
+                        "Scan this in another OpenMesh app to add you as a contact. It contains only public identity data.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MeshOnSurfaceVariant,
+                    )
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("Done") } },
+    )
 }

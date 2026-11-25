@@ -102,6 +102,7 @@ export const CONTROL_REGISTRY: ControlEntry[] = [
   { id: 'backbone.stat.authFailures', screen: 'backbone', label: 'Auth failures stat', helpKey: 'backbone.stat.authFailures', audience: 'advanced' },
   { id: 'backbone.peer.kick', screen: 'backbone', label: 'Kick peer', helpKey: 'backbone.peer.kick', audience: 'advanced' },
   { id: 'backbone.setup', screen: 'backbone', label: 'Setup wizard', helpKey: 'backbone.setup', audience: 'both' },
+  { id: 'backbone.exposure', screen: 'backbone', label: 'Public exposure', helpKey: 'backbone.exposure', audience: 'both' },
 
   /* agents */
   { id: 'agents.intro', screen: 'agents', label: 'What is an agent', helpKey: 'agents.intro', audience: 'both' },

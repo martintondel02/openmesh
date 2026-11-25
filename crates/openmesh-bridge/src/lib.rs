@@ -135,6 +135,8 @@ pub struct Bridge {
 impl Bridge {
     /// Load persisted state, start transports, spawn the engine task and bind the API server.
     pub async fn start(options: BridgeOptions) -> Result<Self> {
+        // Shared onboarding presets are data: validate the embedded copy before serving anything.
+        crate::setup::validate_embedded_presets().map_err(anyhow::Error::msg)?;
         let started_at_ms = util::now_ms();
 
         // 1. Local state: token, identity seed, database, attachment store.

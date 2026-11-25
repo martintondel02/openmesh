@@ -1,6 +1,7 @@
 package org.openmesh.android.data.repository
 
 import android.content.Context
+import android.util.Base64
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -12,11 +13,26 @@ import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import org.openmesh.android.data.db.ChannelEntity
+import org.openmesh.android.data.db.ContactEntity
+import org.openmesh.android.data.db.MessageEntity
+import org.openmesh.android.data.db.NodeEntity
+import org.openmesh.android.data.db.OpenMeshDatabase
+import org.openmesh.android.data.engine.ChannelInvite
 import org.openmesh.android.data.engine.CoreEvent
+import org.openmesh.android.data.engine.CoreStats
+import org.openmesh.android.data.engine.CoreStatus
 import org.openmesh.android.data.engine.DemoEngineBridge
 import org.openmesh.android.data.engine.EngineBridge
+import org.openmesh.android.data.engine.EngineConfig
+import org.openmesh.android.data.engine.Target
+import org.openmesh.android.data.engine.UniFfiEngineBridge
+import org.openmesh.android.data.help.HelpRepository
+import org.openmesh.android.data.help.HelpTopicMeta
 import org.openmesh.android.data.model.AppSettings
+import org.openmesh.android.data.model.Attachment
 import org.openmesh.android.data.model.Channel
 import org.openmesh.android.data.model.Contact
 import org.openmesh.android.data.model.Conversation
@@ -24,17 +40,30 @@ import org.openmesh.android.data.model.DeliveryState
 import org.openmesh.android.data.model.DemoData
 import org.openmesh.android.data.model.Message
 import org.openmesh.android.data.model.MessageKind
-import org.openmesh.android.data.model.NodeInfo
 import org.openmesh.android.data.model.NodeClass
+import org.openmesh.android.data.model.NodeInfo
+import org.openmesh.android.data.model.Position
 import org.openmesh.android.data.model.RadioStatus
+import org.openmesh.android.data.notify.Notifications
+import org.openmesh.android.data.prefs.AppPreferences
+import org.openmesh.android.data.prefs.UiMode
+import org.openmesh.android.data.presets.AppliedPreset
+import org.openmesh.android.data.presets.BeginnerAnswers
+import org.openmesh.android.data.presets.BeginnerPreset
+import org.openmesh.android.data.presets.PresetLoader
+import org.openmesh.android.data.security.IdentityException
+import org.openmesh.android.data.security.IdentityStore
 import org.openmesh.android.data.transport.BleTransport
 import org.openmesh.android.data.transport.CompanionTransport
 import org.openmesh.android.data.transport.FramedCompanionClient
 import org.openmesh.android.data.transport.UsbSerialTransport
+import org.openmesh.android.media.MediaMath
 import org.openmesh.android.util.LoraProfile
+import org.openmesh.android.util.MeshLog
 import org.openmesh.android.util.Region
 import org.openmesh.android.util.estimateResourceTransfer
 import org.openmesh.android.util.wallClockMs
+import java.io.File
 
 enum class CompanionKind { NONE, USB, BLE }
 
@@ -45,66 +74,243 @@ sealed interface UiEvent {
 }
 
 /**
- * Single source of truth for the Android UI.
+ * Single source of truth for the Android UI and foreground service.
  *
- * Responsibilities:
- *  * choose demo data vs a connected radio / future FFI core,
- *  * own the [FramedCompanionClient] lifecycle and translate companion events into state,
- *  * expose StateFlows the Compose screens collect,
- *  * provide the honest airtime estimate shown before sending media
- *    (docs/architecture/PROTOCOL.md §9.4, docs/research/lora-capacity-and-media.md).
- *
- * Threading: methods are safe to call from the main thread; IO happens on [scope].
+ * Owns the Rust engine (via [EngineBridge]), the companion radio link, persistence (Room +
+ * DataStore) and the 250 ms engine loop. The UI only reads StateFlows and calls intent-style
+ * methods; it never touches the generated UniFFI classes.
  */
 class MeshRepository(
-    private val context: Context,
-    private val engine: EngineBridge = DemoEngineBridge(),
+    context: Context,
+    private val prefs: AppPreferences = AppPreferences(context),
+    private val database: OpenMeshDatabase = OpenMeshDatabase.get(context),
+    private val help: HelpRepository = HelpRepository(context),
+    private val identityStore: IdentityStore = IdentityStore(context),
 ) {
+    private val appContext = context.applicationContext
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    private val dao = database.dao()
 
-    private val _settings = MutableStateFlow(DemoData.settings)
+    // ---------------------------------------------------------------- observable state
+    private val _settings = MutableStateFlow(AppSettings())
     val settings: StateFlow<AppSettings> = _settings.asStateFlow()
 
-    private val _nodes = MutableStateFlow(DemoData.nodes)
+    private val _nodes = MutableStateFlow<List<NodeInfo>>(emptyList())
     val nodes: StateFlow<List<NodeInfo>> = _nodes.asStateFlow()
 
-    private val _contacts = MutableStateFlow(DemoData.contacts)
+    private val _contacts = MutableStateFlow<List<Contact>>(emptyList())
     val contacts: StateFlow<List<Contact>> = _contacts.asStateFlow()
 
-    private val _channels = MutableStateFlow(DemoData.channels)
+    private val _channels = MutableStateFlow<List<Channel>>(emptyList())
     val channels: StateFlow<List<Channel>> = _channels.asStateFlow()
 
-    private val _messages = MutableStateFlow(DemoData.messages)
+    private val _messages = MutableStateFlow<Map<String, List<Message>>>(emptyMap())
     val messages: StateFlow<Map<String, List<Message>>> = _messages.asStateFlow()
 
-    private val _channelMessages = MutableStateFlow(DemoData.channelMessages)
+    private val _channelMessages = MutableStateFlow<Map<String, List<Message>>>(emptyMap())
     val channelMessages: StateFlow<Map<String, List<Message>>> = _channelMessages.asStateFlow()
 
-    private val _conversations = MutableStateFlow(buildConversations(DemoData.messages, DemoData.contacts))
+    private val _conversations = MutableStateFlow<List<Conversation>>(emptyList())
     val conversations: StateFlow<List<Conversation>> = _conversations.asStateFlow()
 
-    private val _radio = MutableStateFlow(DemoData.radioStatus)
+    private val _radio = MutableStateFlow(RadioStatus(connected = false, transportName = "none"))
     val radio: StateFlow<RadioStatus> = _radio.asStateFlow()
 
-    private val _engineStatus = engine.status
-    val engineStatus: StateFlow<org.openmesh.android.data.engine.CoreStatus> = _engineStatus
+    private val _engineStatus = MutableStateFlow(CoreStatus())
+    val engineStatus: StateFlow<CoreStatus> = _engineStatus.asStateFlow()
 
-    private val _uiEvents = MutableSharedFlow<UiEvent>(extraBufferCapacity = 16)
+    private val _stats = MutableStateFlow(CoreStats())
+    val stats: StateFlow<CoreStats> = _stats.asStateFlow()
+
+    private val _selfNodeId = MutableStateFlow<String?>(null)
+    val selfNodeId: StateFlow<String?> = _selfNodeId.asStateFlow()
+
+    private val _selfIdentity = MutableStateFlow<String?>(null)
+    val selfIdentity: StateFlow<String?> = _selfIdentity.asStateFlow()
+
+    private val _uiEvents = MutableSharedFlow<UiEvent>(extraBufferCapacity = 32)
     val uiEvents: SharedFlow<UiEvent> = _uiEvents.asSharedFlow()
+
+    val helpTopics: List<HelpTopicMeta> get() = help.topics
+
+    fun helpTopic(slug: String): org.openmesh.android.data.help.HelpTopic? = help.topic(slug)
+
+    // ---------------------------------------------------------------- internals
+    private val _lastChannelInvite = MutableStateFlow<String?>(null)
+    val lastChannelInvite: StateFlow<String?> = _lastChannelInvite.asStateFlow()
+
+    private var engine: EngineBridge = DemoEngineBridge()
+    private var engineJobs: MutableList<Job> = mutableListOf()
+    private var tickJob: Job? = null
+    private var startJob: Job? = null
+    private var started = false
+    private var startedLock = Any()
+
+    private val _engineReady = MutableStateFlow(false)
+    val engineReady: StateFlow<Boolean> = _engineReady.asStateFlow()
+
+    private val _initialized = MutableStateFlow(false)
+    /** True once DataStore/Room state has been loaded (MainActivity waits for this). */
+    val initialized: StateFlow<Boolean> = _initialized.asStateFlow()
 
     private var transport: CompanionTransport? = null
     private var companion: FramedCompanionClient? = null
     private var companionKind = CompanionKind.NONE
     private var companionJob: Job? = null
+    @Volatile private var latestPrefs = org.openmesh.android.data.prefs.LocalPrefs()
 
     init {
-        scope.launch { engine.start() }
-        scope.launch {
-            engine.events.collect { event -> handleCoreEvent(event) }
+        scope.launch { load() }
+    }
+
+    private suspend fun load() {
+        val saved = prefs.current()
+        latestPrefs = saved
+        _settings.value = saved.toSettings()
+        loadFromDatabase()
+        if (saved.demoMode) {
+            seedDemo()
+        } else if (saved.setupCompleted) {
+            ensureStarted()
+        }
+        if (saved.autoConnect && saved.radioKind != "none" && saved.setupCompleted) {
+            connectCompanion(if (saved.radioKind == "usb") CompanionKind.USB else CompanionKind.BLE)
+        }
+        _initialized.value = true
+        MeshLog.i("repository loaded: setup_completed=${saved.setupCompleted} mode=${saved.uiMode.wire} radio=${saved.radioKind}")
+    }
+
+    private suspend fun loadFromDatabase() {
+        val channels = dao.channels().map { Channel(it.id, it.name, pskSet = it.pskSet) }
+        val channelIds = channels.map { it.id }.toSet()
+        val all = dao.messages().map { it.toModel() }
+        val direct = all.filter { it.peerId !in channelIds }
+        val channelMsgs = all.filter { it.peerId in channelIds }
+        _channels.value = channels
+        _contacts.value = dao.contacts().map { it.toModel() }
+        _nodes.value = dao.nodes().map { it.toModel() }
+        _messages.value = direct.groupBy { it.peerId }.mapValues { (_, list) -> list.sortedBy { it.sentAtMs } }
+        _channelMessages.value = channelMsgs.groupBy { it.peerId }.mapValues { (_, list) -> list.sortedBy { it.sentAtMs } }
+        rebuildConversations()
+    }
+
+    private fun seedDemo() {
+        _settings.value = _settings.value.copy(demoMode = true)
+        _nodes.value = DemoData.nodes
+        _contacts.value = DemoData.contacts
+        _channels.value = DemoData.channels
+        _messages.value = DemoData.messages
+        _channelMessages.value = DemoData.channelMessages
+        _radio.value = DemoData.radioStatus
+        rebuildConversations()
+    }
+
+    // ---------------------------------------------------------------- lifecycle / engine
+
+    /** Idempotent: starts the engine + tick loop in the background (UI/service entry point). */
+    fun ensureStarted() {
+        scope.launch { ensureStartedAwait() }
+    }
+
+    /**
+     * Starts the engine and suspends until the Rust core has actually been constructed and its
+     * state imported. JNA + UniFFI init can take seconds on first use, so callers must await this
+     * before configuring/creating channels. Returns false on timeout/failure.
+     */
+    suspend fun ensureStartedAwait(timeoutMs: Long = 20_000): Boolean {
+        if (_engineReady.value && engine.status.value.running) return true
+        val job = synchronized(startedLock) {
+            started = true
+            if (startJob?.isActive != true) {
+                startJob = scope.launch { startEngine() }
+            }
+            startJob!!
+        }
+        return kotlinx.coroutines.withTimeoutOrNull(timeoutMs) {
+            job.join()
+            _engineReady.value && engine.status.value.running
+        } ?: false.also {
+            MeshLog.w("engine start timed out after ${timeoutMs}ms")
+            _uiEvents.tryEmit(UiEvent.Error("The protocol engine did not start in time. Try again, or check logcat tag OpenMesh."))
         }
     }
 
-    // ------------------------------------------------------------------ messages
+    private suspend fun startEngine() {
+        _engineReady.value = false
+        MeshLog.i("engine start: begin")
+        val saved = prefs.current()
+        latestPrefs = saved
+        val seed = try {
+            identityStore.loadOrCreateSeed(prefs)
+        } catch (e: IdentityException) {
+            MeshLog.e("engine start: identity error", e)
+            _uiEvents.tryEmit(UiEvent.Error(e.message ?: "identity error"))
+            synchronized(startedLock) { started = false }
+            return
+        }
+        engineJobs.forEach { it.cancel() }
+        engineJobs = mutableListOf()
+        runCatching { engine.stop() }
+        engine = if (saved.demoMode) DemoEngineBridge() else UniFfiEngineBridge()
+        val config = EngineConfig(
+            name = saved.nodeName,
+            nodeClass = saved.role,
+            profile = saved.profile,
+            region = saved.region,
+            storeForward = saved.storeForward,
+            acceptChannels = true,
+            announceIntervalS = saved.announceIntervalS,
+        )
+        engine.start(seed, config)
+        val state = prefs.engineState()
+        if (state != null && state.isNotEmpty()) runCatching { engine.importState(state) }
+        _selfNodeId.value = engine.nodeIdHex()
+        _selfIdentity.value = engine.publicIdentityB64()
+        _engineStatus.value = engine.status.value
+        engineJobs += scope.launch { engine.events.collect { handleCoreEvent(it) } }
+        engineJobs += scope.launch { engine.outbound.collect { out -> companion?.let { c -> runCatching { c.sendFrame(out.frame) } } } }
+        engineJobs += scope.launch { engine.status.collect { _engineStatus.value = it } }
+        tickJob?.cancel()
+        tickJob = scope.launch {
+            while (isActive) {
+                runCatching { engine.tick(System.currentTimeMillis()) }
+                if (engine.status.value.running) {
+                    _stats.value = runCatching { engine.stats() }.getOrDefault(CoreStats())
+                }
+                delay(250)
+            }
+        }
+        runCatching { engine.announce(System.currentTimeMillis()) }
+        if (saved.demoMode) seedDemo()
+        _engineReady.value = true
+        MeshLog.i("engine start: ready node=${engine.nodeIdHex() ?: "?"} name=${saved.nodeName} profile=${saved.profile}/${saved.region}")
+    }
+
+    /** Persist engine state and stop timers (called when the user stops the mesh). */
+    fun stop() {
+        MeshLog.i("engine stop requested")
+        synchronized(startedLock) { started = false }
+        _engineReady.value = false
+        tickJob?.cancel()
+        tickJob = null
+        val export = runCatching { engine.exportState() }.getOrNull()
+        if (export != null && export.isNotEmpty()) scope.launch { prefs.setEngineState(export) }
+        engineJobs.forEach { it.cancel() }
+        engineJobs = mutableListOf()
+        disconnectCompanion()
+        scope.launch { runCatching { engine.stop() } }
+    }
+
+    fun selfNodeId(): String? = _selfNodeId.value
+
+    /** Contact invite for your own node (QR/paste). Null until the engine has started. */
+    fun selfContactInvite(): String? {
+        val id = _selfNodeId.value ?: return null
+        val identity = _selfIdentity.value ?: return null
+        return QrInvite.contact(id, _settings.value.nodeName, identity)
+    }
+
+    // ---------------------------------------------------------------- messaging
 
     fun messageThread(peerId: String): List<Message> =
         _messages.value[peerId] ?: _channelMessages.value[peerId] ?: emptyList()
@@ -114,52 +320,37 @@ class MeshRepository(
     fun nodeFor(nodeId: String): NodeInfo? = _nodes.value.firstOrNull { it.nodeId == nodeId }
 
     fun displayNameFor(nodeId: String): String =
-        contactFor(nodeId)?.name ?: nodeFor(nodeId)?.name ?: nodeId.take(8)
+        _channels.value.firstOrNull { it.id == nodeId }?.name
+            ?: contactFor(nodeId)?.name
+            ?: nodeFor(nodeId)?.name
+            ?: nodeId.take(8)
 
-    /** Send a text into a direct conversation. Returns the local message id. */
     fun sendText(peerId: String, text: String, channel: Boolean = false): Long {
         val trimmed = text.trim()
         if (trimmed.isEmpty()) return -1L
-        val id = System.currentTimeMillis()
+        val target = if (channel) Target.Channel(peerId) else Target.Direct(peerId)
+        val result = engine.sendText(target, trimmed)
+        val id = result.getOrElse {
+            _uiEvents.tryEmit(UiEvent.Error(it.message ?: "send failed"))
+            System.currentTimeMillis()
+        }
         val message = Message(
             id = id,
             peerId = peerId,
-            fromId = engine.selfNodeId() ?: "demo",
+            fromId = _selfNodeId.value ?: "self",
             toId = peerId,
             kind = MessageKind.TEXT,
             text = trimmed,
-            sentAtMs = id,
+            sentAtMs = System.currentTimeMillis(),
             outgoing = true,
-            delivery = DeliveryState.QUEUED,
+            delivery = if (result.isSuccess) DeliveryState.SENT else DeliveryState.FAILED,
         )
         appendMessage(peerId, message, channel)
-        if (_radio.value.connected && companion != null) {
-            // The companion transport is live, but building a valid OMP frame needs the Rust
-            // core (UniFFI). Until that lands, be explicit instead of pretending to send.
-            markDelivery(peerId, id, DeliveryState.FAILED, channel)
-            _uiEvents.tryEmit(
-                UiEvent.Error(
-                    "Radio connected, but the OpenMesh core is not linked in this build; " +
-                        "see apps/android/README.md (M2).",
-                ),
-            )
-        } else {
-            // Demo/direct mode: simulate an ack so the UI state machine is exercised.
-            scope.launch {
-                delay(900)
-                markDelivery(peerId, id, DeliveryState.SENT, channel)
-                delay(1200)
-                markDelivery(peerId, id, DeliveryState.DELIVERED, channel)
-            }
-        }
+        scope.launch { dao.upsertMessage(MessageEntity.fromModel(message)) }
+        if (engine.isDemo()) simulateAck(peerId, id, channel)
         return id
     }
 
-    /**
-     * Queue an image attachment. The real client compresses locally to [mediaCapBytes] and
-     * shows [estimateMedia] before sending; the demo path records the chosen bytes and
-     * simulates the resource transfer so the progress UI is exercised.
-     */
     fun sendAttachment(
         peerId: String,
         name: String,
@@ -167,125 +358,257 @@ class MeshRepository(
         sizeBytes: Int,
         channel: Boolean = false,
     ): Long {
-        val id = System.currentTimeMillis()
+        // Kept for the scaffold's demo voice/image dialog: synthesize deterministic bytes only in
+        // demo mode; real media uses [sendAttachmentBytes] with compressed/recorded data.
+        val bytes = ByteArray(sizeBytes.coerceAtLeast(1)) { 0 }
+        return sendAttachmentBytes(peerId, name, mime, bytes, null, channel)
+    }
+
+    fun sendVoiceNote(peerId: String, durationMs: Int, bytes: Int, channel: Boolean = false): Long =
+        sendAttachment(peerId, "voice-${durationMs / 1000}s.m4a", "audio/mp4", bytes, channel)
+
+    /** Send real media bytes (compressed image, recorded AAC voice note) through the engine. */
+    fun sendAttachmentBytes(
+        peerId: String,
+        name: String,
+        mime: String,
+        data: ByteArray,
+        durationMs: Long? = null,
+        channel: Boolean = false,
+    ): Long {
+        val target = if (channel) Target.Channel(peerId) else Target.Direct(peerId)
+        val result = engine.sendAttachment(target, mime, name, data, durationMs)
+        val id = result.getOrElse {
+            _uiEvents.tryEmit(UiEvent.Error(it.message ?: "attachment rejected (profile cap?)"))
+            System.currentTimeMillis()
+        }
+        val local = File(attachmentsDir(), "att_$id").apply { writeBytes(data) }
         val message = Message(
             id = id,
             peerId = peerId,
-            fromId = engine.selfNodeId() ?: "demo",
+            fromId = _selfNodeId.value ?: "self",
             toId = peerId,
             kind = MessageKind.ATTACHMENT,
             text = name,
-            sentAtMs = id,
+            sentAtMs = System.currentTimeMillis(),
             outgoing = true,
-            delivery = DeliveryState.QUEUED,
-            attachment = org.openmesh.android.data.model.Attachment(
-                id = "att_${id.toString(16)}",
+            delivery = if (result.isSuccess) DeliveryState.SENT else DeliveryState.FAILED,
+            attachment = Attachment(
+                id = "att_$id",
                 mime = mime,
-                sizeBytes = sizeBytes,
+                sizeBytes = data.size,
+                durationMs = durationMs?.toInt(),
                 name = name,
                 progress = 1f,
             ),
         )
         appendMessage(peerId, message, channel)
-        scope.launch {
-            delay(600)
-            markDelivery(peerId, id, DeliveryState.SENT, channel)
-            delay(1_500)
-            markDelivery(peerId, id, DeliveryState.DELIVERED, channel)
-        }
+        scope.launch { dao.upsertMessage(MessageEntity.fromModel(message)) }
+        if (engine.isDemo()) simulateAck(peerId, id, channel)
+        // Keep the local file reference for playback/retry.
+        local.absolutePath
         return id
     }
 
-    /** Queue a voice note (Opus/Ogg, recorded by the app in M2; simulated in the scaffold). */
-    fun sendVoiceNote(peerId: String, durationMs: Int, bytes: Int, channel: Boolean = false): Long {
-        val id = System.currentTimeMillis()
-        val message = Message(
-            id = id,
-            peerId = peerId,
-            fromId = engine.selfNodeId() ?: "demo",
-            toId = peerId,
-            kind = MessageKind.ATTACHMENT,
-            text = "Voice note",
-            sentAtMs = id,
-            outgoing = true,
-            delivery = DeliveryState.QUEUED,
-            attachment = org.openmesh.android.data.model.Attachment(
-                id = "att_${id.toString(16)}",
-                mime = "audio/ogg; codecs=opus",
-                sizeBytes = bytes,
-                durationMs = durationMs,
-                name = "voice-${durationMs / 1000}s.ogg",
-                progress = 1f,
-            ),
-        )
-        appendMessage(peerId, message, channel)
+    fun retryMessage(messageId: Long) {
+        engine.retryMessage(messageId)
         scope.launch {
-            delay(600)
-            markDelivery(peerId, id, DeliveryState.SENT, channel)
-            delay(1_500)
-            markDelivery(peerId, id, DeliveryState.DELIVERED, channel)
+            updateDeliveryAnywhere(messageId, DeliveryState.SENT, null)
         }
-        return id
+    }
+
+    fun markThreadRead(peerId: String, channel: Boolean = false) {
+        val thread = messageThread(peerId)
+        thread.filter { !it.outgoing && !it.read }.forEach { engine.markRead(it.id) }
+        scope.launch { dao.markThreadRead(peerId) }
+        val mapped = thread.map { if (it.outgoing) it else it.copy(read = true) }
+        if (channel) {
+            _channelMessages.value = _channelMessages.value + (peerId to mapped)
+            _channels.value = _channels.value.map { if (it.id == peerId) it.copy(unreadCount = 0) else it }
+        } else {
+            _messages.value = _messages.value + (peerId to mapped)
+        }
+        rebuildConversations()
+    }
+
+    fun attachmentFile(attachmentId: String): File? =
+        File(attachmentsDir(), attachmentId).takeIf { it.isFile }
+
+    private fun attachmentsDir(): File = File(appContext.filesDir, "attachments").apply { mkdirs() }
+
+    private fun simulateAck(peerId: String, id: Long, channel: Boolean) {
+        scope.launch {
+            delay(800)
+            updateDeliveryAnywhere(id, DeliveryState.SENT, channel)
+            delay(1200)
+            updateDeliveryAnywhere(id, DeliveryState.DELIVERED, channel)
+        }
     }
 
     private fun appendMessage(peerId: String, message: Message, channel: Boolean) {
         if (channel) {
-            val existing = _channelMessages.value[peerId].orEmpty()
-            _channelMessages.value = _channelMessages.value + (peerId to (existing + message))
-            val updatedChannels = _channels.value.map {
-                if (it.id == peerId) it.copy(unreadCount = 0) else it
+            val thread = _channelMessages.value[peerId].orEmpty()
+            _channelMessages.value = _channelMessages.value + (peerId to (thread + message))
+        } else {
+            val thread = _messages.value[peerId].orEmpty()
+            _messages.value = _messages.value + (peerId to (thread + message))
+            rebuildConversations()
+        }
+    }
+
+    private fun updateDeliveryAnywhere(id: Long, state: DeliveryState, channel: Boolean?) {
+        fun mapThreads(map: Map<String, List<Message>>): Map<String, List<Message>> =
+            map.mapValues { (_, list) -> list.map { if (it.id == id) it.copy(delivery = state) else it } }
+        _messages.value = mapThreads(_messages.value)
+        _channelMessages.value = mapThreads(_channelMessages.value)
+        rebuildConversations()
+        scope.launch {
+            val entity = dao.messages().firstOrNull { it.id == id }
+            if (entity != null) dao.updateDelivery(id, state.name, entity.read)
+        }
+    }
+
+    private fun rebuildConversations() {
+        val contacts = _contacts.value
+        _conversations.value = _messages.value.map { (peerId, thread) ->
+            val contact = contacts.firstOrNull { it.nodeId == peerId }
+            Conversation(
+                peerId = peerId,
+                peerName = contact?.name ?: displayNameFor(peerId),
+                lastMessage = thread.lastOrNull(),
+                unreadCount = thread.count { !it.outgoing && !it.read },
+                online = _nodes.value.any { it.nodeId == peerId && it.lastSeenMs > System.currentTimeMillis() - 5 * 60_000 },
+                contact = contact != null,
+            )
+        }.sortedByDescending { it.lastMessage?.sentAtMs ?: 0L }
+    }
+
+    // ---------------------------------------------------------------- core events
+
+    private fun handleCoreEvent(event: CoreEvent) {
+        when (event) {
+            is CoreEvent.MessageReceived -> {
+                val channel = event.message.peerId in _channels.value.map { it.id }
+                val peerId = event.message.peerId
+                if (!event.message.outgoing) {
+                    appendMessage(peerId, event.message, channel)
+                    scope.launch { dao.upsertMessage(MessageEntity.fromModel(event.message)) }
+                    if (channel) {
+                        _channels.value = _channels.value.map {
+                            if (it.id == peerId) it.copy(unreadCount = it.unreadCount + 1) else it
+                        }
+                    }
+                    if (_settings.value.notificationsEnabled) {
+                        MeshLog.i("notification: new message peer=$peerId channel=$channel")
+                        Notifications.showMessage(
+                            appContext,
+                            peerId = peerId,
+                            sender = if (channel) displayNameFor(peerId) else displayNameFor(event.message.fromId),
+                            body = event.message.text ?: "New message",
+                            isChannel = channel,
+                        )
+                    }
+                }
             }
-            _channels.value = updatedChannels
-        } else {
-            val existing = _messages.value[peerId].orEmpty()
-            _messages.value = _messages.value + (peerId to (existing + message))
-            _conversations.value = buildConversations(_messages.value, _contacts.value)
+
+            is CoreEvent.DeliveryChanged -> updateDeliveryAnywhere(event.messageId, event.state, null)
+
+            is CoreEvent.NodeSeen -> {
+                val contact = contactFor(event.node.nodeId) != null
+                val node = event.node.copy(isContact = contact)
+                _nodes.value = _nodes.value.filterNot { it.nodeId == node.nodeId } + node
+                scope.launch { dao.upsertNode(NodeEntity.fromModel(node)) }
+            }
+
+            is CoreEvent.ResourceProgress -> {
+                fun progress(list: List<Message>) = list.map {
+                    if (it.id == event.messageId && it.attachment != null) {
+                        it.copy(attachment = it.attachment.copy(progress = event.received.toFloat() / event.total.coerceAtLeast(1)))
+                    } else {
+                        it
+                    }
+                }
+                _messages.value = _messages.value.mapValues { (_, list) -> progress(list) }
+                _channelMessages.value = _channelMessages.value.mapValues { (_, list) -> progress(list) }
+            }
+
+            is CoreEvent.ResourceReceived -> {
+                val file = File(attachmentsDir(), "att_${event.messageId}").apply { writeBytes(event.data) }
+                val text = if (event.mime.startsWith("text/")) String(event.data, Charsets.UTF_8) else event.filename ?: "Attachment"
+                val channel = event.channelId != null && event.channelId in _channels.value.map { it.id }
+                val peerId = event.channelId ?: event.peerId
+                val message = Message(
+                    id = event.messageId,
+                    peerId = peerId,
+                    fromId = event.peerId,
+                    toId = peerId,
+                    kind = MessageKind.ATTACHMENT,
+                    text = text,
+                    sentAtMs = System.currentTimeMillis(),
+                    receivedAtMs = System.currentTimeMillis(),
+                    outgoing = false,
+                    delivery = DeliveryState.DELIVERED,
+                    attachment = Attachment(
+                        id = "att_${event.messageId}",
+                        mime = event.mime,
+                        sizeBytes = event.data.size,
+                        durationMs = event.durationMs?.toInt(),
+                        name = event.filename ?: file.name,
+                        progress = 1f,
+                    ),
+                )
+                appendMessage(peerId, message, channel)
+                scope.launch { dao.upsertMessage(MessageEntity.fromModel(message)) }
+                if (_settings.value.notificationsEnabled) {
+                    Notifications.showMessage(
+                        appContext,
+                        peerId = peerId,
+                        sender = if (channel) displayNameFor(peerId) else displayNameFor(event.peerId),
+                        body = if (event.mime.startsWith("image/")) "📷 Photo" else if (event.mime.startsWith("audio/")) "🎤 Voice note" else text,
+                        isChannel = channel,
+                    )
+                }
+            }
+
+            is CoreEvent.StoreOffer -> _uiEvents.tryEmit(
+                UiEvent.Snackbar("${displayNameFor(event.relayId)} holds ${event.count} message(s) for you"),
+            )
+
+            is CoreEvent.CoreError -> _uiEvents.tryEmit(UiEvent.Snackbar(event.message))
         }
     }
 
-    private fun markDelivery(peerId: String, messageId: Long, state: DeliveryState, channel: Boolean) {
-        if (channel) {
-            _channelMessages.value = updateDelivery(_channelMessages.value, peerId, messageId, state)
-        } else {
-            _messages.value = updateDelivery(_messages.value, peerId, messageId, state)
-            _conversations.value = buildConversations(_messages.value, _contacts.value)
-        }
-    }
-
-    private fun updateDelivery(
-        map: Map<String, List<Message>>,
-        peerId: String,
-        messageId: Long,
-        state: DeliveryState,
-    ): Map<String, List<Message>> {
-        val thread = map[peerId] ?: return map
-        return map + (peerId to thread.map { if (it.id == messageId) it.copy(delivery = state) else it })
-    }
-
-    // ------------------------------------------------------------------ companion link
+    // ---------------------------------------------------------------- companion link
 
     fun connectCompanion(kind: CompanionKind) {
+        if (kind == CompanionKind.NONE) {
+            disconnectCompanion()
+            return
+        }
         if (companionKind == kind && _radio.value.connected) return
         disconnectCompanion()
         val newTransport: CompanionTransport = when (kind) {
-            CompanionKind.USB -> UsbSerialTransport(context)
-            CompanionKind.BLE -> BleTransport(context)
+            CompanionKind.USB -> UsbSerialTransport(appContext)
+            CompanionKind.BLE -> BleTransport(appContext)
             CompanionKind.NONE -> return
         }
         val client = FramedCompanionClient(newTransport)
         transport = newTransport
         companion = client
         companionKind = kind
+        MeshLog.i("radio connect: kind=$kind")
         client.start(scope)
+        scope.launch { prefs.setRadioKind(if (kind == CompanionKind.USB) "usb" else "ble") }
         companionJob = scope.launch {
             val result = newTransport.connect()
             if (result.isFailure) {
+                MeshLog.w("radio connect failed: ${result.exceptionOrNull()?.message}")
                 _radio.value = _radio.value.copy(connected = false, transportName = newTransport.label)
                 _uiEvents.tryEmit(UiEvent.Error(result.exceptionOrNull()?.message ?: "Could not connect to radio"))
                 return@launch
             }
+            MeshLog.i("radio connected: ${newTransport.label}")
             _radio.value = _radio.value.copy(connected = true, transportName = newTransport.label)
-            // Push the persisted radio settings to the device.
             client.sendConfigSet("radio.profile", _settings.value.profile)
             client.sendConfigSet("radio.region", _settings.value.region)
             client.sendConfigSet("node.name", _settings.value.nodeName)
@@ -301,9 +624,11 @@ class MeshRepository(
                         )
                         _uiEvents.tryEmit(UiEvent.Snackbar("Radio ready: ${event.hello.firmwareVersion}"))
                     }
+
                     is FramedCompanionClient.CompanionEvent.Rx -> {
-                        scope.launch { engine.ingest(event.frame, event.rssi, event.snr.toFloat()) }
+                        engine.ingestFrame(event.frame, System.currentTimeMillis())
                     }
+
                     is FramedCompanionClient.CompanionEvent.Stats -> {
                         _radio.value = _radio.value.copy(
                             txQueue = event.entries["tx_queue"]?.toInt() ?: _radio.value.txQueue,
@@ -311,22 +636,25 @@ class MeshRepository(
                             rssi = event.entries["last_rssi"]?.toInt() ?: _radio.value.rssi,
                         )
                     }
+
                     is FramedCompanionClient.CompanionEvent.Config -> {
                         val entries = event.entries
-                        _settings.value = _settings.value.copy(
-                            profile = entries["radio.profile"] ?: _settings.value.profile,
-                            region = entries["radio.region"] ?: _settings.value.region,
-                            nodeName = entries["node.name"] ?: _settings.value.nodeName,
-                            storeForward = (entries["mesh.store"] ?: "1") == "1",
-                        )
+                        updateSettings {
+                            it.copy(
+                                profile = entries["radio.profile"] ?: it.profile,
+                                region = entries["radio.region"] ?: it.region,
+                                nodeName = entries["node.name"] ?: it.nodeName,
+                                storeForward = (entries["mesh.store"] ?: "1") == "1",
+                            )
+                        }
                     }
-                    is FramedCompanionClient.CompanionEvent.RadioEvent -> {
+
+                    is FramedCompanionClient.CompanionEvent.RadioEvent ->
                         _uiEvents.tryEmit(UiEvent.Snackbar("Radio: ${event.kind} ${event.detail}"))
-                    }
-                    is FramedCompanionClient.CompanionEvent.Pong -> Unit
-                    is FramedCompanionClient.CompanionEvent.Failure -> {
-                        _uiEvents.tryEmit(UiEvent.Error(event.message))
-                    }
+
+                    is FramedCompanionClient.CompanionEvent.Pong,
+                    is FramedCompanionClient.CompanionEvent.Failure,
+                    -> Unit
                 }
             }
         }
@@ -351,12 +679,13 @@ class MeshRepository(
 
     fun currentCompanionKind(): CompanionKind = companionKind
 
-    // ------------------------------------------------------------------ contacts / invites
+    // ---------------------------------------------------------------- contacts / invites / channels
 
     fun importInvite(uri: String): Result<QrInvite> = runCatching {
         val invite = QrInvite.parse(uri)
         when (invite.kind) {
             QrInvite.Kind.CONTACT -> {
+                engine.addContact(invite.identityBase64, invite.name)
                 val contact = Contact(
                     nodeId = invite.nodeId,
                     name = invite.name,
@@ -364,27 +693,31 @@ class MeshRepository(
                     lastSeenMs = System.currentTimeMillis(),
                     verified = true,
                 )
-                if (_contacts.value.none { it.nodeId == contact.nodeId }) {
-                    _contacts.value = _contacts.value + contact
-                }
-                _nodes.value = _nodes.value.filterNot { it.nodeId == contact.nodeId } + NodeInfo(
+                _contacts.value = _contacts.value.filterNot { it.nodeId == contact.nodeId } + contact
+                val node = NodeInfo(
                     nodeId = contact.nodeId,
                     name = contact.name,
                     nodeClass = NodeClass.CLIENT,
-                    caps = emptySet(),
                     lastSeenMs = contact.lastSeenMs,
                     isContact = true,
                 )
-                _conversations.value = buildConversations(_messages.value, _contacts.value)
+                _nodes.value = _nodes.value.filterNot { it.nodeId == node.nodeId } + node
+                scope.launch {
+                    dao.upsertContact(ContactEntity(contact.nodeId, contact.name, contact.identityBase64, contact.lastSeenMs, contact.verified))
+                    dao.upsertNode(NodeEntity.fromModel(node))
+                }
+                rebuildConversations()
             }
+
             QrInvite.Kind.CHANNEL -> {
-                val channel = Channel(
-                    id = invite.nodeId,
-                    name = invite.name,
-                    pskSet = invite.pskBase64.isNotEmpty(),
-                )
-                if (_channels.value.none { it.id == channel.id }) {
+                val joined = engine.joinChannel(invite.name, invite.pskBase64)
+                val channelId = joined.getOrNull()?.channelIdHex ?: invite.nodeId
+                val channel = Channel(channelId, invite.name, pskSet = invite.pskBase64.isNotEmpty())
+                if (_channels.value.none { it.id == channelId }) {
                     _channels.value = _channels.value + channel
+                }
+                scope.launch {
+                    dao.upsertChannel(ChannelEntity(channelId, invite.name, channel.pskSet, joined.getOrNull()?.inviteUrl))
                 }
             }
         }
@@ -392,44 +725,174 @@ class MeshRepository(
         invite
     }
 
+    fun createChannel(name: String): Result<ChannelInvite> {
+        val result = engine.createChannel(name)
+        result.onFailure { MeshLog.w("channel create failed: ${it.message}") }
+        result.getOrNull()?.let { invite ->
+            MeshLog.i("channel created ${invite.channelIdHex} name=${invite.name}")
+            _lastChannelInvite.value = invite.inviteUrl
+            val channel = Channel(invite.channelIdHex, invite.name)
+            _channels.value = _channels.value.filterNot { it.id == channel.id } + channel
+            scope.launch { dao.upsertChannel(ChannelEntity(channel.id, channel.name, true, invite.inviteUrl)) }
+        }
+        return result
+    }
+
+    fun joinChannel(name: String, pskBase64: String): Result<ChannelInvite> {
+        val result = engine.joinChannel(name, pskBase64)
+        result.getOrNull()?.let { invite ->
+            _lastChannelInvite.value = invite.inviteUrl
+            val channel = Channel(invite.channelIdHex, invite.name)
+            _channels.value = _channels.value.filterNot { it.id == channel.id } + channel
+            scope.launch { dao.upsertChannel(ChannelEntity(channel.id, channel.name, true, invite.inviteUrl)) }
+        }
+        return result
+    }
+
+    /** Invite URL for a joined channel, for the QR/share sheet. */
+    fun channelInvite(channelId: String): String? =
+        engine.channels().firstOrNull { it.channelIdHex == channelId }?.inviteUrl
+            ?: _lastChannelInvite.value
+
     fun removeContact(nodeId: String) {
         _contacts.value = _contacts.value.filterNot { it.nodeId == nodeId }
         _nodes.value = _nodes.value.map { if (it.nodeId == nodeId) it.copy(isContact = false) else it }
+        engine.removeContact(nodeId)
+        scope.launch { dao.deleteContact(nodeId) }
     }
 
-    // ------------------------------------------------------------------ settings
+    // ---------------------------------------------------------------- onboarding / presets
+
+    /** Load the shared presets from assets (cached). */
+    fun presets(): org.openmesh.android.data.presets.SetupPresets =
+        runCatching { PresetLoader.fromAssets(appContext) }
+            .getOrElse { PresetLoader.fromRepoFile() }
+
+    /** Apply the beginner secure preset locally, persist it and create the private channel. */
+    suspend fun applyBeginnerPreset(answers: BeginnerAnswers): Result<AppliedPreset> = runCatching {
+        MeshLog.i("onboarding: applying preset role=${answers.role} country=${answers.country} privacy=${answers.privacy}")
+        val presetFile = presets()
+        val applied = BeginnerPreset.apply(presetFile, answers)
+        val settings = _settings.value.copy(
+            nodeName = answers.nodeName.ifBlank { "openmesh-android" },
+            role = answers.role,
+            region = applied.region,
+            profile = applied.profile,
+            storeForward = applied.storeForward,
+            announceIntervalSec = applied.announceIntervalS.toInt(),
+            positionSharing = BeginnerPreset.positionEnabled(applied),
+            demoMode = false,
+        )
+        _settings.value = settings
+        prefs.setNodeName(settings.nodeName)
+        prefs.setRole(answers.role)
+        prefs.setRegion(applied.region)
+        prefs.setProfile(applied.profile)
+        prefs.setStoreForward(applied.storeForward)
+        prefs.setAnnounceInterval(applied.announceIntervalS)
+        prefs.setPositionSharing(applied.positionSharing)
+        prefs.setDemoMode(false)
+        prefs.setAutoConnect(true)
+        val ready = ensureStartedAwait(20_000)
+        if (!ready) {
+            MeshLog.e("onboarding: engine not ready; cannot apply engine config or create channel")
+            return Result.failure(IllegalStateException("The protocol engine did not start. Check logcat tag OpenMesh and try again."))
+        }
+        runCatching {
+            engine.setConfig(
+                """{"name":${jsonString(settings.nodeName)},"nodeClass":"${answers.role}","profile":"${applied.profile}","region":"${applied.region}","storeForward":${applied.storeForward},"announceIntervalS":${applied.announceIntervalS}}""",
+            )
+        }.onFailure {
+            MeshLog.w("onboarding: engine setConfig failed: ${it.message}")
+            return Result.failure(IllegalStateException("Could not apply radio settings: ${it.message}"))
+        }
+        MeshLog.i("onboarding: engine config applied")
+        prefs.setSetupCompleted(true)
+        _settings.value = _settings.value.copy(setupCompleted = true)
+        MeshLog.i("onboarding: preset persisted role=${answers.role} country=${answers.country} region=${applied.region} profile=${applied.profile} setup_completed=true")
+        if (answers.privacy == "private") {
+            // Re-running onboarding (or a QA reset) must not create a second "family" channel.
+            if (_channels.value.any { it.name == "family" }) {
+                MeshLog.i("onboarding: reusing existing private channel named family")
+            } else {
+                val channel = createChannel("family")
+                if (channel.isFailure) {
+                    MeshLog.w("onboarding: channel creation failed: ${channel.exceptionOrNull()?.message}")
+                    // Setup stays complete (identity/radio/preset persisted); onboarding offers retry.
+                }
+            }
+        }
+        applied
+    }
+
+    /** Retry the private-channel creation from onboarding without redoing the whole preset. */
+    suspend fun retryDefaultChannel(name: String = "family"): Result<ChannelInvite> {
+        val ready = ensureStartedAwait(20_000)
+        if (!ready) return Result.failure(IllegalStateException("The protocol engine is not running yet."))
+        val result = createChannel(name)
+        MeshLog.i("onboarding: retry channel -> ${result.isSuccess}")
+        return result
+    }
+
+    /** QA/debug: clear the onboarding flag (keeps identity and data) so the wizard can be re-run. */
+    fun resetOnboarding() {
+        MeshLog.w("QA reset: onboarding flag cleared")
+        _lastChannelInvite.value = null
+        _settings.value = _settings.value.copy(setupCompleted = false, demoMode = false)
+        scope.launch { prefs.setSetupCompleted(false) }
+    }
+
+    fun completeSetupWithoutChannel() {
+        scope.launch { prefs.setSetupCompleted(true) }
+    }
+
+    // ---------------------------------------------------------------- settings
 
     fun updateSettings(transform: (AppSettings) -> AppSettings) {
         val previous = _settings.value
         val updated = transform(previous)
         _settings.value = updated
-        val radioChanged = updated.profile != previous.profile || updated.region != previous.region
-        if (radioChanged) {
-            companion?.let { client ->
-                scope.launch {
-                    runCatching { client.sendConfigSet("radio.profile", updated.profile) }
-                    runCatching { client.sendConfigSet("radio.region", updated.region) }
+        scope.launch {
+            if (updated.uiMode != previous.uiMode) prefs.setMode(UiMode.from(updated.uiMode))
+            if (updated.nodeName != previous.nodeName) prefs.setNodeName(updated.nodeName)
+            if (updated.profile != previous.profile) prefs.setProfile(updated.profile)
+            if (updated.region != previous.region) prefs.setRegion(updated.region)
+            if (updated.storeForward != previous.storeForward) prefs.setStoreForward(updated.storeForward)
+            if (updated.announceIntervalSec != previous.announceIntervalSec) prefs.setAnnounceInterval(updated.announceIntervalSec.toLong())
+            if (updated.positionSharing != previous.positionSharing) prefs.setPositionSharing(if (updated.positionSharing) "channel" else "private")
+            if (updated.autoConnect != previous.autoConnect) prefs.setAutoConnect(updated.autoConnect)
+            if (updated.notificationsEnabled != previous.notificationsEnabled) prefs.setNotifications(updated.notificationsEnabled)
+        }
+        if (started) {
+            val patch = """{"name":${jsonString(updated.nodeName)},"profile":"${updated.profile}","region":"${updated.region}","storeForward":${updated.storeForward},"announceIntervalS":${updated.announceIntervalSec.toLong()}}"""
+            runCatching { engine.setConfig(patch) }
+            val radioChanged = updated.profile != previous.profile || updated.region != previous.region
+            if (radioChanged) {
+                companion?.let { client ->
+                    scope.launch {
+                        runCatching { client.sendConfigSet("radio.profile", updated.profile) }
+                        runCatching { client.sendConfigSet("radio.region", updated.region) }
+                    }
                 }
             }
         }
     }
 
+    fun setUiMode(mode: UiMode) = updateSettings { it.copy(uiMode = mode.wire) }
+
     fun setDemoMode(enabled: Boolean) = updateSettings { it.copy(demoMode = enabled) }
 
-    // ------------------------------------------------------------------ airtime UX
+    fun setRole(role: String) = updateSettings { it.copy(role = role) }
+
+    // ---------------------------------------------------------------- airtime UX
 
     fun estimateMedia(bytes: Int, kind: MediaKind = MediaKind.IMAGE): MediaEstimate {
         val profile = LoraProfile.fromName(_settings.value.profile)
         val region = Region.fromName(_settings.value.region)
         val transfer = estimateResourceTransfer(profile, bytes)
         val wall = wallClockMs(transfer.airtimeMs, region.dutyCyclePct)
-        // Duty-cycle budget in milliseconds of airtime per hour: 1 % = 36 000 ms.
         val hourlyBudgetMs = region.dutyCyclePct?.let { it * 36_000f }
-        val ratio = if (hourlyBudgetMs == null || hourlyBudgetMs <= 0f) {
-            0f
-        } else {
-            transfer.airtimeMs.toFloat() / hourlyBudgetMs
-        }
+        val ratio = if (hourlyBudgetMs == null || hourlyBudgetMs <= 0f) 0f else transfer.airtimeMs.toFloat() / hourlyBudgetMs
         return MediaEstimate(
             kind = kind,
             bytes = bytes,
@@ -442,56 +905,40 @@ class MeshRepository(
         )
     }
 
-    fun mediaCapBytes(): Int = when (_settings.value.profile) {
-        "SHORT_TURBO" -> 24 * 1024
-        "SHORT_FAST" -> 24 * 1024
-        "MEDIUM_FAST" -> 12 * 1024
-        "LONG_FAST" -> 6 * 1024
-        "LONG_SLOW" -> 1536
-        else -> 12 * 1024
-    }
+    fun mediaCapBytes(): Int = MediaMath.capBytes(_settings.value.profile)
 
-    // ------------------------------------------------------------------ internals
+    fun maxVoiceSeconds(): Int = MediaMath.maxVoiceSeconds(_settings.value.profile)
 
-    private fun handleCoreEvent(event: CoreEvent) {
-        when (event) {
-            is CoreEvent.MessageReceived -> {
-                appendMessage(event.message.peerId, event.message, channel = false)
-                _conversations.value = buildConversations(_messages.value, _contacts.value)
+    // ---------------------------------------------------------------- helpers
+
+    private fun org.openmesh.android.data.prefs.LocalPrefs.toSettings(): AppSettings = AppSettings(
+        nodeName = nodeName,
+        profile = profile,
+        region = region,
+        announceIntervalSec = announceIntervalS.toInt(),
+        positionSharing = positionSharing == "channel",
+        storeForward = storeForward,
+        autoConnect = autoConnect,
+        preferUsb = radioKind != "ble",
+        showAirtimeEstimates = true,
+        demoMode = demoMode,
+        uiMode = uiMode.wire,
+        notificationsEnabled = notificationsEnabled,
+        setupCompleted = setupCompleted,
+        radioKind = radioKind,
+    )
+
+    private fun jsonString(value: String): String = buildString {
+        append('"')
+        value.forEach { ch ->
+            when (ch) {
+                '"' -> append("\\\"")
+                '\\' -> append("\\\\")
+                '\n' -> append("\\n")
+                else -> if (ch.code < 0x20) append("\\u%04x".format(ch.code)) else append(ch)
             }
-            is CoreEvent.DeliveryChanged -> {
-                val updated = _messages.value.mapValues { (_, thread) ->
-                    thread.map { if (it.id == event.messageId) it.copy(delivery = event.state) else it }
-                }
-                _messages.value = updated
-                _conversations.value = buildConversations(updated, _contacts.value)
-            }
-            is CoreEvent.NodeSeen -> {
-                _nodes.value = _nodes.value.filterNot { it.nodeId == event.node.nodeId } + event.node
-            }
-            is CoreEvent.ResourceProgress -> Unit
-            is CoreEvent.CoreError -> _uiEvents.tryEmit(UiEvent.Snackbar(event.message))
         }
-    }
-
-    private fun buildConversations(
-        messages: Map<String, List<Message>>,
-        contacts: List<Contact>,
-    ): List<Conversation> = messages.map { (peerId, thread) ->
-        val contact = contacts.firstOrNull { it.nodeId == peerId }
-        Conversation(
-            peerId = peerId,
-            peerName = contact?.name ?: peerId.take(8),
-            lastMessage = thread.lastOrNull(),
-            unreadCount = thread.count { !it.outgoing && !it.read },
-            online = false,
-            contact = contact != null,
-        )
-    }.sortedByDescending { it.lastMessage?.sentAtMs ?: 0L }
-
-    fun stop() {
-        disconnectCompanion()
-        scope.launch { engine.stop() }
+        append('"')
     }
 }
 
@@ -528,6 +975,5 @@ object MeshGraph {
 
     fun repository(): MeshRepository = requireNotNull(repository) { "MeshGraph not initialized" }
 
-    /** Intent action used by MainActivity's USB attach filter. */
     const val ACTION_USB_PERMISSION = "org.openmesh.android.USB_PERMISSION"
 }

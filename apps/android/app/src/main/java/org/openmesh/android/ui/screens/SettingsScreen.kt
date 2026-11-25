@@ -43,7 +43,7 @@ import androidx.compose.ui.unit.dp
 import org.openmesh.android.data.model.RadioStatus
 import org.openmesh.android.data.repository.MediaKind
 import org.openmesh.android.data.repository.MeshRepository
-import org.openmesh.android.service.CompanionService
+import org.openmesh.android.service.MeshService
 import org.openmesh.android.ui.components.DividerLine
 import org.openmesh.android.ui.components.MeshCard
 import org.openmesh.android.ui.components.NodeIdText
@@ -63,6 +63,9 @@ fun SettingsScreen(
     repository: MeshRepository,
     radio: RadioStatus,
     onBack: () -> Unit,
+    onOpenHelp: (String) -> Unit = {},
+    onOpenRadio: () -> Unit = {},
+    onOpenAbout: () -> Unit = {},
 ) {
     val settings by repository.settings.collectAsState()
     val engine by repository.engineStatus.collectAsState()
@@ -92,6 +95,41 @@ fun SettingsScreen(
                 .padding(horizontal = 16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
+            SectionTitle("Experience")
+            MeshCard {
+                Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("Mode", style = MaterialTheme.typography.titleMedium)
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        FilterChip(
+                            selected = settings.uiMode == "beginner",
+                            onClick = { repository.setUiMode(org.openmesh.android.data.prefs.UiMode.BEGINNER) },
+                            label = { Text("Beginner") },
+                        )
+                        FilterChip(
+                            selected = settings.uiMode == "advanced",
+                            onClick = { repository.setUiMode(org.openmesh.android.data.prefs.UiMode.ADVANCED) },
+                            label = { Text("Advanced") },
+                        )
+                    }
+                    Text(
+                        "Beginner shows the smallest set of choices; advanced reveals raw radio settings, TTL/profile maths, backbone and agent controls. The mode never changes a setting by itself.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MeshOnSurfaceVariant,
+                    )
+                    SwitchRow(
+                        title = "Message notifications",
+                        subtitle = "Sender/channel and text preview; never media. Tap opens the thread.",
+                        checked = settings.notificationsEnabled,
+                        onCheckedChange = { value -> repository.updateSettings { it.copy(notificationsEnabled = value) } },
+                    )
+                    OutlinedButton(onClick = onOpenRadio, modifier = Modifier.fillMaxWidth()) { Text("Radio link & signal") }
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedButton(onClick = { onOpenHelp("getting-started") }, modifier = Modifier.weight(1f)) { Text("Help") }
+                        OutlinedButton(onClick = onOpenAbout, modifier = Modifier.weight(1f)) { Text("About & agents") }
+                    }
+                }
+            }
+
             SectionTitle("Identity")
             MeshCard {
                 Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -108,13 +146,13 @@ fun SettingsScreen(
                     NodeIdText(engine.nodeIdHex ?: radio.nodeId ?: "identity not loaded")
                     Text(
                         "Identity: Ed25519 signing key + X25519 DH key derived from one 32-byte seed. " +
-                            "The Android app will hold it in the Keystore through openmesh-ffi (M2); " +
+                            "The Android app holds the seed wrapped by AndroidKeyStore; " +
                             "the radio never holds your user keys.",
                         style = MaterialTheme.typography.bodyMedium,
                         color = MeshOnSurfaceVariant,
                     )
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        StatusPill(if (engine.running) "core: demo" else "core: not linked", MeshTertiary)
+                        StatusPill(if (engine.running) "core: running" else "core: stopped", MeshTertiary)
                         StatusPill("protocol OMP/1", MeshPrimary)
                     }
                 }
@@ -137,7 +175,7 @@ fun SettingsScreen(
                         }
                         if (radio.connected) {
                             OutlinedButton(onClick = {
-                                CompanionService.stop(context)
+                                MeshService.stop(context)
                             }) { Text("Disconnect") }
                         }
                     }
@@ -145,7 +183,7 @@ fun SettingsScreen(
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             Button(
                                 onClick = {
-                                    CompanionService.start(context, CompanionService.ACTION_CONNECT_USB)
+                                    MeshService.start(context, MeshService.ACTION_CONNECT_USB)
                                 },
                                 modifier = Modifier.weight(1f),
                             ) {
@@ -155,7 +193,7 @@ fun SettingsScreen(
                             }
                             Button(
                                 onClick = {
-                                    CompanionService.start(context, CompanionService.ACTION_CONNECT_BLE)
+                                    MeshService.start(context, MeshService.ACTION_CONNECT_BLE)
                                 },
                                 modifier = Modifier.weight(1f),
                             ) {
@@ -279,11 +317,11 @@ fun SettingsScreen(
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Icon(Icons.Filled.Info, contentDescription = null, tint = MeshOnSurfaceVariant)
                         Spacer(Modifier.width(8.dp))
-                        Text("OpenMesh Android 0.1.0", style = MaterialTheme.typography.titleMedium)
+                        Text("OpenMesh Android ${org.openmesh.android.BuildConfig.VERSION_NAME}", style = MaterialTheme.typography.titleMedium)
                     }
                     Text(
-                        "AGPL-3.0-or-later. This is a scaffold: the companion transport, framing and " +
-                            "repository are real; OMP frame construction/parsing arrives via openmesh-ffi in M2. " +
+                        "AGPL-3.0-only. The Rust protocol core runs on the device through UniFFI " +
+                            "(crates/openmesh-ffi); the radio is a dumb authenticated companion pipe. " +
                             "OpenMesh is not Reticulum and contains no Reticulum-licensed code.",
                         style = MaterialTheme.typography.bodyMedium,
                         color = MeshOnSurfaceVariant,

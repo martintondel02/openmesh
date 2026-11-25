@@ -14,10 +14,10 @@ class Crc16Test {
     }
 
     @Test
-    fun `subrange computation is independent of prefix`() {
+    fun `subrange equals computing the same bytes in isolation`() {
         val a = byteArrayOf(0, 1, 2, 3, 4, 5)
-        val full = Crc16.compute(a, 0, a.size)
         val sub = Crc16.compute(a, 2, 4)
-        assertEquals(full, sub)
+        val isolated = Crc16.compute(byteArrayOf(2, 3, 4, 5))
+        assertEquals(isolated, sub)
     }
 }

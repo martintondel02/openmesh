@@ -1,6 +1,6 @@
 [package]
 name = "openmesh-ffi"
-description = "Foreign function interface for OpenMesh clients (Android/iOS via UniFFI)"
+description = "UniFFI surface for OpenMesh mobile clients (Android/iOS)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -10,7 +10,18 @@ repository.workspace = true
 
 [lib]
 name = "openmesh_ffi"
-crate-type = ["cdylib", "staticlib", "lib"]
+# The cdylib is what `uniffi-bindgen generate --library` reads to emit Kotlin/Swift bindings.
+crate-type = ["lib", "cdylib"]
+
+[[bin]]
+name = "uniffi-bindgen"
+path = "src/bin/uniffi-bindgen.rs"
 
 [dependencies]
 openmesh-core = { workspace = true }
+uniffi = { version = "0.28", features = ["cli"] }
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+base64 = { workspace = true }
+sha2 = { workspace = true }

@@ -1,245 +1,274 @@
 # OpenMesh for Android
 
-Kotlin + Jetpack Compose client for OpenMesh. It talks to an OpenMesh radio over USB serial or
-BLE (the companion API) or, on a LAN, to an `openmesh-bridge` over its WebSocket API. This is
-the **v0.1.0 scaffold**: structurally complete, CI-ready, and deliberately honest about what is
-(and is not) wired up yet.
+Standalone Android client for OpenMesh v0.4.0 ("Android GA"). The Rust OMP/1 protocol engine runs
+**on the phone** through UniFFI; the LoRa radio is a dumb authenticated companion pipe over BLE or
+USB. No bridge, no server, no account.
 
-> **Not compiled on the development host.** The machine that built v0.1.0 has no Android SDK
-> and no emulator, so `./gradlew assembleDebug` has **not** been run locally. The project is
-> written to build with the standard SDK/AGP toolchain and the CI workflow below builds it; treat
-> this as reviewed source, not a verified APK. See "What is verified" for the static checks that
-> were done instead.
+```
+┌────────────────────── Android phone ──────────────────────┐
+│ Compose UI (chats, thread, channels, map, nodes, contacts, │
+│ radio, settings, onboarding, help)                         │
+│        │ StateFlow / Flow                ▲ notifications    │
+│  MeshService (foreground, connectedDevice)                  │
+│   ├─ UniFfiEngineBridge ◄─ UniFFI ─ openmesh-ffi/rust core │
+│   ├─ FramedCompanionClient (SLIP + OM + CRC16) over BLE/USB│
+│   └─ Room (messages/contacts/channels/nodes) + DataStore   │
+└──────────────┬─────────────────────────────────────────────┘
+               │ BLE NUS / USB CDC serial (companion frames)
+        ┌──────▼──────┐
+        │ LoRa radio  │  OpenMesh firmware: relay + store + companion
+        └─────────────┘
+```
 
 ---
 
-## 1. What is in this scaffold
+## What is implemented (v0.4.0)
 
 | Area | Status |
 | --- | --- |
-| Gradle KTS project (`settings.gradle.kts`, root `build.gradle.kts`, `app/build.gradle.kts`, `gradle/libs.versions.toml`, wrapper jar+properties) | done |
-| Manifest with the right permissions (Bluetooth scan/connect, USB host, foreground service, notifications, camera, legacy location) | done |
-| Material 3 dark theme, Compose navigation (Chats, Map, Nodes, Contacts, Settings), top-level bottom bar | done |
-| Screens: `ChatListScreen`, `ChatThreadScreen`, `NodesScreen`, `MapScreen` (osmdroid), `ContactsScreen`, `SettingsScreen`, `QrScanScreen` | done, with seeded demo content so every screen is reviewable |
-| Companion transport abstraction (`CompanionTransport`) | done |
-| USB serial transport (`usb-serial-for-android`, 115200 8N1, USB host permission flow) | done |
-| BLE transport (Nordic-UART-like service, platform scanner + Nordic BLE library for GATT) | done (targets `no.nordicsemi.android:ble:2.7.5`) |
-| Companion framing: SLIP de-framing, CRC-16/CCITT-FALSE, `OM` header, CBOR payload codec | done |
-| `FramedCompanionClient`: HELLO/HELLO_ACK handshake, TX/RX, config get/set, stats, ping, events | done |
-| Repository with `StateFlow`s (messages, chats, nodes, contacts, channels, radio, settings) | done |
-| Foreground service for the radio link (`connectedDevice` type) | done |
-| QR scanning for `openmesh://contact` / `openmesh://channel` invites (zxing-android-embedded) + manual paste | done |
-| Airtime estimator (spec formula + resource transfer model) and pre-send estimate dialog | done |
-| Unit tests: airtime parity with PROTOCOL.md Appendix A, CRC check value, SLIP escaping/CRC rejection, CBOR round-trips | done (JVM unit tests) |
-| OMP frame construction/parsing (Rust core via UniFFI) | **not yet** — `DemoEngineBridge` is used; `FfiEngineBridgeUnavailable` documents the gap (M2) |
-| Image compression/upload, real microphone recording, local message database, background sync, notifications with reply actions | **not yet** (M2) |
-| MapLibre native renderer | **not yet** — osmdroid is used (no API key); MapLibre is a documented alternative |
+| Rust engine via UniFFI (`uniffi.openmesh_ffi.OpenMeshNode`) | ✅ `UniFfiEngineBridge` — identity, DM/channel text, position, attachments, announce, retry, mark-read, channels, contacts, stats, state export/import; no direct JNI from UI |
+| Foreground service (`MeshService`, `connectedDevice`) | ✅ survives backgrounding; 250 ms `tick` loop, `ingestFrame`, outbound frames → companion write, reconnect/backoff via transports |
+| Companion transports | ✅ BLE (Nordic-UART-like, device name prefix `OpenMesh`) and USB CDC serial (115200 8N1); SLIP framing + CRC16 + CBOR handshake; radio settings get/set and stats |
+| Persistence | ✅ Room (messages, contacts, channels, node cache), DataStore (prefs, UI mode, setup, engine state, identity ciphertext); identity seed wrapped by AndroidKeyStore AES-GCM |
+| Notifications | ✅ message channel with sender/channel + text preview (never media), tap → thread, mark-read on open; persistent service notification |
+| Onboarding | ✅ 3 steps (role → country/name/privacy → secure) applying the shared `content/presets/setup.json` preset; creates a private channel + invite QR |
+| Chats + thread | ✅ direct/channel threads, delivery ticks, retry, reply model, day separators, text/position/attachment bubbles |
+| Media | ✅ gallery/camera image → downscale+JPEG loop to the profile cap with pre-send airtime estimate; voice note with `MediaRecorder` AAC-LC mono 16 kHz ~12 kbps MP4 (duration cap per profile), playback |
+| QR | ✅ zxing scan for contact/channel invites; own contact QR; channel invite QR; every `openmesh://` URL validated |
+| Channels | ✅ create with invite QR, join via scan/paste, list/unread |
+| Nodes / map | ✅ node list (role, hops, RSSI/SNR, battery, last seen); osmdroid map with node markers |
+| Radio screen | ✅ BLE/USB connect, firmware/region/profile, signal, frames/airtime counters, tips |
+| Settings | ✅ beginner/advanced modes, name/role/region/profile/store-forward/announce, notifications, radio, airtime, identity/backup warning, help/about links |
+| Help | ✅ bundled `content/help` (16 topics, offline), search, beginner/advanced filter, lightweight markdown reader; every control maps to a help topic (`HelpKeys`) |
+| About/agents/backbone | ✅ MCP guidance, backbone tip with public-exposure/Openflare note, licences, version |
+| Tests | ✅ 39 JVM unit tests (preset parity with `content/presets/setup.json`, QR parse/build, media caps/math, notifications, help registry, framing, airtime) + `cargo test -p openmesh-ffi` (8) |
 
-Because the core is not linked, sending from a **connected** radio reports an explicit error
-("OpenMesh core not linked in this build") rather than pretending to send; in **demo mode**
-(the default) messages are simulated locally so the UI state machine (queued → sent → delivered)
-is exercised. That behaviour is intentional and visible in the UI.
+Known limits (documented, not secrets): no Play Store/F-Droid listing yet (APK sideload only); no
+emulator instrumentation tests in CI (JVM tests only); voice uses AAC/MP4 on Android while the web
+client uses Opus/OGG (both playable by the other client); the map shows node positions and
+offline-cached tiles but does not yet draw a "my location" marker/history (needs a runtime location
+permission flow); radio firmware must be flashed with OpenMesh firmware that supports the companion
+protocol.
 
 ---
 
-## 2. Build
+## Build
 
 ### Prerequisites
 
-* JDK 17 or newer (CI uses Temurin 21; AGP 8.7 supports it).
-* Android SDK Platform 35 + Build-Tools 35.0.x.
-* Android Studio Ladybug or newer (optional; the CLI build is enough).
-* A device or emulator running Android 8.0 (API 26) or newer.
+* JDK 17+ (CI uses Temurin 21; this host has `$HOME/.local/java/jdk21`).
+* Android SDK Platform 35, Build-Tools 35.0.x, NDK 27.0.12077973.
+* Rust stable with Android targets: `rustup target add aarch64-linux-android armv7-linux-androideabi x86_64-linux-android`.
+* `cargo-ndk` (`cargo install cargo-ndk --locked`).
+* Node/pnpm are **not** needed: the web client is not part of the Android build.
 
-### Command line
+### 1. Rust engine + generated Kotlin bindings
 
-```bash
+```sh
+export JAVA_HOME="$HOME/.local/java/jdk21"
+export ANDROID_HOME="$HOME/android-sdk"
+export ANDROID_SDK_ROOT="$ANDROID_HOME"
+export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/27.0.12077973"
+export PATH="$HOME/.cargo/bin:$PATH"
+
 cd apps/android
-# Optional: point Gradle at your SDK if it is not in ANDROID_HOME / local.properties
-echo "sdk.dir=$HOME/Android/Sdk" > local.properties
-
-./gradlew assembleDebug          # APK: app/build/outputs/apk/debug/app-debug.apk
-./gradlew testDebugUnitTest      # JVM unit tests (airtime, CRC, SLIP, CBOR)
-./gradlew lintDebug              # optional; first run downloads SDK components
+./scripts/build-ffi.sh
 ```
 
-Install on a device with USB debugging:
+The script cross-compiles `crates/openmesh-ffi` for `arm64-v8a`, `armeabi-v7a` and `x86_64`
+(override with `OPENMESH_ANDROID_ABIS`), writes `app/src/main/jniLibs/<abi>/libopenmesh_ffi.so`,
+then generates Kotlin into `app/src/main/java/uniffi/openmesh_ffi/`.
+Both are **generated build outputs and gitignored** — never commit them.
 
-```bash
-adb install -r app/build/outputs/apk/debug/app-debug.apk
-adb shell am start -n org.openmesh.android.debug/org.openmesh.android.MainActivity
+If the generated bindings are absent, Gradle falls back to a clearly-marked local stub
+(`app/src/ffiStub/`) so the UI still compiles; that build reports "engine not linked" and must not
+be shipped. CI always runs `build-ffi.sh` first, which excludes the stub automatically.
+
+### 2. Gradle build
+
+```sh
+echo "sdk.dir=$ANDROID_HOME" > local.properties    # gitignored
+./gradlew lintDebug testDebugUnitTest assembleDebug
 ```
 
-The Gradle wrapper jar is committed (`gradle/wrapper/gradle-wrapper.jar`, Gradle 8.10.2) so CI
-does not need a system Gradle. If you delete the jar, `./gradlew` falls back to a `gradle`
-binary on `PATH`.
+Outputs:
 
-### Android Studio
+* debug APK: `app/build/outputs/apk/debug/app-debug.apk` (≈23 MB, three ABIs + assets)
+* release APK: `app/build/outputs/apk/release/app-release-unsigned.apk` (≈5 MB when unsigned)
+* unit test report: `app/build/reports/tests/testDebugUnitTest/index.html`
 
-Open `apps/android` as a project, let Gradle sync (it downloads the Gradle distribution and
-dependencies), pick the `app` configuration, and run.
+### 3. Release signing (never commit a keystore)
 
-### CI
+`app/build.gradle.kts` reads signing material from environment variables:
 
-`.github/workflows/android.yml` already builds `assembleDebug` on `ubuntu-latest` with JDK 21 and
-`android-actions/setup-android`. A minimal equivalent:
-
-```yaml
-name: Android
-on:
-  push: { branches: [main], paths: ["apps/android/**", ".github/workflows/android.yml"] }
-  pull_request: { paths: ["apps/android/**"] }
-jobs:
-  build:
-    runs-on: ubuntu-latest
-    defaults: { run: { working-directory: apps/android } }
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
-        with: { distribution: temurin, java-version: "21" }
-      - uses: android-actions/setup-android@v3
-      - uses: gradle/actions/setup-gradle@v4
-      - run: ./gradlew assembleDebug testDebugUnitTest --no-daemon
-      - uses: actions/upload-artifact@v4
-        with:
-          name: openmesh-android-debug
-          path: apps/android/app/build/outputs/apk/debug/*.apk
-```
-
-If the checked-in wrapper jar is ever rejected by policy, add `gradle-version: "8.10.2"` to
-`setup-gradle` and run `gradle assembleDebug` instead.
-
----
-
-## 3. What is verified (and what is not)
-
-Verified locally (no SDK required):
-
-* Kotlin sources, Gradle KTS files and manifest are self-consistent (packages, resource names,
-  dependency coordinates are declared in `gradle/libs.versions.toml`).
-* Unit-test sources match the production API (airtime estimator, CRC, SLIP, CBOR).
-* The airtime model reproduces `PROTOCOL.md` Appendix A values (240 B `MEDIUM_FAST` = 611 ms,
-  201 B = 519 ms) — the test asserts this and is the cross-language check for the Rust
-  `util::lora_airtime_ms` implementation.
-* The JSON/URI invite format matches `WEBSOCKET-API.md` §4.3/4.4 (`openmesh://contact…`,
-  `openmesh://channel…`).
-* The companion framing follows `COMPANION-API.md` §1 (SLIP delimiters, `OM` magic, type,
-  little-endian length, CRC over `type || len || payload`).
-
-**Not verified:**
-
-* `assembleDebug` / `lint` / instrumented tests / emulator run — no SDK on the build host.
-* Real USB and BLE radios (the code paths are written against `usb-serial-for-android` 3.8.1 and
-  Nordic BLE 2.7.5, but no device was attached).
-* zxing scanner Activity and osmdroid tile rendering on a device.
-* API-level edge cases (BLE permissions on API 26–30 vs 31+, USB permission PendingIntent flags,
-  foreground-service type on API 34+).
-
-### Known dependencies on external APIs
-
-The USB and BLE implementations are thin adapters over third-party libraries. If a library
-changes its API, the adapters are the only files to fix:
-
-* `usb-serial-for-android` (`com.github.mik3y:usb-serial-for-android:3.8.1`, JitPack):
-  `UsbSerialProber`, `UsbSerialPort`, `UsbManager`.
-* Nordic Android-BLE-Library (`no.nordicsemi.android:ble:2.7.5`):
-  `BleManager`, `BleManagerGattCallback`, notification/MTU requests.
-* zxing-android-embedded (`com.journeyapps:zxing-android-embedded:4.3.0`) + zxing core 3.5.3.
-* osmdroid (`org.osmdroid:osmdroid-android:6.1.20`) with OSM tiles (requires internet; the mesh
-  itself does not).
-
----
-
-## 4. Package map
-
-```
-org.openmesh.android
-├── OpenMeshApplication.kt        process-wide MeshGraph init
-├── MainActivity.kt               Compose host, notification permission, openmesh:// deep links
-├── data
-│   ├── model/                    domain models + DemoData (seeded preview content)
-│   ├── transport/
-│   │   ├── CompanionTransport.kt     byte-stream interface (USB/BLE/demo)
-│   │   ├── UsbSerialTransport.kt     CDC-ACM/CP210x/CH340/FTDI via usb-serial-for-android
-│   │   ├── BleTransport.kt           NUS GATT via Nordic BLE library
-│   │   ├── SlipFraming.kt            SLIP + OM header + CRC-16/CCITT-FALSE
-│   │   ├── CborCodec.kt              minimal CBOR subset for companion payloads
-│   │   └── FramedCompanionClient.kt  handshake, TX/RX, config, stats, events
-│   ├── engine/                   EngineBridge (FFI boundary) + DemoEngineBridge
-│   └── repository/               MeshRepository (StateFlows), QrInvite parser, MeshGraph
-├── service/CompanionService.kt   foreground service (connectedDevice)
-├── ui/                           theme, navigation, components, screens
-└── util/                         Hex, Crc16, AirtimeEstimator (mirrors Rust util.rs)
-```
-
-The intended M2 path: implement `create_engine`, `send_text`, `ingest`, `nodes` and `next_event`
-in `crates/openmesh-ffi` with UniFFI, generate Kotlin bindings, and replace
-`DemoEngineBridge`/`FfiEngineBridgeUnavailable` with the generated implementation. The
-repository and screens do not need to change; `EngineBridge` is the seam.
-
----
-
-## 5. Companion API conformance notes
-
-* **Framing**: `0xC0` frame delimiter; `0xDB 0xDC` = 0xC0, `0xDB 0xDD` = 0xDB; payload is
-  `OM | type(u8) | len(u16 LE) | payload | crc16`. The app's decoder tolerates arbitrary
-  split/coalesced reads and drops frames with a bad CRC or a length > 1024.
-* **CRC byte order**: `COMPANION-API.md` does not state whether the CRC-16 is stored
-  little-endian or big-endian; this client uses **little-endian** (consistent with the length
-  field). Firmware must match this; it should be pinned in the spec (flagged to the architecture
-  owner).
-* **HELLO**: sent immediately after the byte link is connected (USB port open / BLE notifications
-  enabled). The app requires `HelloAck.proto == 1`; mismatches surface in Settings and disable
-  sending.
-* **TX/RX**: `Tx` carries exactly one OMP frame (≤ `HelloAck.max_frame`, default 240); `Rx`
-  frames are passed to the core. Radios may filter frames but must report the filter mode in
-  caps.
-* **Configs sent on connect**: `radio.profile`, `radio.region`, `node.name`, `mesh.store`
-  (values as strings, per COMPANION-API §4).
-* **Security**: the companion link is not mutually authenticated in v1 (physical access is the
-  trust boundary). Do not expose the USB/BLE device to untrusted apps; a pairing key is planned
-  for M2.
-
----
-
-## 6. Permissions and privacy
-
-| Permission | Why |
+| Variable | Meaning |
 | --- | --- |
-| `BLUETOOTH_SCAN` (`neverForLocation`) / `BLUETOOTH_CONNECT` | BLE companion link |
-| `BLUETOOTH` / `BLUETOOTH_ADMIN` (≤ API 30), `ACCESS_FINE_LOCATION` (≤ API 30) | legacy BLE scanning |
-| `USB` host (no permission constant; `usb_device_filter.xml`) | USB serial companion link |
-| `FOREGROUND_SERVICE` + `FOREGROUND_SERVICE_CONNECTED_DEVICE` | keep the radio link alive |
-| `POST_NOTIFICATIONS` | link/message notifications |
-| `CAMERA` | QR invite scanning |
-| `INTERNET` + `ACCESS_NETWORK_STATE` | map tiles only; the mesh works offline |
+| `ANDROID_KEYSTORE_FILE` | path to a JKS/PKCS12 keystore |
+| `ANDROID_KEYSTORE_PASSWORD` | store password |
+| `ANDROID_KEY_ALIAS` | key alias |
+| `ANDROID_KEY_PASSWORD` | key password |
 
-No location or message data leaves the device except over the mesh/companion link. The map is
-the only feature that uses the internet; demo mode and the mesh are fully offline.
+```sh
+export ANDROID_KEYSTORE_FILE="$HOME/keys/openmesh-release.jks"
+export ANDROID_KEYSTORE_PASSWORD='…'
+export ANDROID_KEY_ALIAS='openmesh'
+export ANDROID_KEY_PASSWORD='…'
+./gradlew assembleRelease
+```
 
----
+If `ANDROID_KEYSTORE_FILE` is unset/nonexistent, `assembleRelease` produces an **unsigned** APK;
+sign it yourself with `apksigner`:
 
-## 7. Roadmap (M2, from `docs/ROADMAP.md`)
+```sh
+$ANDROID_HOME/build-tools/35.0.0/apksigner sign --ks openmesh-release.jks \
+  --out openmesh-0.4.0-release.apk app/build/outputs/apk/release/app-release-unsigned.apk
+```
 
-1. UniFFI bindings for the Rust core (identity, engine, events) replacing the demo engine.
-2. Image compression and attachment upload; real Opus voice recording/playback; media progress
-   from core resource events.
-3. Local persistence (messages, contacts, channels) and bridge ↔ app sync semantics.
-4. BLE/USB hardening: pairing key, reconnect/backoff, permission and MTU edge cases, OEM matrix.
-5. Background sync with message notifications and reply/mark-read actions.
-6. F-Droid/APK release, signing, CI artifacts, reproducible builds where possible.
-7. Accessibility and UX pass (dark theme, large text, RTL, no placeholder copy).
-
-Until then, treat the app as a reviewable scaffold for the Android client structure and the
-companion protocol, not as a usable messenger.
+CI (`.github/workflows/android.yml`) builds the debug APK on every PR and, when repository secrets
+`ANDROID_KEYSTORE_BASE64`/`ANDROID_KEYSTORE_PASSWORD`/`ANDROID_KEY_ALIAS`/`ANDROID_KEY_PASSWORD`
+exist, a signed release APK. Keystores are decoded to `$RUNNER_TEMP` only.
 
 ---
 
-## 8. Sources and related docs
+## Install (sideload)
 
-* `docs/architecture/COMPANION-API.md` — normative companion framing/messages/handshake.
-* `docs/architecture/PROTOCOL.md` §9 (resources), §13 (companion summary), Appendix A (airtime).
-* `docs/architecture/WEBSOCKET-API.md` — bridge API used when the app talks to a bridge.
-* `docs/research/lora-capacity-and-media.md` — why the pre-send estimate dialog exists and what
-  the numbers mean.
-* `docs/ROADMAP.md` — M2 Android GA scope.
+1. Build/sign the APK (above), or download `openmesh-0.4.0-android-debug.apk` from the release page.
+2. Enable **Install unknown apps** for your file manager/browser, or use `adb`:
+   ```sh
+   adb install -r app/build/outputs/apk/debug/app-debug.apk
+   ```
+3. Open **OpenMesh**. The first launch is the 3-step onboarding:
+   * **What is this device?** client / tracker / repeater / gateway;
+   * **Where are you?** country (drives the legal region), node name, keep-location-private;
+   * **Secure my node** — applies the shared preset and creates a private channel, showing the
+     invite QR.
+4. Grant **notifications** (optional) and, when connecting a radio, Bluetooth/USB permissions.
+5. Pair a radio and send your first message. Without a radio the app still runs the engine and
+   queues frames for when a companion link appears.
+
+---
+
+## Pairing a radio
+
+| Board | Link | Notes |
+| --- | --- | --- |
+| Seeed SenseCAP T1000-E | BLE | pocket tracker/client; enable the companion firmware build |
+| RAK WisBlock (RAK4631) | USB serial | solar repeater; use a data USB cable |
+| Seeed SenseCAP Solar Node P1 | BLE or USB | solar repeater/gateway |
+| Heltec Wireless Tracker | USB serial / BLE | tracker / screen node |
+
+* **BLE** — the app scans for devices whose name starts with `OpenMesh` and connects to the
+  Nordic-UART-like service. Press the board's pairing/wake button if it is not advertising.
+* **USB** — connect a data cable and accept the Android USB-host permission prompt. Serial
+  settings are 115200 8N1; no driver installation is needed.
+* The radio must run OpenMesh companion firmware with the matching region/profile. The app pushes
+  profile/region/name/store-forward settings on connect.
+* Changing profile/region disconnects other nodes on the old setting — update the whole group.
+
+---
+
+## Data, identity and security
+
+* The 32-byte identity seed is generated on the device, wrapped with an AES-GCM key in
+  **AndroidKeyStore**, and stored only as ciphertext in DataStore. Losing the Keystore/factory reset
+  loses the identity; there is no account recovery. Export/backup is available in Settings (and the
+  About screen explains the warning).
+* Room stores messages, contacts, channels and node cache. **Channel PSKs are never stored in the
+  database** — channel keys live in the engine state, exported opaquely and persisted locally.
+* Message bodies are end-to-end encrypted by the engine; the radio and relays see ciphertext,
+  metadata and timing only.
+* No analytics, no cloud calls, no accounts. Map tiles are the only optional network use (osmdroid);
+  cache the area you need if fully offline.
+* API/MCP: the Android app has no local MCP server in v0.4.0. To give an AI agent control, run
+  `openmesh-bridge mcp` on the machine that hosts a bridge/backbone; see `docs/agents/mcp.md`.
+
+---
+
+## Tests and verification (this host)
+
+```sh
+cd apps/android
+./gradlew lintDebug testDebugUnitTest assembleDebug
+cargo test -p openmesh-ffi          # 8/8
+```
+
+Current results: **39/39 JVM unit tests pass**, `lintDebug` passes, `assembleDebug` produces
+`app/build/outputs/apk/debug/app-debug.apk` (~23 MB), `assembleRelease` produces an unsigned
+~5.1 MB APK. The APK contains `assets/help/*` (16 topics + index), `assets/presets/setup.json`, and
+`lib/{arm64-v8a,armeabi-v7a,x86_64}/libopenmesh_ffi.so`.
+
+The unit tests cover: preset parity against the real `content/presets/setup.json` (all roles,
+countries, fallback, security defaults), invite parse/build/validation, image caps + downscale +
+sample-size math, voice caps, notification preview rules, help-topic registry parity with the help
+index, SLIP/CRC/CBOR framing, airtime model.
+
+---
+
+## Troubleshooting
+
+| Symptom | Fix |
+| --- | --- |
+| Gradle: "SDK location not found" | `echo "sdk.dir=$ANDROID_HOME" > local.properties` or set `ANDROID_HOME`. |
+| `build-ffi.sh: ANDROID_NDK_HOME is not set` | Point it at `…/ndk/27.0.12077973` (or install NDK 27). |
+| `cargo ndk` unknown command | `cargo install cargo-ndk --locked`. |
+| Bindgen generated nothing | The host library must be a **debug** build (release strips `UNIFFI_META` symbols); the script handles this. |
+| "OpenMesh core not linked in this build" | You built with the stub; run `scripts/build-ffi.sh` then rebuild. |
+| App asks for token/panel | That is the desktop bridge workflow, not Android: the Android app is standalone and never asks for a bridge token. |
+| No radio found (BLE) | Board not advertising (press pairing/wake); BLE permissions denied; device name must start with `OpenMesh`. |
+| USB connect fails | Use a data cable, accept the permission prompt, check the board's USB CDC firmware. |
+| Messages stay on one tick | No peer/radio in range, profile mismatch, or the recipient is offline with no store-capable relay; the engine retries and store-and-forward covers up to 72 h. |
+| Voice note won't record | Microphone permission / another app holds the mic; profile caps are 4–15 s. |
+| Map blank | osmdroid tiles need network once; previously viewed areas are cached. |
+| Lint fails in CI | Run `./gradlew lintDebug` locally; generated UniFFI sources are excluded from NewApi checks by design. |
+
+---
+
+## Repository layout
+
+```
+apps/android/
+├── app/src/main/java/org/openmesh/android/
+│   ├── data/engine/        # EngineBridge seam + UniFfiEngineBridge (real) + demo engine
+│   ├── data/repository/    # MeshRepository: state, engine loop wiring, invites, presets
+│   ├── data/transport/     # BLE/USB transports, SLIP/CRC/CBOR companion client
+│   ├── data/db/            # Room entities/DAO/database
+│   ├── data/prefs/         # DataStore preferences (mode, setup, identity ciphertext)
+│   ├── data/presets/       # shared beginner presets parser + apply logic
+│   ├── data/security/      # AndroidKeyStore-wrapped identity seed
+│   ├── data/help/          # bundled help corpus + control→topic registry
+│   ├── data/notify/        # notification channels + preview builder
+│   ├── media/              # image compression, AAC voice recorder/player, QR renderer
+│   ├── service/            # MeshService (foreground, connectedDevice)
+│   └── ui/                 # Compose screens, navigation, theme, components
+├── app/src/ffiStub/        # local-only stub bindings (excluded when real bindings exist)
+├── scripts/build-ffi.sh    # cargo-ndk + uniffi-bindgen
+└── app/src/test/           # 39 JVM unit tests
+```
+
+## Licence
+
+AGPL-3.0-only. Third-party components: osmdroid, zxing-android-embedded, zxing core,
+usb-serial-for-android, Nordic Android BLE, JNA (see repository `NOTICE`). No Reticulum-licensed
+code is used.
+
+## Foreground service type and permissions (Android 14+)
+
+`MeshService` keeps the mesh alive in the background. Android 14+ requires a granted Bluetooth or
+USB permission before a `connectedDevice` foreground service may start; a fresh install has
+neither, so the service tries `connectedDevice` first and falls back to the declared
+`specialUse` type until a radio is paired. That keeps the engine and the persistent notification
+running instead of crashing the app on first launch. Once the user grants Bluetooth (Radio → BLE)
+or accepts the USB permission, the service runs as a normal `connectedDevice` service.
+
+## Device verification
+
+The debug APK was installed and exercised on a real Android phone (Pixel-class, Android 17):
+fresh install → notification permission → onboarding → engine start → private channel/invite QR
+→ channel message send → offline Help → all main screens, with no crashes and no ANRs
+(`adb logcat -s OpenMesh`, `adb logcat -b crash`). Real radio pairing, mesh delivery and
+image/voice capture still need radio hardware and a second node.
+
+## QA reset (debug builds)
+
+Long-press the **About & agents** title → **Reset & restart** clears `setup_completed` (keeps
+identity, messages and settings) so onboarding can be re-tested without uninstalling.

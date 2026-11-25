@@ -30,6 +30,7 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.AttachFile
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.Mic
+import androidx.compose.material.icons.filled.PhotoCamera
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Send
 import androidx.compose.material3.AlertDialog
@@ -60,6 +61,8 @@ import org.openmesh.android.data.model.Message
 import org.openmesh.android.data.model.MessageKind
 import org.openmesh.android.data.repository.MediaKind
 import org.openmesh.android.data.repository.MeshRepository
+import org.openmesh.android.media.ImageCompressor
+import org.openmesh.android.ui.components.VoiceRecordDialog
 import org.openmesh.android.ui.components.AirtimeEstimateDialog
 import org.openmesh.android.ui.components.DeliveryIcon
 import org.openmesh.android.ui.components.formatDuration
@@ -76,6 +79,7 @@ fun ChatThreadScreen(
     peerId: String,
     isChannel: Boolean,
     onBack: () -> Unit,
+    onOpenHelp: (String) -> Unit = {},
 ) {
     val context = LocalContext.current
     val directMessages by repository.messages.collectAsState()
@@ -91,9 +95,18 @@ fun ChatThreadScreen(
     LaunchedEffect(thread.size) {
         if (thread.isNotEmpty()) listState.animateScrollToItem(thread.lastIndex)
     }
+    LaunchedEffect(peerId, isChannel) {
+        repository.markThreadRead(peerId, isChannel)
+    }
 
+    var cameraUri by remember { mutableStateOf<Uri?>(null) }
     val imagePicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
-        if (uri != null) pendingImage = describeImage(context, uri)
+        if (uri != null) {
+            pendingImage = prepareImage(context, uri, repository.mediaCapBytes())
+        }
+    }
+    val cameraLauncher = rememberLauncherForActivityResult(ActivityResultContracts.TakePicture()) { success ->
+        if (success) cameraUri?.let { uri -> pendingImage = prepareImage(context, uri, repository.mediaCapBytes()) }
     }
 
     Column(Modifier.fillMaxSize().imePadding()) {
@@ -153,6 +166,18 @@ fun ChatThreadScreen(
             IconButton(onClick = { imagePicker.launch("image/*") }) {
                 Icon(Icons.Filled.Image, contentDescription = "Attach image", tint = MeshPrimary)
             }
+            IconButton(onClick = {
+                val dir = java.io.File(context.cacheDir, "captures").apply { mkdirs() }
+                val file = java.io.File(dir, "capture-${System.currentTimeMillis()}.jpg")
+                cameraUri = androidx.core.content.FileProvider.getUriForFile(
+                    context,
+                    "${context.packageName}.fileprovider",
+                    file,
+                )
+                cameraLauncher.launch(cameraUri!!)
+            }) {
+                Icon(Icons.Filled.PhotoCamera, contentDescription = "Take photo", tint = MeshPrimary)
+            }
             IconButton(onClick = { showVoiceDialog = true }) {
                 Icon(Icons.Filled.Mic, contentDescription = "Record voice note", tint = MeshPrimary)
             }
@@ -180,11 +205,11 @@ fun ChatThreadScreen(
     }
 
     pendingImage?.let { image ->
-        val estimate = repository.estimateMedia(image.bytes, MediaKind.IMAGE)
+        val estimate = repository.estimateMedia(image.bytes.size, MediaKind.IMAGE)
         AirtimeEstimateDialog(
             estimate = estimate,
             onConfirm = {
-                repository.sendAttachment(peerId, image.name, image.mime, image.bytes, isChannel)
+                repository.sendAttachmentBytes(peerId, image.name, image.mime, image.bytes, null, isChannel)
                 pendingImage = null
             },
             onDismiss = { pendingImage = null },
@@ -192,11 +217,17 @@ fun ChatThreadScreen(
     }
 
     if (showVoiceDialog) {
-        VoiceRecorderDialog(
-            maxSeconds = 15,
-            onRecord = { seconds ->
-                val bytes = (seconds * 7_000 / 8) // Opus ~7 kbps
-                repository.sendVoiceNote(peerId, seconds * 1000, bytes, isChannel)
+        VoiceRecordDialog(
+            maxSeconds = repository.maxVoiceSeconds(),
+            onRecord = { recording ->
+                repository.sendAttachmentBytes(
+                    peerId,
+                    "voice-${recording.durationMs / 1000}s.m4a",
+                    "audio/mp4",
+                    recording.bytes,
+                    recording.durationMs.toLong(),
+                    isChannel,
+                )
                 showVoiceDialog = false
             },
             onDismiss = { showVoiceDialog = false },
@@ -204,26 +235,19 @@ fun ChatThreadScreen(
     }
 }
 
-private data class PendingImage(val name: String, val mime: String, val bytes: Int)
+private data class PendingImage(val name: String, val mime: String, val bytes: ByteArray)
 
-private fun describeImage(context: Context, uri: Uri): PendingImage {
+private fun prepareImage(context: Context, uri: Uri, capBytes: Int): PendingImage? {
     var name = uri.lastPathSegment?.substringAfterLast('/') ?: "image.jpg"
-    var bytes = 0
-    context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE), null, null, null)
+    context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)
         ?.use { cursor ->
             if (cursor.moveToFirst()) {
                 val nameIndex = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
-                val sizeIndex = cursor.getColumnIndex(OpenableColumns.SIZE)
                 if (nameIndex >= 0) cursor.getString(nameIndex)?.let { name = it }
-                if (sizeIndex >= 0 && !cursor.isNull(sizeIndex)) bytes = cursor.getLong(sizeIndex).toInt()
             }
         }
-    if (bytes <= 0) {
-        bytes = runCatching {
-            context.contentResolver.openAssetFileDescriptor(uri, "r")?.use { it.length.toInt() }
-        }.getOrNull() ?: 0
-    }
-    return PendingImage(name, context.contentResolver.getType(uri) ?: "image/jpeg", bytes.coerceAtLeast(0))
+    val compressed = ImageCompressor.compress(context, uri, capBytes) ?: return null
+    return PendingImage(name.substringBeforeLast('.') + ".jpg", "image/jpeg", compressed)
 }
 
 @Composable

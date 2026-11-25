@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <!-- Camera captures for image messages (never exposed outside the app). -->
+    <cache-path name="captures" path="captures/" />
+    <files-path name="attachments" path="attachments/" />
+</paths>

@@ -15,6 +15,7 @@ import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
@@ -29,12 +30,16 @@ import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import org.openmesh.android.data.model.RadioStatus
 import org.openmesh.android.data.repository.MeshRepository
+import org.openmesh.android.ui.screens.AboutScreen
+import org.openmesh.android.ui.screens.ChannelsScreen
 import org.openmesh.android.ui.screens.ChatListScreen
 import org.openmesh.android.ui.screens.ChatThreadScreen
 import org.openmesh.android.ui.screens.ContactsScreen
+import org.openmesh.android.ui.screens.HelpScreen
 import org.openmesh.android.ui.screens.MapScreen
 import org.openmesh.android.ui.screens.NodesScreen
 import org.openmesh.android.ui.screens.QrScanScreen
+import org.openmesh.android.ui.screens.RadioScreen
 import org.openmesh.android.ui.screens.SettingsScreen
 
 object Routes {
@@ -44,8 +49,13 @@ object Routes {
     const val CONTACTS = "contacts"
     const val SETTINGS = "settings"
     const val QR = "qr"
+    const val CHANNELS = "channels"
+    const val RADIO = "radio"
+    const val HELP = "help?topic={topic}"
+    const val ABOUT = "about"
     const val THREAD = "thread/{peerId}?channel={channel}"
     fun thread(peerId: String, channel: Boolean) = "thread/$peerId?channel=$channel"
+    fun help(topic: String? = null) = if (topic.isNullOrBlank()) "help" else "help?topic=$topic"
 }
 
 private data class TopLevel(val route: String, val label: String, val icon: ImageVector)
@@ -64,6 +74,7 @@ fun OpenMeshNavHost(
     radio: RadioStatus,
     snackbarMessage: String?,
     onSnackbarShown: () -> Unit,
+    initialThread: Pair<String, Boolean>? = null,
 ) {
     val navController = rememberNavController()
     val snackbarHostState = remember { SnackbarHostState() }
@@ -77,6 +88,9 @@ fun OpenMeshNavHost(
             onSnackbarShown()
         }
     }
+    LaunchedEffect(initialThread) {
+        initialThread?.let { (peer, channel) -> navController.navigate(Routes.thread(peer, channel)) }
+    }
 
     Scaffold(
         snackbarHost = { SnackbarHost(snackbarHostState) },
@@ -88,9 +102,7 @@ fun OpenMeshNavHost(
                             selected = currentRoute == entry.route,
                             onClick = {
                                 navController.navigate(entry.route) {
-                                    popUpTo(navController.graph.findStartDestination().id) {
-                                        saveState = true
-                                    }
+                                    popUpTo(navController.graph.findStartDestination().id) { saveState = true }
                                     launchSingleTop = true
                                     restoreState = true
                                 }
@@ -112,10 +124,10 @@ fun OpenMeshNavHost(
                 ChatListScreen(
                     repository = repository,
                     radio = radio,
-                    onOpenThread = { peerId, channel ->
-                        navController.navigate(Routes.thread(peerId, channel))
-                    },
+                    onOpenThread = { peerId, channel -> navController.navigate(Routes.thread(peerId, channel)) },
                     onOpenSettings = { navController.navigate(Routes.SETTINGS) },
+                    onOpenChannels = { navController.navigate(Routes.CHANNELS) },
+                    onOpenHelp = { navController.navigate(Routes.help()) },
                 )
             }
             composable(
@@ -132,6 +144,7 @@ fun OpenMeshNavHost(
                     peerId = peerId,
                     isChannel = channel,
                     onBack = { navController.popBackStack() },
+                    onOpenHelp = { slug -> navController.navigate(Routes.help(slug)) },
                 )
             }
             composable(Routes.MAP) { MapScreen(repository = repository) }
@@ -140,6 +153,7 @@ fun OpenMeshNavHost(
                 ContactsScreen(
                     repository = repository,
                     onScan = { navController.navigate(Routes.QR) },
+                    onOpenHelp = { slug -> navController.navigate(Routes.help(slug)) },
                 )
             }
             composable(Routes.SETTINGS) {
@@ -147,6 +161,40 @@ fun OpenMeshNavHost(
                     repository = repository,
                     radio = radio,
                     onBack = { navController.popBackStack() },
+                    onOpenHelp = { slug -> navController.navigate(Routes.help(slug)) },
+                    onOpenRadio = { navController.navigate(Routes.RADIO) },
+                    onOpenAbout = { navController.navigate(Routes.ABOUT) },
+                )
+            }
+            composable(
+                route = Routes.HELP,
+                arguments = listOf(navArgument("topic") { type = NavType.StringType; nullable = true; defaultValue = null }),
+            ) { entry ->
+                val settings = repository.settings.collectAsState().value
+                HelpScreen(
+                    repository = repository,
+                    settings = settings,
+                    onBack = { navController.popBackStack() },
+                    initialTopic = entry.arguments?.getString("topic"),
+                )
+            }
+            composable(Routes.CHANNELS) {
+                ChannelsScreen(
+                    repository = repository,
+                    onBack = { navController.popBackStack() },
+                    onOpenThread = { channelId -> navController.navigate(Routes.thread(channelId, true)) },
+                    onScan = { navController.navigate(Routes.QR) },
+                )
+            }
+            composable(Routes.RADIO) {
+                val settings = repository.settings.collectAsState().value
+                RadioScreen(repository = repository, radio = radio, settings = settings, onBack = { navController.popBackStack() })
+            }
+            composable(Routes.ABOUT) {
+                AboutScreen(
+                    repository = repository,
+                    onBack = { navController.popBackStack() },
+                    onOpenHelp = { slug -> navController.navigate(Routes.help(slug)) },
                 )
             }
             composable(Routes.QR) {

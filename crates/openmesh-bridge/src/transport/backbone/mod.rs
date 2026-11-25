@@ -1414,6 +1414,7 @@ impl BackboneManager {
                     "commands": [firewall_add.clone(), firewall_reload.clone()],
                     "note": "Only the OBB/1 port needs to be reachable from the internet."
                 },
+                crate::setup::exposure_step(port),
                 {
                     "title": "Keep it running",
                     "commands": ["openmesh-bridge install-service --backbone"],
@@ -1425,6 +1426,7 @@ impl BackboneManager {
                     "note": "Run this on any bridge that should link its local mesh to the backbone."
                 }
             ],
+            "exposure": crate::setup::exposure_payload(port),
             "systemd_unit": systemd_unit,
             "firewall": {
                 "firewalld": [firewall_add, firewall_reload],

@@ -32,6 +32,7 @@ import { BackboneStats } from './backbone/BackboneStats';
 import { BackbonePeers } from './backbone/BackbonePeers';
 import { BackboneControls } from './backbone/BackboneControls';
 import { BackboneConnection, BackboneInstallCard } from './backbone/BackboneConnection';
+import { BackboneExposureCard } from './backbone/BackboneExposure';
 import { BackboneSetupDrawer } from './backbone/BackboneSetup';
 
 /**
@@ -64,7 +65,14 @@ export function BackboneScreen() {
   const rotateBackboneToken = useAppStore((state) => state.rotateBackboneToken);
   const setScreen = useAppStore((state) => state.setScreen);
 
-  const [setupOpen, setSetupOpen] = useState(false);
+  const [setupOpen, setSetupOpen] = useState(() => {
+    try {
+      const params = new URLSearchParams(window.location.search);
+      return params.get('setup') === 'backbone' || params.get('backbone-setup') === '1';
+    } catch {
+      return false;
+    }
+  });
   const [enabling, setEnabling] = useState(false);
   const demo = mode === 'demo';
 
@@ -280,6 +288,12 @@ export function BackboneScreen() {
                 )}
               </div>
               <div className="min-w-0 space-y-4">
+                <BackboneExposureCard
+                  exposure={effectiveSetup.exposure ?? null}
+                  bind={config.bind}
+                  port={config.port}
+                  publicHost={config.public_host}
+                />
                 <BackboneConnection
                   config={config}
                   peersConnected={stats.peers}
