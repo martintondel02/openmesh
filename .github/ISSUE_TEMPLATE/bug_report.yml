@@ -1,0 +1,30 @@
+name: Bug report
+description: Something in OpenMesh is broken
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: "Thanks for testing alpha software. Please include logs and exact commands."
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      options: ["core protocol", "bridge daemon", "web/desktop client", "firmware", "flasher", "android", "docs", "other"]
+    validations: { required: true }
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: Include exact steps, expected vs actual behaviour.
+    validations: { required: true }
+  - type: textarea
+    id: env
+    attributes:
+      label: Environment
+      description: OS, versions (openmesh, rust, node), board + firmware version, radio profile/region.
+    validations: { required: true }
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs / screenshots
+      render: shell

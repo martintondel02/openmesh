@@ -1,0 +1,34 @@
+# Rust
+/target/
+**/*.rs.bk
+# Node
+node_modules/
+dist/
+.vite/
+apps/web/dist/
+*.tsbuildinfo
+# PlatformIO
+firmware/.pio/
+.pio/
+# Android
+apps/android/.gradle/
+apps/android/local.properties
+apps/android/build/
+apps/android/**/build/
+*.apk
+# Python
+__pycache__/
+*.pyc
+.venv/
+# OS/editor
+.DS_Store
+.idea/
+.vscode/
+*.swp
+# Local runtime data
+.openmesh/
+*.redb
+*.log
+# Build artifacts
+build/
+artifacts/

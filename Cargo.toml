@@ -1,0 +1,61 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/openmesh-core",
+    "crates/openmesh-bridge",
+    "crates/openmesh-cli",
+    "crates/openmesh-sim",
+    "crates/openmesh-ffi",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "AGPL-3.0-or-later"
+authors = ["OpenMesh contributors"]
+repository = "https://github.com/martintondel02/openmesh"
+homepage = "https://github.com/martintondel02/openmesh"
+
+[workspace.dependencies]
+# serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ciborium = "0.2"
+hex = "0.4"
+base64 = "0.22"
+# crypto
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+chacha20poly1305 = "0.10"
+sha2 = "0.10"
+hkdf = "0.12"
+subtle = "2"
+zeroize = { version = "1", features = ["derive"] }
+rand_core = { version = "0.6", features = ["getrandom"] }
+rand = "0.8"
+# async / net
+tokio = { version = "1", features = ["full"] }
+tokio-tungstenite = "0.24"
+tokio-util = { version = "0.7", features = ["codec"] }
+futures-util = "0.3"
+bytes = "1"
+# storage / serial
+redb = "2"
+serialport = { version = "4", default-features = false }
+# cli / logging
+clap = { version = "4", features = ["derive", "env"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+humantime = "2"
+# errors
+thiserror = "2"
+anyhow = "1"
+# internal
+openmesh-core = { path = "crates/openmesh-core", version = "0.1.0" }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"

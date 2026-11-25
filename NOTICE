@@ -1,0 +1,25 @@
+OpenMesh
+Copyright (C) 2026 OpenMesh contributors
+
+This program is free software: you can redistribute it and/or modify it under the terms of the
+GNU Affero General Public License as published by the Free Software Foundation, either version 3
+of the License, or (at your option) any later version. See LICENSE.
+
+## Third-party components and references
+
+OpenMesh is an independent implementation. It contains no code from the projects below; they
+were studied as prior art and for hardware pin-map facts, and are credited here.
+
+- Reticulum / LXMF / LXST — Mark Qvist (https://reticulum.network/). LXST and its Rust port
+  rsLXST are under a restrictive licence and are NOT used.
+- Ratspeak and rsReticulum/rsLXMF — https://ratspeak.org/ (Reticulum Licence). Their Rust
+  architecture informed OpenMesh's client/daemon split.
+- Meshtastic firmware (GPL-3.0) — board pin maps and variant files were consulted to cross-check
+  hardware wiring for the reference boards; OpenMesh board headers are written independently and
+  cite the vendor documentation.
+- MeshCore (https://meshcore.io/) — protocol design inspiration (repeater/room-server roles).
+- Semtech AN1200.13/AN1200.22 — LoRa airtime formulas.
+
+Rust crates are licensed under their respective terms (Apache-2.0/MIT/BSD), listed in each
+crate's Cargo metadata. Firmware libraries (RadioLib, Adafruit nRF52 core, arduino-esp32) are
+licensed by their authors; see `firmware/THIRD_PARTY.md` when added.
