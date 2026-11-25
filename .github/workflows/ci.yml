@@ -32,7 +32,7 @@ jobs:
       - name: Test
         run: cargo test --workspace --all-targets
       - name: Simulator scenarios
-        run: cargo run -p openmesh-sim -- --profile ci
+        run: cargo run -p openmesh-sim -- --seed 42 --json
 
   web:
     name: web
