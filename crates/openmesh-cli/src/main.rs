@@ -124,6 +124,34 @@ enum AgentCommand {
     },
 }
 
+#[derive(Debug, Clone, Subcommand)]
+enum ConfigCommand {
+    /// Show the current config, legal maxima for the region and override state.
+    Show,
+    /// Change the regulatory override (emergency use; requires --i-understand-risk when it
+    /// exceeds the legal maxima, otherwise the command exits 2 without changing anything).
+    Override {
+        /// Override duty cycle in percent (0 = no transmissions, legal way to go silent).
+        #[arg(long, value_name = "PCT")]
+        duty_pct: Option<u8>,
+        /// Override TX power ceiling in dBm EIRP.
+        #[arg(long, value_name = "DBM")]
+        power_dbm: Option<i8>,
+        /// Override centre frequency in kHz.
+        #[arg(long, value_name = "KHZ")]
+        frequency_khz: Option<u32>,
+        /// Short reason stored in the activity log (max 120 characters).
+        #[arg(long, value_name = "TEXT")]
+        reason: Option<String>,
+        /// Required acknowledgement when the override exceeds the legal maxima.
+        #[arg(long = "i-understand-risk")]
+        i_understand_risk: bool,
+        /// Disable the override (always allowed, no acknowledgement needed).
+        #[arg(long)]
+        disable: bool,
+    },
+}
+
 #[derive(Debug, Subcommand)]
 enum Command {
     /// Send a direct message (and wait for the delivery ack).
@@ -171,6 +199,11 @@ enum Command {
         #[command(subcommand)]
         command: AgentCommand,
     },
+    /// Inspect and change the bridge config (including the regulatory override).
+    Config {
+        #[command(subcommand)]
+        command: ConfigCommand,
+    },
     /// Read the help center topics (same content as the web Help tab and MCP tools).
     Help {
         /// Topic slug, e.g. getting-started; omit to list all topics.
@@ -187,6 +220,9 @@ enum Command {
         /// Regulatory region for duty-cycle budgeting.
         #[arg(long, default_value = "EU868", value_name = "REGION")]
         region: String,
+        /// Override duty cycle in percent (shows legal maxima + effective duty).
+        #[arg(long, value_name = "PCT")]
+        duty_override: Option<u8>,
     },
 }
 
@@ -215,12 +251,14 @@ async fn run(cli: Cli) -> Result<u8> {
     match &cli.command {
         Command::Backbone { command } => backbone_command(&cli, command.as_ref()).await,
         Command::Agent { command } => agent_command(&cli, command).await,
+        Command::Config { command } => config_command(&cli, command).await,
         Command::Help { topic } => help_command(&cli, topic.as_deref()).await,
         Command::Airtime {
             profile,
             bytes,
             region,
-        } => airtime(profile, *bytes, region),
+            duty_override,
+        } => airtime(profile, *bytes, region, *duty_override),
         Command::Send {
             to,
             text,
@@ -351,7 +389,12 @@ async fn run(cli: Cli) -> Result<u8> {
 // Airtime calculator (works offline)
 // ---------------------------------------------------------------------------------------------
 
-fn airtime(profile_name: &str, bytes: usize, region_name: &str) -> Result<u8> {
+fn airtime(
+    profile_name: &str,
+    bytes: usize,
+    region_name: &str,
+    duty_override: Option<u8>,
+) -> Result<u8> {
     let Some(profile) = util::PROFILES
         .iter()
         .find(|p| p.name.eq_ignore_ascii_case(profile_name))
@@ -378,13 +421,41 @@ fn airtime(profile_name: &str, bytes: usize, region_name: &str) -> Result<u8> {
                 .join(", ")
         );
     };
+    if profile.bw_khz > region.bw_khz {
+        let allowed: Vec<&str> = util::PROFILES
+            .iter()
+            .filter(|candidate| candidate.bw_khz <= region.bw_khz)
+            .map(|candidate| candidate.name)
+            .collect();
+        bail!(
+            "profile {} needs {} kHz but {} allows at most {} kHz; allowed profiles: {}",
+            profile.name,
+            profile.bw_khz,
+            region.name,
+            region.bw_khz,
+            allowed.join(", ")
+        );
+    }
+    if let Some(duty) = duty_override {
+        if duty > 100 {
+            bail!("--duty-override must be 0..=100");
+        }
+        if duty > region.duty_cycle_pct.unwrap_or(100) {
+            println!("warning       {OVERRIDE_WARNING}");
+        }
+    }
     let chunk_bytes = 180usize;
     let chunks = bytes.div_ceil(chunk_bytes).max(1);
     let frames = chunks + 4; // manifest + ~3 ACKs for a direct attachment
     let per_frame_ms = util::lora_airtime_ms(profile, 240);
     let total_ms = frames as u64 * per_frame_ms as u64;
-    let duty_pct = region.duty_cycle_pct.unwrap_or(100);
-    // Wall-clock time needed to stay inside the region's duty cycle.
+    let legal_duty = region.duty_cycle_pct;
+    let duty_pct = duty_override.or(legal_duty).unwrap_or(100);
+    let legal_text = match legal_duty {
+        Some(duty) => format!("{duty}%"),
+        None => "fair use (no numeric duty cycle)".to_string(),
+    };
+    // Wall-clock time needed to stay inside the effective duty cycle.
     let legal_wait_s = if duty_pct == 0 {
         0.0
     } else {
@@ -395,12 +466,25 @@ fn airtime(profile_name: &str, bytes: usize, region_name: &str) -> Result<u8> {
         profile.name, profile.sf, profile.bw_khz, profile.coding_rate
     );
     println!(
-        "region        {} ({} MHz, max {} dBm, duty {}%)",
+        "region        {} ({} MHz, max {} dBm EIRP, legal duty {})",
         region.name,
         region.freq_khz as f64 / 1000.0,
         region.max_power_dbm,
-        duty_pct
+        legal_text
     );
+    println!(
+        "max bw        {} kHz (profile uses {} kHz)",
+        region.bw_khz, profile.bw_khz
+    );
+    if let Some(override_pct) = duty_override {
+        println!(
+            "effective     duty override {}% (legal {}) — REGULATORY OVERRIDE, verify local law",
+            override_pct, legal_text
+        );
+        let _ = legal_duty;
+    } else {
+        println!("effective     legal duty {legal_text}");
+    }
     println!(
         "payload       {} ({} chunk(s) of {} B)",
         util::format_bytes(bytes),
@@ -417,9 +501,9 @@ fn airtime(profile_name: &str, bytes: usize, region_name: &str) -> Result<u8> {
         util::format_duration_ms(total_ms),
         total_ms
     );
-    if region.duty_cycle_pct.is_some() {
+    if legal_duty.is_some() || duty_override.is_some() {
         println!(
-            "wall clock    ~{} at the regulated {}% duty cycle",
+            "wall clock    ~{} at the effective {}% duty cycle",
             util::format_duration_ms((legal_wait_s * 1000.0) as u64),
             duty_pct
         );
@@ -1494,6 +1578,338 @@ async fn help_command(cli: &Cli, topic: Option<&str>) -> Result<u8> {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Config + regulatory override (regulatory-and-regions.md §2.4)
+// ---------------------------------------------------------------------------------------------
+
+/// Verbatim warning shown whenever an override may exceed the legal maxima.
+const OVERRIDE_WARNING: &str = "Regulatory override active — transmissions may violate local radio regulations and void your radio's certification. Use only in a life-threatening emergency where local law permits. You are responsible for compliance and for any interference or damage.";
+
+fn region_legal(region_name: &str) -> Option<&'static util::Region> {
+    util::REGIONS
+        .iter()
+        .find(|region| region.name.eq_ignore_ascii_case(region_name))
+}
+
+/// Whether the requested values exceed the legal maxima for the region.
+///
+/// A frequency different from the region centre is treated as exceeding; reducing power or duty
+/// is not. Unknown regions are treated conservatively (exceeds) so the CLI never silently bypasses
+/// the acknowledgement.
+fn override_values_exceed_legal(
+    region_name: &str,
+    duty_pct: Option<u8>,
+    power_dbm: Option<i8>,
+    frequency_khz: Option<u32>,
+) -> bool {
+    let Some(region) = region_legal(region_name) else {
+        return true;
+    };
+    if let Some(duty) = duty_pct {
+        if region.duty_cycle_pct.is_some_and(|legal| duty > legal) {
+            return true;
+        }
+    }
+    if let Some(power) = power_dbm {
+        if power > region.max_power_dbm {
+            return true;
+        }
+    }
+    if let Some(frequency) = frequency_khz {
+        if frequency != region.freq_khz {
+            return true;
+        }
+    }
+    false
+}
+
+/// The `--i-understand-risk` flag is mandatory when the requested values exceed the legal maxima
+/// (regulatory-and-regions.md §2.4). Safe reductions/zero-TX stay usable without it.
+fn override_requires_risk(desired_enabled: bool, exceeds: bool) -> bool {
+    desired_enabled && exceeds
+}
+
+fn print_override_summary(config: &Value) {
+    let current = &config["regulatory_override"];
+    let active = config["override_active"].as_bool().unwrap_or(false);
+    println!(
+        "override      enabled={} acknowledged={} duty={} power={} frequency={}{}{}",
+        current["enabled"].as_bool().unwrap_or(false),
+        current["acknowledged"].as_bool().unwrap_or(false),
+        current["duty_cycle_pct"]
+            .as_u64()
+            .map(|value| format!("{value}%"))
+            .unwrap_or_else(|| "legal".to_string()),
+        current["max_power_dbm"]
+            .as_i64()
+            .map(|value| format!("{value} dBm"))
+            .unwrap_or_else(|| "legal".to_string()),
+        current["frequency_khz"]
+            .as_u64()
+            .map(|value| format!("{value}kHz"))
+            .unwrap_or_else(|| "legal".to_string()),
+        current["reason"]
+            .as_str()
+            .map(|reason| format!(" reason={reason:?}"))
+            .unwrap_or_default(),
+        if active { " ACTIVE" } else { "" },
+    );
+    if active {
+        println!("WARNING       {OVERRIDE_WARNING}");
+    }
+    if let Some(warning) = config["override_warning"]
+        .as_str()
+        .filter(|warning| *warning != OVERRIDE_WARNING)
+    {
+        println!("warning       {warning}");
+    }
+}
+
+fn format_config_show(config: &Value) -> String {
+    let mut out = String::new();
+    out.push_str(&format!(
+        "node          {} ({})  announce {}s\n",
+        config
+            .pointer("/node/name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("?"),
+        config
+            .pointer("/node/class")
+            .and_then(|v| v.as_str())
+            .unwrap_or("?"),
+        config
+            .pointer("/node/announce_interval_s")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0),
+    ));
+    out.push_str(&format!(
+        "radio         profile={} region={} tx_power={} dBm frequency={} MHz interface={}\n",
+        config
+            .pointer("/radio/profile")
+            .and_then(|v| v.as_str())
+            .unwrap_or("?"),
+        config
+            .pointer("/radio/region")
+            .and_then(|v| v.as_str())
+            .unwrap_or("?"),
+        config
+            .pointer("/radio/tx_power_dbm")
+            .and_then(|v| v.as_i64())
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "?".to_string()),
+        config
+            .pointer("/radio/frequency_mhz")
+            .and_then(|v| v.as_f64())
+            .map(|value| format!("{value:.3}"))
+            .unwrap_or_else(|| "?".to_string()),
+        config
+            .pointer("/radio/interface")
+            .and_then(|v| v.as_str())
+            .unwrap_or("?"),
+    ));
+    let legal = &config["legal"];
+    out.push_str(&format!(
+        "legal         region={} max_power={} dBm duty={} max_bw={} kHz  ({})\n",
+        legal.get("region").and_then(|v| v.as_str()).unwrap_or("?"),
+        legal
+            .get("max_power_dbm")
+            .and_then(|v| v.as_i64())
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "?".to_string()),
+        legal
+            .get("duty_cycle_pct")
+            .and_then(|v| v.as_u64())
+            .map(|value| format!("{value}%"))
+            .unwrap_or_else(|| "fair use".to_string()),
+        legal
+            .get("max_bw_khz")
+            .and_then(|v| v.as_u64())
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "?".to_string()),
+        legal
+            .get("source")
+            .and_then(|v| v.as_str())
+            .unwrap_or("verify local law"),
+    ));
+    out.push_str(&format!(
+        "features      auto_announce={} store_forward={} position_sharing={}\n",
+        config
+            .pointer("/features/auto_announce")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        config
+            .pointer("/features/store_forward")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        config
+            .pointer("/features/position_sharing")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+    ));
+    out.push_str(&format!(
+        "channels      {}\n",
+        config
+            .get("channels")
+            .and_then(|v| v.as_array())
+            .map(Vec::len)
+            .unwrap_or(0)
+    ));
+    let current = &config["regulatory_override"];
+    out.push_str(&format!(
+        "override      enabled={} acknowledged={} duty={} power={} frequency={} reason={}\n",
+        current
+            .get("enabled")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        current
+            .get("acknowledged")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        current
+            .get("duty_cycle_pct")
+            .and_then(|v| v.as_u64())
+            .map(|value| format!("{value}%"))
+            .unwrap_or_else(|| "legal".to_string()),
+        current
+            .get("max_power_dbm")
+            .and_then(|v| v.as_i64())
+            .map(|value| format!("{value} dBm"))
+            .unwrap_or_else(|| "legal".to_string()),
+        current
+            .get("frequency_khz")
+            .and_then(|v| v.as_u64())
+            .map(|value| format!("{value} kHz"))
+            .unwrap_or_else(|| "legal".to_string()),
+        current
+            .get("reason")
+            .and_then(|v| v.as_str())
+            .unwrap_or("-"),
+    ));
+    if config
+        .get("override_active")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
+        out.push_str(&format!("WARNING       {OVERRIDE_WARNING}\n"));
+    }
+    if let Some(warning) = config
+        .get("override_warning")
+        .and_then(|v| v.as_str())
+        .filter(|warning| *warning != OVERRIDE_WARNING)
+    {
+        out.push_str(&format!("warning       {warning}\n"));
+    }
+    out
+}
+
+async fn config_command(cli: &Cli, command: &ConfigCommand) -> Result<u8> {
+    let base = api_base(cli);
+    let token = resolve_token(cli)?;
+    match command {
+        ConfigCommand::Show => {
+            let config = http_json("GET", &base, "/api/config", &token, None).await?;
+            if cli.json {
+                println!("{}", serde_json::to_string_pretty(&config)?);
+            } else {
+                print!("{}", format_config_show(&config));
+            }
+        }
+        ConfigCommand::Override {
+            duty_pct,
+            power_dbm,
+            frequency_khz,
+            reason,
+            i_understand_risk,
+            disable,
+        } => {
+            if *disable {
+                let body = json!({ "regulatory_override": { "enabled": false } });
+                let updated = http_json("PATCH", &base, "/api/config", &token, Some(body)).await?;
+                if cli.json {
+                    println!("{}", serde_json::to_string_pretty(&updated)?);
+                } else {
+                    println!("Regulatory override disabled.");
+                    print_override_summary(&updated);
+                }
+                return Ok(0);
+            }
+            if let Some(reason) = reason {
+                if reason.chars().count() > 120 {
+                    bail!("reason must be at most 120 characters");
+                }
+            }
+            if duty_pct.is_none()
+                && power_dbm.is_none()
+                && frequency_khz.is_none()
+                && reason.is_none()
+            {
+                bail!(
+                    "nothing to change: pass --duty-pct/--power-dbm/--frequency-khz/--reason, or --disable"
+                );
+            }
+            let config = http_json("GET", &base, "/api/config", &token, None).await?;
+            if let Some(duty) = duty_pct {
+                if *duty > 100 {
+                    bail!("--duty-pct must be 0..=100");
+                }
+            }
+            let region_name = config
+                .pointer("/legal/region")
+                .and_then(|v| v.as_str())
+                .or_else(|| config.pointer("/radio/region").and_then(|v| v.as_str()))
+                .unwrap_or("EU868")
+                .to_string();
+            let current_enabled = config
+                .pointer("/regulatory_override/enabled")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let exceeds =
+                override_values_exceed_legal(&region_name, *duty_pct, *power_dbm, *frequency_khz);
+            let _ = current_enabled;
+            let requires_risk = override_requires_risk(true, exceeds);
+            if requires_risk && !i_understand_risk {
+                println!(
+                    "Regulatory override NOT applied — this needs an explicit acknowledgement."
+                );
+                println!(
+                    "Requested values exceed the legal maxima for {region_name} (or enable the override)."
+                );
+                println!("warning: {OVERRIDE_WARNING}");
+                println!(
+                    "Re-run with --i-understand-risk to apply it anyway; nothing was changed."
+                );
+                return Ok(2);
+            }
+            let mut override_patch = serde_json::Map::new();
+            override_patch.insert("enabled".into(), json!(true));
+            if *i_understand_risk {
+                override_patch.insert("acknowledged".into(), json!(true));
+            }
+            if let Some(duty) = duty_pct {
+                override_patch.insert("duty_cycle_pct".into(), json!(duty));
+            }
+            if let Some(power) = power_dbm {
+                override_patch.insert("max_power_dbm".into(), json!(power));
+            }
+            if let Some(frequency) = frequency_khz {
+                override_patch.insert("frequency_khz".into(), json!(frequency));
+            }
+            if let Some(reason) = reason {
+                override_patch.insert("reason".into(), json!(reason));
+            }
+            let body = json!({ "regulatory_override": Value::Object(override_patch) });
+            let updated = http_json("PATCH", &base, "/api/config", &token, Some(body)).await?;
+            if cli.json {
+                println!("{}", serde_json::to_string_pretty(&updated)?);
+            } else {
+                println!("Regulatory override updated.");
+                print_override_summary(&updated);
+            }
+        }
+    }
+    Ok(0)
+}
+
+// ---------------------------------------------------------------------------------------------
 // Backbone diagnostics (REST)
 // ---------------------------------------------------------------------------------------------
 
@@ -1814,8 +2230,85 @@ mod tests {
 
     #[test]
     fn airtime_runs() {
-        assert_eq!(airtime("MEDIUM_FAST", 5120, "EU868").unwrap(), 0);
-        assert!(airtime("NOPE", 1, "EU868").is_err());
-        assert!(airtime("MEDIUM_FAST", 1, "NOPE").is_err());
+        assert_eq!(airtime("MEDIUM_FAST", 5120, "EU868", None).unwrap(), 0);
+        assert_eq!(airtime("MEDIUM_FAST", 5120, "EU868", Some(50)).unwrap(), 0);
+        assert!(airtime("NOPE", 1, "EU868", None).is_err());
+        assert!(airtime("MEDIUM_FAST", 1, "NOPE", None).is_err());
+        // SHORT_TURBO (500 kHz) is not legal in EU868 (250 kHz) but is in US915 (500 kHz).
+        assert!(airtime("SHORT_TURBO", 5120, "EU868", None).is_err());
+        assert_eq!(airtime("SHORT_TURBO", 5120, "US915", None).unwrap(), 0);
+    }
+
+    #[test]
+    fn regulatory_gating_rules() {
+        let region = region_legal("EU868").expect("EU868");
+        // Exceeding values need the acknowledgement flag.
+        assert!(override_requires_risk(true, true));
+        // Safe reductions do not.
+        assert!(!override_requires_risk(true, false));
+        // Disabling needs nothing.
+        assert!(!override_requires_risk(false, true));
+        let legal_duty = region.duty_cycle_pct.unwrap();
+        assert!(override_values_exceed_legal(
+            "EU868",
+            Some(legal_duty + 1),
+            None,
+            None
+        ));
+        assert!(!override_values_exceed_legal(
+            "EU868",
+            Some(legal_duty),
+            None,
+            None
+        ));
+        assert!(override_values_exceed_legal(
+            "EU868",
+            None,
+            Some(region.max_power_dbm + 1),
+            None
+        ));
+        assert!(!override_values_exceed_legal(
+            "EU868",
+            None,
+            Some(region.max_power_dbm),
+            None
+        ));
+        assert!(override_values_exceed_legal(
+            "EU868",
+            None,
+            None,
+            Some(region.freq_khz + 1)
+        ));
+        assert!(!override_values_exceed_legal(
+            "EU868",
+            None,
+            None,
+            Some(region.freq_khz)
+        ));
+        // Unknown regions are conservative.
+        assert!(override_values_exceed_legal("MARS", Some(1), None, None));
+    }
+
+    #[test]
+    fn config_show_renders_legal_and_override() {
+        let config = serde_json::json!({
+            "node": {"name": "test", "class": "client", "announce_interval_s": 1800},
+            "radio": {"profile": "MEDIUM_FAST", "region": "EU868", "tx_power_dbm": 27,
+                       "frequency_mhz": 869.525, "interface": "udp"},
+            "legal": {"region": "EU868", "max_power_dbm": 27, "duty_cycle_pct": 10,
+                       "max_bw_khz": 250, "source": "CEPT"},
+            "features": {"auto_announce": true, "store_forward": false, "position_sharing": false},
+            "channels": [{"channel_id": "11223344aabbccdd", "name": "family", "psk_set": true}],
+            "regulatory_override": {"enabled": true, "acknowledged": true, "duty_cycle_pct": 50,
+                                     "max_power_dbm": null, "frequency_khz": null, "reason": "test"},
+            "override_active": true,
+            "override_warning": "Regulatory override active"
+        });
+        let rendered = format_config_show(&config);
+        assert!(rendered.contains("legal         region=EU868"));
+        assert!(rendered.contains("max_power=27 dBm"));
+        assert!(rendered.contains("duty=10%"));
+        assert!(rendered.contains("WARNING"));
+        assert!(rendered.contains("Regulatory override active"));
     }
 }

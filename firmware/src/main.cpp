@@ -4,6 +4,7 @@
 // board HAL: RadioLib, LittleFS/InternalFileSystem, USB CDC + BLE NUS, GNSS UART and ADC.
 #include <Arduino.h>
 
+#include <cstdio>
 #include <cstring>
 
 #include "board_select.h"
@@ -20,7 +21,7 @@
 #include "openmesh/om_sha256.h"
 
 #ifndef OM_FW_VERSION
-#define OM_FW_VERSION "0.1.0"
+#define OM_FW_VERSION "0.5.0"
 #endif
 #ifndef OM_DEFAULT_CHANNEL_NAME
 #define OM_DEFAULT_CHANNEL_NAME "openmesh-public"
@@ -141,7 +142,15 @@ void configureEngine() {
     if (config.profile == nullptr) config.profile = &kMediumFast;
     config.region = regionByName(g_board->default_region);
     if (config.region == nullptr) config.region = &defaultRegion();
-    config.tx_power_dbm = g_board->default_tx_power_dbm;
+    // A board default profile may not be legal in its default region (e.g. a 500 kHz preset in
+    // EU868); fall back rather than transmit an illegal bandwidth.
+    if (!profileFitsRegion(*config.profile, *config.region)) {
+        config.profile = (config.region == &kRegionEu433) ? &kLongFast : &kMediumFast;
+    }
+    // v0.5.0: defaults are the legal maxima, limited by the board PA cap.
+    config.hardware_max_power_dbm = g_board->max_tx_power_dbm;
+    config.tx_power_dbm = effectivePowerDbm(*config.region, config.hardware_max_power_dbm, -1,
+                                            false);
     config.announce_interval_ms =
         config.store_role ? (uint32_t)kAnnounceIntervalRelayMs : (uint32_t)kAnnounceIntervalClientMs;
     config.telemetry_interval_ms = 900000;
@@ -262,7 +271,17 @@ void handleCompanionMessage(const CompanionMsg& msg) {
         }
         case CompanionType::ConfigSet: {
             if (!g_engine.applyConfig(msg.key, msg.value)) {
-                sendEvent("error", "unknown_config_key");
+                const char* detail = "unknown_config_key";
+                if (std::strcmp(msg.key, "radio.profile") == 0) {
+                    detail = "profile_bw_exceeds_region_bw";
+                } else if (std::strcmp(msg.key, "radio.frequency") == 0) {
+                    detail = "frequency_out_of_range";
+                } else if (std::strcmp(msg.key, "radio.duty_override") == 0) {
+                    detail = "duty_override_out_of_range";
+                } else if (std::strcmp(msg.key, "radio.region") == 0) {
+                    detail = "unknown_region";
+                }
+                sendEvent("error", detail);
             } else {
                 CompanionMsg config;
                 g_engine.fillConfig(config);
@@ -384,6 +403,48 @@ void pollButton() {
     }
 }
 
+// Tracks the last radio configuration handed to the HAL so region/profile/power/frequency
+// ConfigSet changes are applied without a reboot, and logs the regulatory warning once per
+// activation.
+struct AppliedRadioConfig {
+    const om::LoraProfile* profile = nullptr;
+    const om::Region* region = nullptr;
+    int8_t power_dbm = 0;
+    uint32_t frequency_khz = 0;
+    bool valid = false;
+};
+AppliedRadioConfig g_applied_radio;
+bool g_override_warning_logged = false;
+
+void applyRadioConfigIfChanged() {
+    const om::EngineConfig& config = g_engine.config();
+    const int8_t power = config.tx_power_dbm;
+    const uint32_t freq = config.frequency_override_khz;
+    const bool changed = !g_applied_radio.valid ||
+                         g_applied_radio.profile != config.profile ||
+                         g_applied_radio.region != config.region ||
+                         g_applied_radio.power_dbm != power ||
+                         g_applied_radio.frequency_khz != freq;
+    if (changed) {
+        const bool ok = g_radio.reconfigure(*config.profile, *config.region, power, freq);
+        if (!ok) sendEvent("radio_error", "reconfigure");
+        g_applied_radio.profile = config.profile;
+        g_applied_radio.region = config.region;
+        g_applied_radio.power_dbm = power;
+        g_applied_radio.frequency_khz = freq;
+        g_applied_radio.valid = true;
+    }
+    if (g_engine.overrideActive() && !g_override_warning_logged) {
+        g_override_warning_logged = true;
+        Serial.println();
+        Serial.println("WARNING: regulatory override active - may violate local law.");
+        Serial.println(om::kRegulatoryOverrideWarning);
+        sendEvent("error", "regulatory_override_active");
+    } else if (!g_engine.overrideActive()) {
+        g_override_warning_logged = false;
+    }
+}
+
 }  // namespace
 
 void setup() {
@@ -402,7 +463,8 @@ void setup() {
     }
     const bool radio_ok = g_radio.begin(*g_board, *g_engine.config().profile,
                                         *g_engine.config().region,
-                                        g_engine.config().tx_power_dbm);
+                                        g_engine.config().tx_power_dbm,
+                                        g_engine.config().frequency_override_khz);
     g_usb.begin();
     if (OM_ENABLE_BLE) {
         char device_name[24];
@@ -410,6 +472,17 @@ void setup() {
         g_ble.begin(device_name);
     }
     hal::setLed(false);
+    g_applied_radio.profile = g_engine.config().profile;
+    g_applied_radio.region = g_engine.config().region;
+    g_applied_radio.power_dbm = g_engine.config().tx_power_dbm;
+    g_applied_radio.frequency_khz = g_engine.config().frequency_override_khz;
+    g_applied_radio.valid = radio_ok;
+    if (g_engine.overrideActive()) {
+        g_override_warning_logged = true;
+        Serial.println();
+        Serial.println("WARNING: regulatory override restored from flash - may violate local law.");
+        Serial.println(om::kRegulatoryOverrideWarning);
+    }
     g_last_store_save_ms = millis();
     g_last_battery_ms = 0;
     if (!radio_ok) {
@@ -425,6 +498,7 @@ void loop() {
     const uint64_t now = millis();
     pollRadio();
     pollCompanion();
+    applyRadioConfigIfChanged();
     g_engine.tick(now);
     drainEvents();
     drainOutbox();

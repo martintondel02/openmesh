@@ -28,10 +28,10 @@ const meta = index.topics;
 const files = readdirSync(helpDir).filter((file) => file.endsWith('.md'));
 
 describe('help index', () => {
-  it('loads all 16 topics from the normative corpus', () => {
+  it('loads every topic in the normative corpus (16+, growing with the release)', () => {
     expect(index.version).toBe(1);
-    expect(meta).toHaveLength(16);
-    expect(files).toHaveLength(16);
+    expect(meta.length).toBeGreaterThanOrEqual(16);
+    expect(meta.length).toBe(files.length);
     expect(meta.map((topic) => topic.slug).sort()).toEqual(files.map((file) => file.replace('.md', '')).sort());
   });
 

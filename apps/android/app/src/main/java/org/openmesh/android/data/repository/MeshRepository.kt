@@ -51,6 +51,9 @@ import org.openmesh.android.data.presets.AppliedPreset
 import org.openmesh.android.data.presets.BeginnerAnswers
 import org.openmesh.android.data.presets.BeginnerPreset
 import org.openmesh.android.data.presets.PresetLoader
+import org.openmesh.android.data.regulatory.RegionLimits
+import org.openmesh.android.data.regulatory.RegulatoryMapper
+import org.openmesh.android.data.regulatory.RegulatoryOverride
 import org.openmesh.android.data.security.IdentityException
 import org.openmesh.android.data.security.IdentityStore
 import org.openmesh.android.data.transport.BleTransport
@@ -608,11 +611,9 @@ class MeshRepository(
                 return@launch
             }
             MeshLog.i("radio connected: ${newTransport.label}")
+            MeshLog.i("radio connected: ${newTransport.label}")
             _radio.value = _radio.value.copy(connected = true, transportName = newTransport.label)
-            client.sendConfigSet("radio.profile", _settings.value.profile)
-            client.sendConfigSet("radio.region", _settings.value.region)
-            client.sendConfigSet("node.name", _settings.value.nodeName)
-            client.sendConfigSet("mesh.store", if (_settings.value.storeForward) "1" else "0")
+            pushRadioConfig(client)
             client.events.collect { event ->
                 when (event) {
                     is FramedCompanionClient.CompanionEvent.HelloReceived -> {
@@ -846,6 +847,78 @@ class MeshRepository(
         scope.launch { prefs.setSetupCompleted(true) }
     }
 
+    // ---------------------------------------------------------------- regulatory override (v0.5.0)
+
+    fun regulatoryOverride(): RegulatoryOverride = RegulatoryMapper.fromSettings(_settings.value)
+
+    /** Effective override status line for radio/status cards. */
+    fun regulatoryStatusLine(): String =
+        RegulatoryMapper.statusLine(_settings.value.region, regulatoryOverride())
+
+    fun legalLine(): String = RegionLimits.legalLine(_settings.value.region)
+
+    /**
+     * Validate, apply to the engine (camelCase `regulatoryOverride` patch) and, only on success,
+     * persist + push the effective values to the companion radio. Returns the engine/policy error
+     * so the modal can show it instead of silently failing.
+     */
+    fun setRegulatoryOverride(override: RegulatoryOverride): Result<Unit> {
+        val region = _settings.value.region
+        override.validationError(region)?.let { message ->
+            MeshLog.w("regulatory: rejected locally: $message")
+            return Result.failure(IllegalArgumentException(message))
+        }
+        val ready = _engineReady.value
+        if (ready) {
+            val applied = runCatching { engine.setConfig(override.toEnginePatch()) }
+            applied.exceptionOrNull()?.let { error ->
+                MeshLog.w("regulatory: engine rejected override: ${error.message}")
+                return Result.failure(IllegalStateException(error.message ?: "The engine rejected the regulatory override."))
+            }
+        } else if (override.enabled) {
+            return Result.failure(IllegalStateException("The protocol engine is not running yet; try again in a moment."))
+        }
+        _settings.value = RegulatoryMapper.applyTo(_settings.value, override)
+        MeshLog.i(
+            "regulatory: override ${if (override.enabled) "enabled" else "disabled"} " +
+                "region=$region duty=${override.dutyPct ?: "legal"} power=${override.powerDbm ?: "legal"} " +
+                "freq=${override.freqKhz ?: "legal"} acknowledged=${override.acknowledged}",
+        )
+        scope.launch {
+            prefs.setOverride(
+                enabled = override.enabled,
+                acknowledged = override.acknowledged,
+                dutyPct = override.dutyPct,
+                powerDbm = override.powerDbm,
+                freqKhz = override.freqKhz,
+                reason = override.reason,
+            )
+            companion?.let { client -> pushRadioConfig(client) }
+        }
+        return Result.success(Unit)
+    }
+
+    /** One-tap disable: clears the effect and the acknowledgement (re-enabling requires a new ack). */
+    fun disableRegulatoryOverride(): Result<Unit> =
+        setRegulatoryOverride(regulatoryOverride().copy(enabled = false, acknowledged = false))
+
+    private fun pushRadioConfig(client: FramedCompanionClient) {
+        val settings = _settings.value
+        val override = regulatoryOverride()
+        scope.launch {
+            runCatching { client.sendConfigSet("radio.profile", settings.profile) }
+            runCatching { client.sendConfigSet("radio.region", settings.region) }
+            runCatching { client.sendConfigSet("node.name", settings.nodeName) }
+            runCatching { client.sendConfigSet("mesh.store", if (settings.storeForward) "1" else "0") }
+            runCatching {
+                override.companionConfig(settings.region).forEach { (key, value) ->
+                    client.sendConfigSet(key, value)
+                }
+            }.onFailure { MeshLog.w("radio config push failed: ${it.message}") }
+            MeshLog.i("radio config pushed: ${override.companionConfig(settings.region)}")
+        }
+    }
+
     // ---------------------------------------------------------------- settings
 
     fun updateSettings(transform: (AppSettings) -> AppSettings) {
@@ -868,12 +941,7 @@ class MeshRepository(
             runCatching { engine.setConfig(patch) }
             val radioChanged = updated.profile != previous.profile || updated.region != previous.region
             if (radioChanged) {
-                companion?.let { client ->
-                    scope.launch {
-                        runCatching { client.sendConfigSet("radio.profile", updated.profile) }
-                        runCatching { client.sendConfigSet("radio.region", updated.region) }
-                    }
-                }
+                companion?.let { client -> pushRadioConfig(client) }
             }
         }
     }
@@ -926,6 +994,12 @@ class MeshRepository(
         notificationsEnabled = notificationsEnabled,
         setupCompleted = setupCompleted,
         radioKind = radioKind,
+        overrideEnabled = overrideEnabled,
+        overrideAcknowledged = overrideAcknowledged,
+        overrideDutyPct = overrideDutyPct,
+        overridePowerDbm = overridePowerDbm,
+        overrideFreqKhz = overrideFreqKhz,
+        overrideReason = overrideReason,
     )
 
     private fun jsonString(value: String): String = buildString {

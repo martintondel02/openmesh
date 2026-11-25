@@ -149,4 +149,11 @@ data class AppSettings(
     val notificationsEnabled: Boolean = true,
     val setupCompleted: Boolean = false,
     val radioKind: String = "none",
+    // Regulatory override (v0.5.0): off by default, legal maxima otherwise.
+    val overrideEnabled: Boolean = false,
+    val overrideAcknowledged: Boolean = false,
+    val overrideDutyPct: Int? = null,
+    val overridePowerDbm: Int? = null,
+    val overrideFreqKhz: Long? = null,
+    val overrideReason: String? = null,
 )

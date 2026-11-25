@@ -1,5 +1,6 @@
 package org.openmesh.android.ui.navigation
 
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.ChatBubbleOutline
@@ -13,6 +14,7 @@ import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
@@ -21,6 +23,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.unit.dp
 import androidx.navigation.NavGraph.Companion.findStartDestination
 import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
@@ -75,6 +78,7 @@ fun OpenMeshNavHost(
     snackbarMessage: String?,
     onSnackbarShown: () -> Unit,
     initialThread: Pair<String, Boolean>? = null,
+    regulatoryOverrideActive: Boolean = false,
 ) {
     val navController = rememberNavController()
     val snackbarHostState = remember { SnackbarHostState() }
@@ -94,6 +98,20 @@ fun OpenMeshNavHost(
 
     Scaffold(
         snackbarHost = { SnackbarHost(snackbarHostState) },
+        topBar = {
+            if (regulatoryOverrideActive) {
+                androidx.compose.material3.Surface(
+                    color = androidx.compose.ui.graphics.Color(0xFFB3261E),
+                    contentColor = androidx.compose.ui.graphics.Color.White,
+                ) {
+                    Text(
+                        org.openmesh.android.data.regulatory.RegulatoryOverride.BANNER,
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
+                        style = MaterialTheme.typography.labelMedium,
+                    )
+                }
+            }
+        },
         bottomBar = {
             if (showBottomBar) {
                 NavigationBar {

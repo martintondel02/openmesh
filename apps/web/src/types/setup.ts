@@ -1,5 +1,7 @@
 /** Types for first-run setup (docs/design/ux-help-system.md §3/§5). */
 
+import type { LegalLimits, RegulatoryOverride } from './regulatory';
+
 export type SetupRole = 'client' | 'repeater' | 'gateway' | 'tracker';
 export type SetupPrivacy = 'private' | 'shared';
 
@@ -28,6 +30,8 @@ export interface SetupRecommended {
   notes?: string[];
   /** Visible warning from the recommendation (e.g. unknown country → EU868). */
   warning?: string | null;
+  /** v0.5 legal maxima for the recommended region (optional on older bridges). */
+  legal?: LegalLimits | null;
 }
 
 export interface SetupCounts {
@@ -49,6 +53,9 @@ export interface SetupState {
   counts: SetupCounts;
   /** Present when the bridge reports a recommended ui mode. */
   ui_mode?: 'beginner' | 'advanced' | null;
+  /** v0.5 setup never enables an override, but reports whether one is active. */
+  regulatory_override?: RegulatoryOverride | null;
+  override_warning?: string | null;
 }
 
 export interface QuickSetupRequest {

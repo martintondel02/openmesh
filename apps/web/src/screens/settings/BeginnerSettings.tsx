@@ -16,6 +16,8 @@ import { Field, Select, TextInput } from '../../components/ui/forms';
 import { HelpLink, HelpTip, Term } from '../../components/ui/help';
 import { BEGINNER_COPY } from '../../lib/beginner-copy';
 import { checklistForMode, checklistProgress, isSetupStateComplete } from '../../lib/setup';
+import { LegalLimitLine } from '../../components/regulatory/Regulatory';
+import { deriveRegulatoryState } from '../../lib/regulatory';
 import { REGION_IDS, REGIONS } from '../../lib/airtime';
 import { cn } from '../../lib/utils';
 
@@ -37,6 +39,7 @@ export function BeginnerSettings({ setMode }: { setMode: (mode: 'beginner' | 'ad
   const openHelp = useAppStore((state) => state.openHelp);
   const pushToast = useAppStore((state) => state.pushToast);
   const bridgeStatus = useAppStore((state) => state.bridgeStatus);
+  const regulatory = deriveRegulatoryState(config, bridgeStatus);
   const setDemoMode = useAppStore((state) => state.setDemoMode);
 
   const [nodeName, setNodeName] = useState(config?.node.name ?? '');
@@ -186,6 +189,7 @@ export function BeginnerSettings({ setMode }: { setMode: (mode: 'beginner' | 'ad
                 {SIMPLE_PROFILES.find((profile) => profile.id === profileId)?.hint}{' '}
                 Exact bandwidth and airtime numbers live in Advanced mode.
               </p>
+              <LegalLimitLine legal={regulatory.legal} mode="beginner" className="mt-2" />
               <div className="mt-3 flex items-center justify-between gap-2">
                 <HelpLink topic="radio-and-region">How coverage works</HelpLink>
                 <Button variant="primary" size="sm" icon={Check} onClick={saveRadio}>Save radio</Button>

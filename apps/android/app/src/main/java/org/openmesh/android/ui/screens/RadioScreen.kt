@@ -141,7 +141,13 @@ fun RadioScreen(
                     Text("Air queue ${radio.txQueue} · airtime ${"%.1f".format(radio.airtimePct)}% of budget")
                     Text("Frames tx ${stats.txFrames} · rx ${stats.rxFrames} · forwarded ${stats.forwarded} · dropped ${stats.dropped}")
                     Text("Known nodes ${stats.nodes} · channels ${stats.channels} · airtime ${stats.airtimeMs} ms")
+                    Text(
+                        "Effective duty: ${stats.effectiveDutyPct?.let { "$it %" } ?: "fair use"} (region/override policy)",
+                        color = if (settings.overrideEnabled) MaterialTheme.colorScheme.error else MeshOnSurfaceVariant,
+                    )
                     Text("Engine ${if (engine.running) "running" else "stopped"} · node ${engine.nodeIdHex ?: "—"}", color = MeshOnSurfaceVariant)
+                    Text(repository.regulatoryStatusLine(), color = if (settings.overrideEnabled) MaterialTheme.colorScheme.error else MeshOnSurfaceVariant)
+                    Text(repository.legalLine(), style = MaterialTheme.typography.bodySmall, color = MeshOnSurfaceVariant)
                 }
             }
 

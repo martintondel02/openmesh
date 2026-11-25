@@ -53,10 +53,16 @@ class AirtimeEstimatorTest {
     }
 
     @Test
-    fun `region duty cycles match the core constants`() {
-        assertEquals(1, Region.EU868.dutyCyclePct)
-        assertEquals(1, Region.AS923.dutyCyclePct)
+    fun `region legal maxima match the v0-5 core constants`() {
+        assertEquals(10, Region.EU868.dutyCyclePct)
+        assertEquals(10, Region.AS923.dutyCyclePct)
         assertEquals(null, Region.US915.dutyCyclePct)
-        assertEquals(14, Region.EU868.maxPowerDbm)
+        assertEquals(27, Region.EU868.maxPowerDbm)
+        assertEquals(10, Region.EU433.maxPowerDbm)
+        assertEquals(30, Region.US915.maxPowerDbm)
+        assertEquals(250, Region.EU868.maxBwKhz)
+        assertEquals(500, Region.US915.maxBwKhz)
+        assertEquals(869_525L, Region.EU868.freqKhz)
+        assertEquals(7, Region.entries.size)
     }
 }

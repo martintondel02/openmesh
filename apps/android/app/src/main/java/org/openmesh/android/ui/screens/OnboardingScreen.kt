@@ -168,6 +168,13 @@ fun OnboardingScreen(
                     "Region: ${presets?.regionFor(country) ?: "EU868"}",
                     color = MeshPrimary,
                 )
+                Text(
+                    org.openmesh.android.data.regulatory.RegionLimits.legalLine(
+                        presets?.regionFor(country) ?: "EU868",
+                    ) + " · verify your local rules",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MeshOnSurfaceVariant,
+                )
                 Text("Node name", style = MaterialTheme.typography.labelMedium)
                 OutlinedTextField(
                     value = name,

@@ -1497,3 +1497,53 @@ fn lossy_channel_position_and_long_text_fall_back_to_resources() {
     );
     assert!(mesh.drops > 0);
 }
+
+// ---------------------------------------------------------------------------------------------
+// v0.5.0 regulatory policy (public API from a consumer's perspective)
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn regulatory_override_public_api_is_stable() {
+    use openmesh_core::OVERRIDE_WARNING;
+    use openmesh_core::RegulatoryOverride;
+    use openmesh_core::regulatory::{
+        effective_duty_pct, effective_frequency_khz, effective_power_dbm, exceeds_legal,
+        frequency_supported, validate,
+    };
+    use openmesh_core::util;
+    use openmesh_core::util::REGIONS;
+
+    let eu868 = util::region("EU868").expect("EU868 is a built-in region");
+    let disabled = RegulatoryOverride::default();
+    assert_eq!(effective_duty_pct(eu868, &disabled), Some(10));
+    assert_eq!(effective_power_dbm(eu868, &disabled, 22), 22);
+    assert_eq!(effective_frequency_khz(eu868, &disabled), 869_525);
+    assert!(!exceeds_legal(eu868, &disabled));
+    validate(eu868, &disabled).expect("disabled override is valid");
+    assert!(!disabled.is_active());
+    assert_eq!(disabled.warning(), None);
+
+    let emergency = RegulatoryOverride {
+        enabled: true,
+        acknowledged: true,
+        duty_cycle_pct: Some(100),
+        max_power_dbm: Some(30),
+        frequency_khz: Some(868_000),
+        reason: Some("emergency".into()),
+    };
+    validate(eu868, &emergency).expect("acknowledged override is valid");
+    assert!(exceeds_legal(eu868, &emergency));
+    assert_eq!(effective_duty_pct(eu868, &emergency), Some(100));
+    assert_eq!(effective_power_dbm(eu868, &emergency, 22), 22);
+    assert_eq!(effective_frequency_khz(eu868, &emergency), 868_000);
+    assert!(emergency.is_active());
+    assert_eq!(emergency.warning(), Some(OVERRIDE_WARNING));
+
+    // Six regions became seven; EU433 is new; EU868 is Norway's legal maximum.
+    assert_eq!(REGIONS.len(), 7);
+    assert_eq!(eu868.max_power_dbm, 27);
+    assert_eq!(eu868.duty_cycle_pct, Some(10));
+    assert_eq!(util::region("EU433").unwrap().freq_khz, 433_920);
+    assert!(frequency_supported(869_525));
+    assert!(!frequency_supported(100_000));
+}

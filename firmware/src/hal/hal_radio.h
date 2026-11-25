@@ -17,9 +17,11 @@ namespace hal {
 class Radio {
 public:
     bool begin(const board::Board& board, const LoraProfile& profile, const Region& region,
-               int8_t tx_power_dbm);
-    // Retunes for a new region/profile at runtime (returns false if the radio rejects it).
-    bool reconfigure(const LoraProfile& profile, const Region& region, int8_t tx_power_dbm);
+               int8_t tx_power_dbm, uint32_t frequency_override_khz = 0);
+    // Retunes for a new region/profile/power/frequency at runtime (returns false if the radio
+    // rejects it). `frequency_override_khz` 0 means the region centre frequency.
+    bool reconfigure(const LoraProfile& profile, const Region& region, int8_t tx_power_dbm,
+                     uint32_t frequency_override_khz = 0);
     bool transmit(const uint8_t* data, size_t len);
     // Polls for a received packet. Returns packet length (>0), 0 when none is available, or -1
     // on radio error.
@@ -31,7 +33,8 @@ public:
     int16_t lastSnr() const { return last_snr_; }
 
 private:
-    bool applyConfig(const LoraProfile& profile, const Region& region, int8_t tx_power_dbm);
+    bool applyConfig(const LoraProfile& profile, const Region& region, int8_t tx_power_dbm,
+                     uint32_t frequency_override_khz);
     void* radio_ = nullptr;   // RadioLib SX1262* / LR1110*
     void* module_ = nullptr;
     const board::Board* board_ = nullptr;

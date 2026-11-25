@@ -62,7 +62,15 @@ struct EngineConfig {
     uint8_t name_len = 0;
     uint16_t caps = 0;
     uint8_t default_ttl = kDefaultTtl;
+    // Effective TX power in dBm, already clamped to min(legal region max, board PA cap).
     int8_t tx_power_dbm = 14;
+    // Board PA ceiling (from firmware/boards/<board>.cpp). Absolute under all overrides.
+    int8_t hardware_max_power_dbm = 22;
+    // Regulatory override (docs/design/regulatory-and-regions.md §2). Defaults are the legal
+    // maxima; these fields are only set through the companion ConfigSet API / tests.
+    int16_t duty_override_pct = -1;      // -1 = legal region duty, 0..100 override
+    int8_t power_override_dbm = kNoTxPowerOverrideDbm;  // -9..30 request; sentinel = legal max
+    uint32_t frequency_override_khz = 0; // 0 = region centre frequency
     const LoraProfile* profile = &kMediumFast;
     const Region* region = &kRegionEu868;
     bool relay_role = true;
@@ -198,6 +206,11 @@ public:
     void setGpsFix(const GpsFix& fix, uint64_t now_ms);
     // Persist the store queue when dirty (rate-limited by the caller). Returns true when saved.
     bool saveStore(uint64_t now_ms);
+    // Regulatory/config state persistence (region, profile, overrides, mesh settings). Called
+    // automatically on accepted ConfigSet changes when a StorageBackend is attached; loaded by
+    // begin() so overrides survive a reboot.
+    bool persistConfig();
+    void loadPersistedConfig();
     void loadStore(uint64_t now_ms);
     // Board storage adapters load the serialised store file and call this (avoids a 13 KiB
     // stack buffer in the engine).
@@ -232,6 +245,18 @@ public:
     EventQueue& events() { return events_; }
     const StoreQueue& store() const { return store_; }
     StoreQueue& mutableStore() { return store_; }
+    // --- Regulatory policy ------------------------------------------------------------------
+    bool overrideActive() const { return override_active_; }
+    const char* overrideWarning() const {
+        return override_active_ ? kRegulatoryOverrideWarning : nullptr;
+    }
+    int16_t effectiveDutyPctValue() const {
+        return effectiveDutyPct(*config_.region, config_.duty_override_pct);
+    }
+    int8_t effectivePowerDbmValue() const { return config_.tx_power_dbm; }
+    uint32_t effectiveFrequencyKhzValue() const {
+        return effectiveFrequencyKhz(*config_.region, config_.frequency_override_khz);
+    }
 
     size_t peerCount() const;
     const PeerInfo* peerAt(size_t index) const;
@@ -270,6 +295,10 @@ private:
     bool channelIsValid(int index) const;
     uint32_t jitter(uint32_t interval_ms);
     uint32_t nextRandomId();
+    // Recomputes budget configuration, effective power clamp and the override-active flag after
+    // a config change (region, profile, overrides, board cap).
+    void recomputeRegulatoryPolicy();
+    const char* configFileName() const { return "om_cfg.bin"; }
     // Direct-message fallback: positions/telemetry to a known infrastructure peer when a
     // channel GroupMessage would not fit in one frame.
     bool sendAppDirect(const NodeId& peer_id, const AppMessage& message, uint8_t payload_flags,
@@ -312,6 +341,8 @@ private:
     EngineStats stats_{};
 
     uint32_t seq_ = 0;
+    bool override_active_ = false;
+    bool override_warned_ = false;
     uint64_t boot_ms_ = 0;
     uint64_t wall_base_unix_ms_ = 0;
     uint64_t wall_base_mono_ms_ = 0;

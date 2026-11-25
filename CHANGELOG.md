@@ -5,6 +5,43 @@ All notable changes to this project are documented here. The format follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Protocol changes are called out
 explicitly.
 
+## [0.5.0] - 2026-11-26
+
+### Added — legal-maximum defaults and a warning-gated regulatory override
+
+**Region profiles at the legal maximum**
+- `EU868` (including Norway) now defaults to **27 dBm EIRP / 10 % duty cycle / 250 kHz max
+  bandwidth** in the 869.4–869.65 MHz sub-band; previously 14 dBm / 1 %, a conservative hybrid of
+  the 868.0–868.6 MHz rules (~10× less airtime, ~13 dB less link budget).
+- New `EU433` region (433.05–434.79 MHz, 10 dBm, 10 %, 250 kHz).
+- `US915`/`AU915` raised to 30 dBm and 500 kHz max BW; `IN865` 30 dBm; `KR920` 23 dBm; `AS923`
+  20 dBm / 10 % (conservative floor across the group).
+- Profile/bandwidth validation: profiles wider than the region maximum are rejected (no 500 kHz
+  in EU bands); firmware, bridge, web and Android share the same table.
+- Defaults now come from the legal maxima; effective TX power is clamped to the board PA cap
+  (SX1262 22 dBm, LR1110 15 dBm).
+
+**Regulatory override (emergency use)**
+- Advanced-only, off-by-default override for **duty cycle**, **TX power** and **frequency** in
+  core, firmware, bridge API/CLI/MCP, web and Android.
+- Full warning + "I understand" checkbox + typed `OVERRIDE` in web/Android; CLI requires
+  `--i-understand-risk` when exceeding legal limits; MCP requires `confirm: true`; read-only
+  agents are refused.
+- Persistent red banner while active, activity-log audit entries, one-tap disable; safe
+  reductions (lower duty/power, same frequency) need no acknowledgement.
+- Hardware PA caps remain absolute; out-of-range frequencies rejected; no protocol/wire change.
+
+**Docs and help**
+- New help topic **"Legal limits, power and emergency override"** (17 topics), updated
+  `radio-and-region`, new guide `docs/guides/regulatory-and-emergency.md`, ADR 0011 and the
+  implementation contract `docs/design/regulatory-and-regions.md`.
+- Region source notes (CEPT ERC/REC 70-03 Annex 1, Nkom/EEA, Meshtastic cross-check) and explicit
+  "not legal advice / antenna EIRP" caveats on every surface.
+
+### Changed
+- Workspace version 0.5.0; Android `versionName` 0.5.0 (`versionCode` 5); firmware `OM_FW_VERSION`.
+  No protocol or API breaking changes (all additive); golden vectors unchanged.
+
 ## [0.4.0] - 2026-11-25
 
 ### Added — Android GA and public-exposure guidance

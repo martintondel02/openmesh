@@ -104,7 +104,8 @@ bool Engine::begin(const Identity& identity, const EngineConfig& config, RngFn r
 
     if (config_.relay_role) config_.caps |= kCapRelay;
     if (config_.store_role) config_.caps |= kCapStore;
-    budget_.configure(*config_.region, true);
+    recomputeRegulatoryPolicy();
+    loadPersistedConfig();
     loadStore(0);
     return true;
 }
@@ -1066,6 +1067,11 @@ void Engine::fillConfig(CompanionMsg& msg) const {
     add("mesh.store", config_.store_role ? "1" : "0");
     u64ToText(config_.announce_interval_ms / 1000u, tmp, sizeof(tmp));
     add("mesh.announce_interval", tmp);
+    char signed_tmp[16];
+    u64ToText((uint64_t)(int64_t)config_.duty_override_pct, signed_tmp, sizeof(signed_tmp));
+    add("radio.duty_override", signed_tmp);
+    u64ToText(config_.frequency_override_khz, tmp, sizeof(tmp));
+    add("radio.frequency", tmp);
 }
 
 void Engine::fillStats(CompanionMsg& msg) const {
@@ -1086,82 +1092,208 @@ void Engine::fillStats(CompanionMsg& msg) const {
     add("store_count", store_.size());
     add("airtime_ms", stats_.airtime_ms);
     add("uptime_s", (uint64_t)((last_tick_ms_ > boot_ms_) ? (last_tick_ms_ - boot_ms_) / 1000 : 0));
+    add("override_active", override_active_ ? 1 : 0);
+    add("duty_pct", (uint64_t)(int64_t)effectiveDutyPctValue());
+    add("tx_power_dbm", (uint64_t)(int64_t)config_.tx_power_dbm);
+    add("frequency_khz", (uint64_t)effectiveFrequencyKhzValue());
 }
 
 // --- Config ---------------------------------------------------------------------------------
 bool Engine::applyConfig(const char* key, const char* value) {
     if (key == nullptr || value == nullptr) return false;
     auto eq = [](const char* a, const char* b) { return std::strcmp(a, b) == 0; };
+    bool accepted = false;
+    bool policy_changed = false;
+
     if (eq(key, "node.name")) {
         copyName(config_.name, sizeof(config_.name), value, std::strlen(value));
         config_.name_len = (uint8_t)std::strlen(config_.name);
-        return true;
-    }
-    if (eq(key, "node.class")) {
+        accepted = true;
+    } else if (eq(key, "node.class")) {
         NodeClass cls;
         if (!parseNodeClass((const uint8_t*)value, std::strlen(value), cls)) return false;
         config_.cls = cls;
-        return true;
-    }
-    if (eq(key, "radio.region")) {
+        accepted = true;
+    } else if (eq(key, "radio.region")) {
         const Region* region = regionByName(value);
         if (region == nullptr) return false;
         config_.region = region;
-        budget_.configure(*config_.region, true);
-        return true;  // reboot required for the radio to retune
-    }
-    if (eq(key, "radio.profile")) {
+        // A profile that is legal in the old region may exceed the new region's max bandwidth
+        // (e.g. SHORT_TURBO 500 kHz -> EU868 250 kHz). Fall back to a safe preset with a visible
+        // Config reply rather than silently running an illegal bandwidth.
+        if (!profileFitsRegion(*config_.profile, *config_.region)) {
+            config_.profile = (config_.region == &kRegionEu433) ? &kLongFast : &kMediumFast;
+        }
+        policy_changed = true;
+        accepted = true;
+    } else if (eq(key, "radio.profile")) {
         const LoraProfile* profile = profileByName(value);
         if (profile == nullptr) return false;
+        // Reject instead of clamping: a 500 kHz preset must never run in a 250 kHz region.
+        if (!profileFitsRegion(*profile, *config_.region)) return false;
         config_.profile = profile;
-        return true;
-    }
-    if (eq(key, "radio.tx_power")) {
+        accepted = true;
+    } else if (eq(key, "radio.tx_power")) {
         const long v = std::strtol(value, nullptr, 10);
-        int8_t power = (int8_t)(v < -9 ? -9 : (v > config_.region->max_power_dbm
-                                                   ? config_.region->max_power_dbm
-                                                   : v));
-        config_.tx_power_dbm = power;
-        return true;
-    }
-    if (eq(key, "radio.frequency")) {
-        // Advanced/test-network override; stored as a region-like custom value by the HAL.
-        (void)value;
-        return true;
-    }
-    if (eq(key, "mesh.ttl")) {
+        // Store the request; effectivePowerDbm() applies the legal-region ceiling unless the
+        // override is active, and always the board PA cap.
+        config_.power_override_dbm = (int8_t)(v < -9 ? -9 : (v > 30 ? 30 : v));
+        policy_changed = true;
+        accepted = true;
+    } else if (eq(key, "radio.duty_override")) {
+        const long v = std::strtol(value, nullptr, 10);
+        if (v < -1 || v > 100) return false;
+        config_.duty_override_pct = (int16_t)v;
+        policy_changed = true;
+        accepted = true;
+    } else if (eq(key, "radio.frequency")) {
+        const long v = std::strtol(value, nullptr, 10);
+        if (v < 0 || (uint32_t)v > 1000000000L) return false;
+        if (v == 0) {
+            config_.frequency_override_khz = 0;  // clear override, back to region centre
+        } else {
+            if (!validateFrequencyKhz((uint32_t)v)) return false;  // out of radio range
+            config_.frequency_override_khz = (uint32_t)v;
+        }
+        policy_changed = true;
+        accepted = true;
+    } else if (eq(key, "mesh.ttl")) {
         const long v = std::strtol(value, nullptr, 10);
         if (v < 1 || v > 15) return false;
         config_.default_ttl = (uint8_t)v;
-        return true;
-    }
-    if (eq(key, "mesh.store")) {
+        accepted = true;
+    } else if (eq(key, "mesh.store")) {
         const bool on = std::strcmp(value, "1") == 0;
         config_.store_role = on;
         if (on) config_.caps |= kCapStore;
         else config_.caps &= (uint16_t)~kCapStore;
-        return true;
-    }
-    if (eq(key, "mesh.store_capacity")) {
-        return true;  // compile-time capacity (OM_STORE_CAPACITY); accepted but not resized
-    }
-    if (eq(key, "mesh.announce_interval")) {
+        accepted = true;
+    } else if (eq(key, "mesh.store_capacity")) {
+        accepted = true;  // compile-time capacity (OM_STORE_CAPACITY); accepted but not resized
+    } else if (eq(key, "mesh.announce_interval")) {
         const long v = std::strtol(value, nullptr, 10);
         if (v < 300) return false;  // 5 min floor
         config_.announce_interval_ms = (uint32_t)v * 1000u;
-        return true;
-    }
-    if (eq(key, "mesh.position_sharing")) {
+        accepted = true;
+    } else if (eq(key, "mesh.position_sharing")) {
         config_.position_sharing = std::strcmp(value, "1") == 0;
-        return true;
-    }
-    if (eq(key, "gps.enabled")) {
+        accepted = true;
+    } else if (eq(key, "gps.enabled")) {
         const bool on = std::strcmp(value, "1") == 0;
         if (on) config_.caps |= kCapGps;
         else config_.caps &= (uint16_t)~kCapGps;
-        return true;
+        accepted = true;
     }
-    return false;
+    if (!accepted) return false;
+    if (policy_changed) recomputeRegulatoryPolicy();
+    persistConfig();
+    return true;
+}
+
+// --- Regulatory policy ----------------------------------------------------------------------
+void Engine::recomputeRegulatoryPolicy() {
+    const bool active = overrideExceedsLegal(*config_.region, config_.duty_override_pct,
+                                             config_.frequency_override_khz);
+    override_active_ = active;
+    config_.tx_power_dbm = effectivePowerDbm(*config_.region, config_.hardware_max_power_dbm,
+                                             config_.power_override_dbm, active);
+    budget_.configure(*config_.region, config_.duty_override_pct, true);
+    if (active && !override_warned_) {
+        // Short machine-readable marker; the full warning text is exposed via overrideWarning()
+        // and logged by the board HAL/serial console.
+        override_warned_ = true;
+        EngineEvent e;
+        e.type = EventType::Error;
+        copyName(e.detail, sizeof(e.detail), "regulatory_override_active", 26);
+        events_.push(e);
+    } else if (!active) {
+        override_warned_ = false;
+    }
+}
+
+bool Engine::persistConfig() {
+    if (storage_ == nullptr) return false;
+    uint8_t buf[96];
+    std::memset(buf, 0, sizeof(buf));
+    size_t off = 0;
+    buf[off++] = 'O';
+    buf[off++] = 'M';
+    buf[off++] = 'C';
+    buf[off++] = 2;
+    auto putName = [&](const char* name, size_t max_len) {
+        const size_t n = name != nullptr ? std::strlen(name) : 0;
+        const size_t take = n < max_len ? n : max_len - 1;
+        std::memcpy(buf + off, name != nullptr ? name : "", take);
+        off += max_len;
+    };
+    putName(config_.region->name, 16);
+    putName(config_.profile->name, 16);
+    putName(config_.name, 33);
+    buf[off++] = config_.name_len;
+    buf[off++] = (uint8_t)config_.cls;
+    buf[off++] = config_.store_role ? 1 : 0;
+    buf[off++] = config_.position_sharing ? 1 : 0;
+    buf[off++] = (config_.caps & kCapGps) != 0 ? 1 : 0;
+    buf[off++] = config_.default_ttl;
+    writeU32Be(buf + off, config_.announce_interval_ms);
+    off += 4;
+    writeU16Be(buf + off, (uint16_t)(int16_t)config_.duty_override_pct);
+    off += 2;
+    buf[off++] = (uint8_t)(int8_t)config_.power_override_dbm;
+    writeU32Be(buf + off, config_.frequency_override_khz);
+    off += 4;
+    writeU32Be(buf + off, crc32(buf, off));
+    off += 4;
+    return storage_->save(configFileName(), buf, off);
+}
+
+void Engine::loadPersistedConfig() {
+    if (storage_ == nullptr) return;
+    uint8_t buf[96];
+    size_t len = 0;
+    if (!storage_->load(configFileName(), buf, sizeof(buf), len) || len < 80) return;
+    if (buf[0] != 'O' || buf[1] != 'M' || buf[2] != 'C' || buf[3] != 2) return;
+    const uint32_t expected_crc = readU32Be(buf + len - 4);
+    if (crc32(buf, len - 4) != expected_crc) return;
+    size_t off = 4;
+    const Region* region = regionByName((const char*)(buf + off));
+    off += 16;
+    const LoraProfile* profile = profileByName((const char*)(buf + off));
+    off += 16;
+    char name[33];
+    std::memcpy(name, buf + off, 32);
+    name[32] = '\0';
+    off += 33;
+    const uint8_t name_len = buf[off++];
+    const NodeClass cls = (NodeClass)buf[off++];
+    config_.store_role = buf[off++] != 0;
+    config_.position_sharing = buf[off++] != 0;
+    const bool gps = buf[off++] != 0;
+    config_.default_ttl = buf[off++];
+    config_.announce_interval_ms = readU32Be(buf + off);
+    off += 4;
+    config_.duty_override_pct = (int16_t)readU16Be(buf + off);
+    off += 2;
+    config_.power_override_dbm = (int8_t)buf[off++];
+    config_.frequency_override_khz = readU32Be(buf + off);
+    off += 4;
+    if (region != nullptr) config_.region = region;
+    if (profile != nullptr && profileFitsRegion(*profile, *config_.region)) {
+        config_.profile = profile;
+    } else if (!profileFitsRegion(*config_.profile, *config_.region)) {
+        config_.profile = (config_.region == &kRegionEu433) ? &kLongFast : &kMediumFast;
+    }
+    if (name_len < sizeof(config_.name)) {
+        std::memcpy(config_.name, name, name_len);
+        config_.name[name_len] = '\0';
+        config_.name_len = name_len;
+    }
+    if ((uint8_t)cls <= (uint8_t)NodeClass::Tracker) config_.cls = cls;
+    if (gps) config_.caps |= kCapGps;
+    else config_.caps &= (uint16_t)~kCapGps;
+    if (config_.store_role) config_.caps |= kCapStore;
+    else config_.caps &= (uint16_t)~kCapStore;
+    recomputeRegulatoryPolicy();
 }
 
 void Engine::setChannel(const char* name, const uint8_t psk[32]) {

@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::sync::{RwLock, broadcast, mpsc};
 
+use openmesh_core::regulatory;
 use openmesh_core::services::{caps, group_signature_payload};
 use openmesh_core::{
     Ack, AckKind, AppMessage, Engine, EngineConfig, Event, MessageKind, NodeClass, NodeId,
@@ -53,6 +54,9 @@ pub struct RuntimeConfig {
     /// Last position reported by the host (shared by `send_position` without an override).
     #[serde(default)]
     pub position: Option<PositionJson>,
+    /// Emergency regulatory override (disabled by default; see regulatory-and-regions.md §2).
+    #[serde(default)]
+    pub regulatory_override: RegulatoryOverrideJson,
 }
 
 fn default_name() -> String {
@@ -86,6 +90,7 @@ impl Default for RuntimeConfig {
             store_forward: true,
             position_sharing: true,
             position: None,
+            regulatory_override: RegulatoryOverrideJson::default(),
         }
     }
 }
@@ -119,6 +124,7 @@ impl RuntimeConfig {
         };
         config.class = class;
         config.accept_channels = true;
+        config.regulatory = self.regulatory_override.to_core();
         if matches!(class, NodeClass::Gateway) {
             config.caps |= caps::WIFI | caps::ETHERNET;
         }
@@ -1687,6 +1693,63 @@ impl CoreRuntime {
                 }
             }
         }
+        // A partial regulatory override patch (enabling/exceeding requires acknowledgement).
+        if let Some(override_patch) = object.get("regulatory_override") {
+            if override_patch.is_null() {
+                config.regulatory_override = RegulatoryOverrideJson::default();
+            } else {
+                let mut merged = config.regulatory_override.clone();
+                if let Err((code, message)) = merged.apply_patch(override_patch) {
+                    reply_error(reply, id, code, &message);
+                    return Ok(());
+                }
+                config.regulatory_override = merged;
+            }
+        }
+        // Effective profile/region must be a legal combination for the region.
+        let region = util::region(&config.region).unwrap_or(&util::REGIONS[0]);
+        let profile = config.profile();
+        let allowed_profiles: Vec<&str> = util::PROFILES
+            .iter()
+            .filter(|candidate| candidate.bw_khz <= region.bw_khz)
+            .map(|candidate| candidate.name)
+            .collect();
+        if !region.allows_profile(profile) {
+            reply_error(
+                reply,
+                id,
+                "profile_not_allowed_in_region",
+                &format!(
+                    "profile {} uses {} kHz, which is wider than the {} kHz legal maximum in {}; allowed profiles: {}",
+                    profile.name,
+                    profile.bw_khz,
+                    region.bw_khz,
+                    region.name,
+                    allowed_profiles.join(", ")
+                ),
+            );
+            return Ok(());
+        }
+        // Validate the (possibly region-changed) override against the effective region.
+        if let Some(frequency) = config.regulatory_override.frequency_khz {
+            if !regulatory::frequency_supported(frequency) {
+                reply_error(
+                    reply,
+                    id,
+                    "regulatory_override_frequency_out_of_range",
+                    &format!(
+                        "frequency {frequency} kHz is outside the supported radio range {}..={} kHz",
+                        regulatory::RADIO_MIN_FREQUENCY_KHZ,
+                        regulatory::RADIO_MAX_FREQUENCY_KHZ
+                    ),
+                );
+                return Ok(());
+            }
+        }
+        if let Err(error) = regulatory::validate(region, &config.regulatory_override.to_core()) {
+            reply_error(reply, id, error.code(), error.message());
+            return Ok(());
+        }
         self.engine.set_config(config.engine_config());
         self.config = config.clone();
         self.store.set_meta_json("config", &config)?;
@@ -2104,14 +2167,24 @@ pub fn build_snapshot(input: SnapshotInput<'_>) -> Snapshot {
         0.0
     };
     let region = config.region();
+    let override_json = config.regulatory_override.clone();
+    let override_active = override_json.is_active();
+    let override_warning = override_json.warning();
+    let effective_power = override_json.effective_power_dbm(region);
+    let effective_frequency = override_json.effective_frequency_khz(region);
+    let effective_duty = override_json.effective_duty_pct(region);
+    let legal = LegalRegionJson::for_region(region);
     let radio_status = RadioStatusJson {
         connected: !transports.is_empty(),
         tx_queue: 0,
         airtime_used_pct: round2(airtime_pct),
         rssi: last_rssi,
         snr: last_snr,
-        frequency_mhz: region.freq_khz as f64 / 1000.0,
-        tx_power_dbm: region.max_power_dbm,
+        frequency_mhz: effective_frequency as f64 / 1000.0,
+        tx_power_dbm: effective_power,
+        duty_cycle_pct: effective_duty,
+        max_power_dbm: region.max_power_dbm,
+        max_bw_khz: region.bw_khz,
     };
     let mesh_status = MeshStatusJson {
         tx_frames: engine_stats.tx_frames,
@@ -2131,6 +2204,8 @@ pub fn build_snapshot(input: SnapshotInput<'_>) -> Snapshot {
             used_bytes,
             db_path: store.path().display().to_string(),
         },
+        regulatory_override_active: override_active,
+        regulatory_override_warning: override_warning.clone(),
     };
     let node = NodeSelfJson {
         node_id: engine.node_id().to_hex(),
@@ -2190,9 +2265,12 @@ pub fn build_snapshot(input: SnapshotInput<'_>) -> Snapshot {
         radio: ConfigRadioJson {
             profile: config.profile().name.to_string(),
             region: config.region().name.to_string(),
-            tx_power_dbm: region.max_power_dbm,
-            frequency_mhz: region.freq_khz as f64 / 1000.0,
+            tx_power_dbm: effective_power,
+            frequency_mhz: effective_frequency as f64 / 1000.0,
             interface: config.interface.clone(),
+            max_power_dbm: region.max_power_dbm,
+            duty_cycle_pct: region.duty_cycle_pct,
+            max_bw_khz: region.bw_khz,
         },
         features: ConfigFeaturesJson {
             auto_announce: config.auto_announce,
@@ -2200,6 +2278,10 @@ pub fn build_snapshot(input: SnapshotInput<'_>) -> Snapshot {
             position_sharing: config.position_sharing,
         },
         channels,
+        legal,
+        regulatory_override: override_json,
+        override_active,
+        override_warning,
     };
     // Merge live engine knowledge with persisted node metadata (names, capabilities, last known
     // position). Persisted data fills the gaps that a fresh contact entry (hex name) leaves.

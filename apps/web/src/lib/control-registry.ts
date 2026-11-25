@@ -49,6 +49,13 @@ export const CONTROL_REGISTRY: ControlEntry[] = [
   { id: 'settings.api.allowlist', screen: 'settings', label: 'Backbone allowlist', helpKey: 'settings.api.allowlist', audience: 'advanced' },
   { id: 'settings.backup.identity', screen: 'settings', label: 'Identity backup', helpKey: 'settings.backup.identity', audience: 'advanced' },
   { id: 'settings.advanced.show', screen: 'settings', label: 'Show advanced', helpKey: 'settings.advanced.show', audience: 'beginner' },
+  { id: 'settings.regulatory.legal', screen: 'settings', label: 'Legal maxima', helpKey: 'regulatory.legal', audience: 'advanced' },
+  { id: 'settings.regulatory.override', screen: 'settings', label: 'Regulatory override', helpKey: 'regulatory.override', audience: 'advanced' },
+  { id: 'settings.regulatory.duty', screen: 'settings', label: 'Override duty cycle', helpKey: 'regulatory.duty', audience: 'advanced' },
+  { id: 'settings.regulatory.power', screen: 'settings', label: 'Override max power', helpKey: 'regulatory.power', audience: 'advanced' },
+  { id: 'settings.regulatory.frequency', screen: 'settings', label: 'Override frequency', helpKey: 'regulatory.frequency', audience: 'advanced' },
+  { id: 'settings.regulatory.reason', screen: 'settings', label: 'Override reason', helpKey: 'regulatory.reason', audience: 'advanced' },
+  { id: 'settings.regulatory.ack', screen: 'settings', label: 'Override acknowledgement', helpKey: 'regulatory.ack', audience: 'advanced' },
 
   /* nodes */
   { id: 'nodes.stat.known', screen: 'nodes', label: 'Known nodes', helpKey: 'nodes.stat.known', audience: 'both' },

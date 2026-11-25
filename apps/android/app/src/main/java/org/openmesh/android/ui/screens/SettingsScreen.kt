@@ -42,7 +42,11 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import org.openmesh.android.data.model.RadioStatus
 import org.openmesh.android.data.repository.MediaKind
+import org.openmesh.android.data.regulatory.RegionLimits
+import org.openmesh.android.data.regulatory.RegulatoryMapper
+import org.openmesh.android.data.regulatory.RegulatoryOverride
 import org.openmesh.android.data.repository.MeshRepository
+import org.openmesh.android.ui.components.RegulatoryOverrideDialog
 import org.openmesh.android.service.MeshService
 import org.openmesh.android.ui.components.DividerLine
 import org.openmesh.android.ui.components.MeshCard
@@ -71,6 +75,7 @@ fun SettingsScreen(
     val engine by repository.engineStatus.collectAsState()
     val context = LocalContext.current
     var nodeName by remember(settings.nodeName) { mutableStateOf(settings.nodeName) }
+    var showOverrideDialog by remember { mutableStateOf(false) }
 
     val profile = LoraProfile.fromName(settings.profile)
     val capBytes = repository.mediaCapBytes()
@@ -126,6 +131,47 @@ fun SettingsScreen(
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         OutlinedButton(onClick = { onOpenHelp("getting-started") }, modifier = Modifier.weight(1f)) { Text("Help") }
                         OutlinedButton(onClick = onOpenAbout, modifier = Modifier.weight(1f)) { Text("About & agents") }
+                    }
+                }
+            }
+
+            if (settings.uiMode == "advanced") {
+                SectionTitle("Regulatory")
+                MeshCard {
+                    Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        val legal = RegionLimits.forRegion(settings.region)
+                        Text("Region ${settings.region}", style = MaterialTheme.typography.titleMedium)
+                        Text(legal.legalLine, style = MaterialTheme.typography.bodyMedium)
+                        Text(
+                            "Verify your local rules. Values are EIRP ceilings; antenna gain can push you over the limit.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MeshOnSurfaceVariant,
+                        )
+                        if (settings.overrideEnabled) {
+                            Text(
+                                RegulatoryOverride.BANNER,
+                                color = MaterialTheme.colorScheme.error,
+                                style = MaterialTheme.typography.bodyMedium,
+                            )
+                            Text(
+                                RegulatoryMapper.statusLine(settings.region, RegulatoryMapper.fromSettings(settings)),
+                                style = MaterialTheme.typography.bodyMedium,
+                            )
+                            OutlinedButton(
+                                onClick = { repository.disableRegulatoryOverride() },
+                                modifier = Modifier.fillMaxWidth(),
+                            ) { Text("Disable override (one tap)") }
+                        } else {
+                            Text(
+                                "Emergency use only: unlock duty cycle, TX power or frequency beyond the legal maxima.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MeshOnSurfaceVariant,
+                            )
+                            Button(
+                                onClick = { showOverrideDialog = true },
+                                modifier = Modifier.fillMaxWidth(),
+                            ) { Text("Enable override…") }
+                        }
                     }
                 }
             }
@@ -336,6 +382,14 @@ fun SettingsScreen(
             Spacer(Modifier.height(24.dp))
         }
     }
+
+    if (showOverrideDialog) {
+        RegulatoryOverrideDialog(
+            repository = repository,
+            region = settings.region,
+            onDismiss = { showOverrideDialog = false },
+        )
+    }
 }
 
 @Composable
@@ -353,3 +407,6 @@ private fun SwitchRow(
         Switch(checked = checked, onCheckedChange = onCheckedChange)
     }
 }
+
+/** Debug helper retained for tests: the exact banner text used by the global top bar. */
+val regulatoryBannerText: String get() = RegulatoryOverride.BANNER

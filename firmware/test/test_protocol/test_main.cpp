@@ -65,6 +65,15 @@ int main(int argc, char** argv) {
     RUN_TEST(test_engine_store_forward_handshake);
     RUN_TEST(test_engine_config_and_companion_views);
 
+    // Regulatory policy (v0.5.0)
+    RUN_TEST(test_region_table_v2);
+    RUN_TEST(test_profile_bandwidth_validation);
+    RUN_TEST(test_board_power_caps);
+    RUN_TEST(test_effective_power_policy);
+    RUN_TEST(test_duty_override_policy);
+    RUN_TEST(test_frequency_override_and_config);
+    RUN_TEST(test_regulatory_override_persistence);
+
     // Golden vectors
     RUN_TEST(test_vectors_frame);
     RUN_TEST(test_vectors_identity);

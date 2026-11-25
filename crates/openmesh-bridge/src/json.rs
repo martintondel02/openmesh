@@ -8,7 +8,9 @@ use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
+use openmesh_core::regulatory::{self, RegulatoryOverride};
 use openmesh_core::services::caps;
+use openmesh_core::util;
 use openmesh_core::{MessageKind, NodeClass, NodeId, Position as CorePosition, PublicIdentity};
 
 /// API envelope version (`v` field).
@@ -326,8 +328,16 @@ pub struct RadioStatusJson {
     pub airtime_used_pct: f64,
     pub rssi: Option<i16>,
     pub snr: Option<f32>,
+    /// Effective centre frequency (override or region default).
     pub frequency_mhz: f64,
+    /// Effective TX power ceiling (override or region maximum).
     pub tx_power_dbm: i8,
+    /// Effective duty cycle in percent (`None` for fair-use regions).
+    pub duty_cycle_pct: Option<u8>,
+    /// Region legal maximum TX power in dBm EIRP.
+    pub max_power_dbm: i8,
+    /// Region maximum legal bandwidth in kHz.
+    pub max_bw_khz: u16,
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
@@ -353,6 +363,12 @@ pub struct StatusJson {
     pub radio: RadioStatusJson,
     pub mesh: MeshStatusJson,
     pub storage: StorageStatusJson,
+    /// `true` while a regulatory override is enabled (see `/api/config`).
+    #[serde(default)]
+    pub regulatory_override_active: bool,
+    /// Warning text when the override is active; `null` otherwise.
+    #[serde(default)]
+    pub regulatory_override_warning: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -525,13 +541,190 @@ pub struct ConfigNodeJson {
     pub announce_interval_s: u64,
 }
 
+/// Bridge-side serde mirror of [`openmesh_core::RegulatoryOverride`] (core stays serde-free).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RegulatoryOverrideJson {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub acknowledged: bool,
+    #[serde(default)]
+    pub duty_cycle_pct: Option<u8>,
+    #[serde(default)]
+    pub max_power_dbm: Option<i8>,
+    #[serde(default)]
+    pub frequency_khz: Option<u32>,
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+impl RegulatoryOverrideJson {
+    pub fn from_core(over: &RegulatoryOverride) -> Self {
+        Self {
+            enabled: over.enabled,
+            acknowledged: over.acknowledged,
+            duty_cycle_pct: over.duty_cycle_pct,
+            max_power_dbm: over.max_power_dbm,
+            frequency_khz: over.frequency_khz,
+            reason: over.reason.clone(),
+        }
+    }
+
+    pub fn to_core(&self) -> RegulatoryOverride {
+        RegulatoryOverride {
+            enabled: self.enabled,
+            acknowledged: self.acknowledged,
+            duty_cycle_pct: self.duty_cycle_pct,
+            max_power_dbm: self.max_power_dbm,
+            frequency_khz: self.frequency_khz,
+            reason: self.reason.clone(),
+        }
+    }
+
+    /// Merge a partial JSON patch onto this override (`confirm` is an alias for `acknowledged`).
+    pub fn apply_patch(&mut self, patch: &serde_json::Value) -> Result<(), (&'static str, String)> {
+        let object = patch.as_object().ok_or((
+            "regulatory_override_invalid",
+            "regulatory_override must be an object".to_string(),
+        ))?;
+        for (key, value) in object {
+            match key.as_str() {
+                "enabled" => {
+                    self.enabled = value.as_bool().ok_or((
+                        "regulatory_override_invalid",
+                        "regulatory_override.enabled must be a boolean".to_string(),
+                    ))?
+                }
+                "acknowledged" | "confirm" => {
+                    self.acknowledged = value.as_bool().ok_or((
+                        "regulatory_override_invalid",
+                        format!("regulatory_override.{key} must be a boolean"),
+                    ))?
+                }
+                "duty_cycle_pct" => {
+                    self.duty_cycle_pct = match value {
+                        serde_json::Value::Null => None,
+                        other => Some(other.as_u64().ok_or((
+                            "regulatory_override_duty_out_of_range",
+                            "regulatory_override.duty_cycle_pct must be 0..=100".to_string(),
+                        ))? as u8),
+                    }
+                }
+                "max_power_dbm" => {
+                    self.max_power_dbm = match value {
+                        serde_json::Value::Null => None,
+                        other => Some(other.as_i64().ok_or((
+                            "regulatory_override_invalid",
+                            "regulatory_override.max_power_dbm must be an integer".to_string(),
+                        ))? as i8),
+                    }
+                }
+                "frequency_khz" => {
+                    self.frequency_khz = match value {
+                        serde_json::Value::Null => None,
+                        other => Some(other.as_u64().ok_or((
+                            "regulatory_override_invalid",
+                            "regulatory_override.frequency_khz must be an integer".to_string(),
+                        ))? as u32),
+                    }
+                }
+                "reason" => {
+                    self.reason = match value {
+                        serde_json::Value::Null => None,
+                        other => Some(
+                            other
+                                .as_str()
+                                .ok_or((
+                                    "regulatory_override_reason_too_long",
+                                    "regulatory_override.reason must be a string".to_string(),
+                                ))?
+                                .to_string(),
+                        ),
+                    }
+                }
+                other => {
+                    return Err((
+                        "regulatory_override_invalid",
+                        format!("unknown regulatory_override field '{other}'"),
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub fn effective_duty_pct(&self, region: &util::Region) -> Option<u8> {
+        regulatory::effective_duty_pct(region, &self.to_core())
+    }
+
+    pub fn effective_power_dbm(&self, region: &util::Region) -> i8 {
+        regulatory::effective_power_dbm(region, &self.to_core(), i8::MAX)
+    }
+
+    pub fn effective_frequency_khz(&self, region: &util::Region) -> u32 {
+        regulatory::effective_frequency_khz(region, &self.to_core())
+    }
+
+    pub fn is_active(&self) -> bool {
+        self.enabled
+    }
+
+    pub fn warning(&self) -> Option<String> {
+        self.enabled
+            .then(|| regulatory::OVERRIDE_WARNING.to_string())
+    }
+}
+
+/// Region legal maxima exposed by `/api/config` and `/api/setup/recommend`.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct LegalRegionJson {
+    pub region: String,
+    pub max_power_dbm: i8,
+    pub duty_cycle_pct: Option<u8>,
+    pub max_bw_khz: u16,
+    pub source: String,
+}
+
+impl LegalRegionJson {
+    pub fn for_region(region: &util::Region) -> Self {
+        Self {
+            region: region.name.to_string(),
+            max_power_dbm: region.max_power_dbm,
+            duty_cycle_pct: region.duty_cycle_pct,
+            max_bw_khz: region.bw_khz,
+            source: region_legal_source(region.name).to_string(),
+        }
+    }
+}
+
+/// Human-readable source per region; every surface must tell users to verify local law.
+pub fn region_legal_source(region: &str) -> &'static str {
+    match region {
+        "EU868" | "EU433" => "CEPT ERC/REC 70-03 Annex 1 (verify local law)",
+        "US915" => "FCC 47 CFR Part 15.247 (verify local law)",
+        "AU915" => "ACMA LIPD class licence (verify local law)",
+        "IN865" => "WPC India 865-867 MHz rules (verify local law)",
+        "KR920" => "Korea 920-923 MHz rules (verify local law)",
+        "AS923" => "National AS923 rules (verify local law)",
+        _ => "Verify local law",
+    }
+}
+
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct ConfigRadioJson {
     pub profile: String,
     pub region: String,
+    /// Effective TX power ceiling (override or region maximum).
     pub tx_power_dbm: i8,
+    /// Effective centre frequency (override or region default).
     pub frequency_mhz: f64,
     pub interface: String,
+    /// Region legal maximum TX power in dBm EIRP.
+    pub max_power_dbm: i8,
+    /// Region legal duty cycle in percent (`null` for fair-use regions).
+    pub duty_cycle_pct: Option<u8>,
+    /// Region maximum legal bandwidth in kHz.
+    pub max_bw_khz: u16,
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
@@ -554,6 +747,14 @@ pub struct ConfigJson {
     pub radio: ConfigRadioJson,
     pub features: ConfigFeaturesJson,
     pub channels: Vec<ConfigChannelJson>,
+    /// Region legal maxima (defaults) for the current region.
+    pub legal: LegalRegionJson,
+    /// Regulatory override configuration (persisted; disabled by default).
+    pub regulatory_override: RegulatoryOverrideJson,
+    /// `true` while the override is enabled.
+    pub override_active: bool,
+    /// Warning text while the override is active; `null` otherwise.
+    pub override_warning: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]

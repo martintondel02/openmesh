@@ -253,6 +253,10 @@ as ±30 %. Measured values replace this table when field data lands.
 | MCU active (radio RX idle) | ~7 mA | ~7 mA | ~7 mA | ~45 mA |
 | + SX1262/LR1110 RX | ~13 mA | ~13 mA | ~13 mA | ~52 mA |
 | TX burst @ 14 dBm (240 B) | ~55 mA for ~610 ms | ~55 mA | ~55 mA | ~95 mA |
+
+*Since v0.5.0 the firmware defaults TX power to `min(region legal max, board PA cap)` — up to
+22 dBm on SX1262 boards and 15 dBm on the T1000-E LR1110. The 14 dBm column above is the
+measurement baseline; higher power raises TX current roughly 1.5–2× at 22 dBm.*
 | GNSS tracking | ~25 mA (Airoha) | ~25 mA (optional) | ~20 mA (L76KB) | ~25 mA (UC6580) |
 | TFT on | — | — | — | +15–25 mA |
 | Light sleep (RTC tick) | ~1.5 mA | ~1.5 mA | ~1.5 mA | ~250 µA |

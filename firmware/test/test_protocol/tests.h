@@ -52,6 +52,15 @@ void test_engine_channel_position();
 void test_engine_store_forward_handshake();
 void test_engine_config_and_companion_views();
 
+// Regulatory policy (v0.5.0).
+void test_region_table_v2();
+void test_profile_bandwidth_validation();
+void test_board_power_caps();
+void test_effective_power_policy();
+void test_duty_override_policy();
+void test_frequency_override_and_config();
+void test_regulatory_override_persistence();
+
 // Golden-vector replay (protocol/vectors/*.json; skipped when absent).
 void test_vectors_frame();
 void test_vectors_identity();

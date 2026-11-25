@@ -250,7 +250,12 @@
               "radio_busy",
               "timeout",
               "unavailable",
-              "confirm_required"
+              "confirm_required",
+              "profile_not_allowed_in_region",
+              "regulatory_override_requires_acknowledgement",
+              "regulatory_override_duty_out_of_range",
+              "regulatory_override_reason_too_long",
+              "regulatory_override_frequency_out_of_range"
             ]
           },
           "message": {
@@ -320,10 +325,27 @@
             ]
           },
           "frequency_mhz": {
-            "type": "number"
+            "type": "number",
+            "description": "Effective centre frequency (override or region default)."
           },
           "tx_power_dbm": {
-            "type": "integer"
+            "type": "integer",
+            "description": "Effective TX power ceiling (override or region maximum)."
+          },
+          "duty_cycle_pct": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Effective duty cycle in percent (override or region default; null for fair use)."
+          },
+          "max_power_dbm": {
+            "type": "integer",
+            "description": "Region legal maximum TX power in dBm EIRP."
+          },
+          "max_bw_khz": {
+            "type": "integer",
+            "description": "Region maximum legal bandwidth in kHz."
           }
         }
       },
@@ -1144,6 +1166,7 @@
             "type": "string",
             "enum": [
               "EU868",
+              "EU433",
               "US915",
               "AU915",
               "IN865",
@@ -1152,13 +1175,27 @@
             ]
           },
           "tx_power_dbm": {
-            "type": "integer"
+            "type": "integer",
+            "description": "Effective TX power ceiling (override or region maximum)."
           },
           "frequency_mhz": {
-            "type": "number"
+            "type": "number",
+            "description": "Effective centre frequency (override or region default)."
           },
           "interface": {
             "type": "string"
+          },
+          "max_power_dbm": {
+            "type": "integer"
+          },
+          "duty_cycle_pct": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "max_bw_khz": {
+            "type": "integer"
           }
         }
       },
@@ -1181,7 +1218,10 @@
         "required": [
           "node",
           "radio",
-          "features"
+          "features",
+          "legal",
+          "regulatory_override",
+          "override_active"
         ],
         "properties": {
           "node": {
@@ -1198,6 +1238,23 @@
             "items": {
               "$ref": "#/components/schemas/Channel"
             }
+          },
+          "legal": {
+            "$ref": "#/components/schemas/LegalRegion"
+          },
+          "regulatory_override": {
+            "$ref": "#/components/schemas/RegulatoryOverride"
+          },
+          "override_active": {
+            "type": "boolean",
+            "description": "true while the override is enabled."
+          },
+          "override_warning": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "OVERRIDE_WARNING when active, otherwise null."
           }
         },
         "example": {
@@ -1209,9 +1266,12 @@
           "radio": {
             "profile": "MEDIUM_FAST",
             "region": "EU868",
-            "tx_power_dbm": 14,
+            "tx_power_dbm": 27,
             "frequency_mhz": 869.525,
-            "interface": "sim0"
+            "interface": "sim0",
+            "max_power_dbm": 27,
+            "duty_cycle_pct": 10,
+            "max_bw_khz": 250
           },
           "features": {
             "auto_announce": true,
@@ -1224,12 +1284,29 @@
               "name": "family",
               "psk_set": true
             }
-          ]
+          ],
+          "legal": {
+            "region": "EU868",
+            "max_power_dbm": 27,
+            "duty_cycle_pct": 10,
+            "max_bw_khz": 250,
+            "source": "CEPT ERC/REC 70-03 Annex 1 (verify local law)"
+          },
+          "regulatory_override": {
+            "enabled": false,
+            "acknowledged": false,
+            "duty_cycle_pct": null,
+            "max_power_dbm": null,
+            "frequency_khz": null,
+            "reason": null
+          },
+          "override_active": false,
+          "override_warning": null
         }
       },
       "ConfigPatch": {
         "type": "object",
-        "description": "Deep partial of Config: only supplied fields change; unknown fields are rejected or ignored per bridge validation.",
+        "description": "Deep partial of Config: only supplied fields change; unknown fields are rejected. A partial `regulatory_override` is merged onto the persisted override; enabling/exceeding the legal maxima requires `acknowledged:true` (or `confirm:true`) and is rejected with 422 otherwise. Changes while a profile is wider than the region maximum bandwidth are rejected with 422 and list the allowed profiles.",
         "properties": {
           "node": {
             "$ref": "#/components/schemas/ConfigNode"
@@ -1239,6 +1316,9 @@
           },
           "features": {
             "$ref": "#/components/schemas/ConfigFeatures"
+          },
+          "regulatory_override": {
+            "$ref": "#/components/schemas/RegulatoryOverridePatch"
           }
         },
         "additionalProperties": false
@@ -2025,6 +2105,9 @@
               },
               "role": {
                 "type": "string"
+              },
+              "legal": {
+                "$ref": "#/components/schemas/LegalRegion"
               }
             }
           },
@@ -2050,6 +2133,27 @@
                 "type": "integer"
               }
             }
+          },
+          "regulatory_override": {
+            "type": "object",
+            "description": "Current override state (setup never enables it).",
+            "properties": {
+              "enabled": {
+                "type": "boolean"
+              },
+              "acknowledged": {
+                "type": "boolean"
+              }
+            }
+          },
+          "override_active": {
+            "type": "boolean"
+          },
+          "override_warning": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "example": {
@@ -2096,7 +2200,13 @@
             "channels": 0,
             "radios": 1,
             "backbone_peers": 0
-          }
+          },
+          "regulatory_override": {
+            "enabled": false,
+            "acknowledged": false
+          },
+          "override_active": false,
+          "override_warning": null
         }
       },
       "SetupRecommendation": {
@@ -2149,6 +2259,9 @@
               "string",
               "null"
             ]
+          },
+          "legal": {
+            "$ref": "#/components/schemas/LegalRegion"
           }
         },
         "example": {
@@ -2159,10 +2272,17 @@
           "store_forward": false,
           "position_sharing": false,
           "announce_interval_s": 1800,
-          "duty_cycle_pct": 1.0,
+          "duty_cycle_pct": 10,
           "frequency_mhz": 869.525,
+          "legal": {
+            "region": "EU868",
+            "max_power_dbm": 27,
+            "duty_cycle_pct": 10,
+            "max_bw_khz": 250,
+            "source": "CEPT ERC/REC 70-03 Annex 1 (verify local law)"
+          },
           "notes": [
-            "EU868 uses a 1% duty cycle; keep media small."
+            "EU868 allows a 10% duty cycle; keep repeaters well under it."
           ],
           "warning": null
         }
@@ -2318,7 +2438,7 @@
             "duty_cycle_pct": 1.0,
             "frequency_mhz": 869.525,
             "notes": [
-              "EU868 uses a 1% duty cycle; keep media small."
+              "EU868 allows a 10% duty cycle (869.4-869.65 MHz); keep media small to stay within budget."
             ],
             "warning": null
           },
@@ -2429,6 +2549,194 @@
         "type": "object",
         "description": "This OpenAPI 3.1 document.",
         "additionalProperties": true
+      },
+      "LegalRegion": {
+        "type": "object",
+        "description": "Region legal maxima (defaults = legal maxima). Every surface must tell the user to verify local law.",
+        "required": [
+          "region",
+          "max_power_dbm",
+          "duty_cycle_pct",
+          "max_bw_khz",
+          "source"
+        ],
+        "properties": {
+          "region": {
+            "type": "string",
+            "enum": [
+              "EU868",
+              "EU433",
+              "US915",
+              "AU915",
+              "IN865",
+              "KR920",
+              "AS923"
+            ]
+          },
+          "max_power_dbm": {
+            "type": "integer",
+            "description": "Region maximum TX power in dBm EIRP."
+          },
+          "duty_cycle_pct": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Region legal duty cycle in percent; null for fair-use regions."
+          },
+          "max_bw_khz": {
+            "type": "integer",
+            "description": "Region maximum legal bandwidth in kHz."
+          },
+          "source": {
+            "type": "string",
+            "description": "Primary source; always include a 'verify local law' reminder."
+          }
+        },
+        "example": {
+          "region": "EU868",
+          "max_power_dbm": 27,
+          "duty_cycle_pct": 10,
+          "max_bw_khz": 250,
+          "source": "CEPT ERC/REC 70-03 Annex 1 (verify local law)"
+        }
+      },
+      "RegulatoryOverride": {
+        "type": "object",
+        "description": "Persisted emergency override (docs/design/regulatory-and-regions.md §2). Disabled by default; enabling beyond legal limits requires acknowledgement.",
+        "required": [
+          "enabled",
+          "acknowledged"
+        ],
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
+          "acknowledged": {
+            "type": "boolean"
+          },
+          "duty_cycle_pct": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0,
+            "maximum": 100
+          },
+          "max_power_dbm": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "frequency_khz": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Custom centre frequency in kHz; must be within the radio range (150-960 MHz)."
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 120,
+            "description": "Short audited reason (shown in the activity log)."
+          }
+        },
+        "example": {
+          "enabled": false,
+          "acknowledged": false,
+          "duty_cycle_pct": null,
+          "max_power_dbm": null,
+          "frequency_khz": null,
+          "reason": null
+        }
+      },
+      "RegulatoryOverridePatch": {
+        "type": "object",
+        "description": "Partial override: supplied fields change, `confirm:true` is an alias for `acknowledged:true`. Enabling/exceeding the legal maxima without acknowledgement is rejected with 422.",
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
+          "acknowledged": {
+            "type": "boolean"
+          },
+          "confirm": {
+            "type": "boolean",
+            "description": "Alias for acknowledged."
+          },
+          "duty_cycle_pct": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0,
+            "maximum": 100
+          },
+          "max_power_dbm": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "frequency_khz": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 120
+          }
+        },
+        "additionalProperties": false
+      },
+      "RegulatoryOverrideRejected": {
+        "type": "object",
+        "required": [
+          "error",
+          "code",
+          "message",
+          "warning"
+        ],
+        "properties": {
+          "error": {
+            "type": "string"
+          },
+          "code": {
+            "type": "string",
+            "examples": [
+              "regulatory_override_requires_acknowledgement",
+              "regulatory_override_duty_out_of_range",
+              "regulatory_override_reason_too_long",
+              "regulatory_override_frequency_out_of_range"
+            ]
+          },
+          "message": {
+            "type": "string"
+          },
+          "warning": {
+            "type": "string",
+            "description": "Full OVERRIDE_WARNING text."
+          },
+          "help_topic": {
+            "type": "string"
+          }
+        },
+        "example": {
+          "error": "regulatory_override_requires_acknowledgement",
+          "code": "regulatory_override_requires_acknowledgement",
+          "message": "regulatory override requires acknowledgement",
+          "warning": "Regulatory override active — transmissions may violate local radio regulations and void your radio's certification. Use only in a life-threatening emergency where local law permits. You are responsible for compliance and for any interference or damage.",
+          "help_topic": "regulatory-and-emergency"
+        }
       }
     }
   },
@@ -2482,7 +2790,10 @@
                     "rssi": -88,
                     "snr": 6.5,
                     "frequency_mhz": 869.525,
-                    "tx_power_dbm": 14
+                    "tx_power_dbm": 14,
+                    "duty_cycle_pct": 10,
+                    "max_power_dbm": 27,
+                    "max_bw_khz": 250
                   },
                   "mesh": {
                     "tx_frames": 42,
@@ -2496,7 +2807,9 @@
                   "storage": {
                     "used_bytes": 40960,
                     "db_path": "/home/you/.local/share/openmesh/openmesh.redb"
-                  }
+                  },
+                  "regulatory_override_active": false,
+                  "regulatory_override_warning": null
                 }
               }
             }
@@ -2618,7 +2931,7 @@
           "configuration"
         ],
         "summary": "Partially update configuration (live)",
-        "description": "Same semantics as the WebSocket `set_config` command; applies to the running bridge without a restart where possible. Attributed in the activity log.",
+        "description": "Same semantics as the WebSocket `set_config` command; applies to the running bridge without a restart where possible. Accepts a partial `regulatory_override`: enabling or exceeding the legal maxima requires `acknowledged:true` (or `confirm:true`) and otherwise returns 422 `regulatory_override_requires_acknowledgement`; safe reductions and disabling need no acknowledgement. Every change is attributed in the activity log.",
         "requestBody": {
           "required": true,
           "content": {
@@ -2627,8 +2940,11 @@
                 "$ref": "#/components/schemas/ConfigPatch"
               },
               "example": {
-                "radio": {
-                  "profile": "LONG_FAST"
+                "regulatory_override": {
+                  "enabled": true,
+                  "acknowledged": true,
+                  "duty_cycle_pct": 50,
+                  "reason": "emergency"
                 }
               }
             }
@@ -2699,6 +3015,35 @@
                   "code": "unauthorized",
                   "message": "…",
                   "help_topic": "getting-started"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Regulatory override requires acknowledgement, illegal override value, or profile wider than the region maximum bandwidth.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RegulatoryOverrideRejected"
+                },
+                "examples": {
+                  "requires_acknowledgement": {
+                    "value": {
+                      "error": "regulatory_override_requires_acknowledgement",
+                      "code": "regulatory_override_requires_acknowledgement",
+                      "message": "regulatory override requires acknowledgement",
+                      "warning": "Regulatory override active — transmissions may violate local radio regulations and void your radio's certification. Use only in a life-threatening emergency where local law permits. You are responsible for compliance and for any interference or damage.",
+                      "help_topic": "regulatory-and-emergency"
+                    }
+                  },
+                  "profile_not_allowed_in_region": {
+                    "value": {
+                      "error": "profile_not_allowed_in_region",
+                      "code": "profile_not_allowed_in_region",
+                      "message": "profile SHORT_TURBO uses 500 kHz, which is wider than the 250 kHz legal maximum in EU868; allowed profiles: LONG_SLOW, LONG_FAST, MEDIUM_FAST",
+                      "help_topic": "radio-and-region"
+                    }
+                  }
                 }
               }
             }
@@ -4679,7 +5024,13 @@
                     "channels": 0,
                     "radios": 1,
                     "backbone_peers": 0
-                  }
+                  },
+                  "regulatory_override": {
+                    "enabled": false,
+                    "acknowledged": false
+                  },
+                  "override_active": false,
+                  "override_warning": null
                 }
               }
             }
@@ -4741,10 +5092,17 @@
                   "store_forward": false,
                   "position_sharing": false,
                   "announce_interval_s": 1800,
-                  "duty_cycle_pct": 1.0,
+                  "duty_cycle_pct": 10,
                   "frequency_mhz": 869.525,
+                  "legal": {
+                    "region": "EU868",
+                    "max_power_dbm": 27,
+                    "duty_cycle_pct": 10,
+                    "max_bw_khz": 250,
+                    "source": "CEPT ERC/REC 70-03 Annex 1 (verify local law)"
+                  },
                   "notes": [
-                    "EU868 uses a 1% duty cycle; keep media small."
+                    "EU868 allows a 10% duty cycle; keep repeaters well under it."
                   ],
                   "warning": null
                 }
@@ -4862,7 +5220,7 @@
                     "duty_cycle_pct": 1.0,
                     "frequency_mhz": 869.525,
                     "notes": [
-                      "EU868 uses a 1% duty cycle; keep media small."
+                      "EU868 allows a 10% duty cycle (869.4-869.65 MHz); keep media small to stay within budget."
                     ],
                     "warning": null
                   },

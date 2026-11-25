@@ -52,7 +52,8 @@ const Board kBoard = [] {
     b.has_ble = true;
     b.has_usb = true;
     b.has_solar = true;
-    b.default_tx_power_dbm = 14;
+    b.max_tx_power_dbm =
+        paCapForBoard(b.id)->max_tx_power_dbm;
     return b;
 }();
 }  // namespace

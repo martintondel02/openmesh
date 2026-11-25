@@ -15,6 +15,7 @@ import type {
   SetupState,
 } from '../types/setup';
 import type { UiMode } from './mode';
+import { legalLimitsForRegion, normalizeLegalLimits, normalizeRegulatoryOverride } from './regulatory';
 
 export type RegionCode = 'EU868' | 'US915' | 'AU915' | 'IN865' | 'KR920' | 'AS923';
 
@@ -161,6 +162,7 @@ export function recommendedFor(country: string, role: SetupRole): SetupRecommend
     store_forward: preset.storeForward,
     position: preset.privacy,
     duty_cycle_pct: preset.id === 'repeater' || preset.id === 'gateway' ? 1 : null,
+    legal: legalLimitsForRegion(region),
   };
 }
 
@@ -267,8 +269,9 @@ export function normalizeRecommended(raw: unknown, fallback?: SetupRecommended):
     recommendedFor(typeof record.country === 'string' ? record.country : 'NO', (record.role as SetupRole) ?? 'client');
   const role = SETUP_ROLES.some((option) => option.id === record.role) ? (record.role as SetupRole) : base.role;
   const preset = setupRole(role);
+  const region = typeof record.region === 'string' && record.region ? record.region : base.region;
   return {
-    region: typeof record.region === 'string' && record.region ? record.region : base.region,
+    region,
     profile: typeof record.profile === 'string' && record.profile ? record.profile : preset.profile,
     role,
     country: typeof record.country === 'string' ? record.country : base.country ?? null,
@@ -289,6 +292,7 @@ export function normalizeRecommended(raw: unknown, fallback?: SetupRecommended):
         : (record.position === 'shared' ? true : record.position === 'private' ? false : null),
     notes: toStringArray(record.notes),
     warning: typeof record.warning === 'string' && record.warning ? record.warning : null,
+    legal: normalizeLegalLimits(record.legal, region),
   };
 }
 
@@ -313,6 +317,8 @@ export function normalizeSetupState(raw: unknown): SetupState {
       backbone_peers: typeof counts.backbone_peers === 'number' ? counts.backbone_peers : undefined,
     },
     ui_mode: uiMode,
+    regulatory_override: normalizeRegulatoryOverride(record.regulatory_override),
+    override_warning: typeof record.override_warning === 'string' ? record.override_warning : null,
   };
 }
 

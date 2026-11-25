@@ -1,6 +1,6 @@
 [package]
 name = "openmesh-desktop"
-version = "0.4.0"
+version = "0.5.0"
 description = "OpenMesh desktop client — LoRa mesh chat, map and media"
 authors = ["OpenMesh contributors"]
 edition = "2021"

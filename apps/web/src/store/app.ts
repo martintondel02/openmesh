@@ -52,6 +52,16 @@ import { SetupRestClient } from '../lib/setup-api';
 import { AgentsRestClient } from '../lib/agents-api';
 import { normalizeActivityPayload } from '../lib/agents';
 import { parseHelpRoute } from '../lib/help';
+import type { RegulatoryOverride } from '../types/regulatory';
+import {
+  buildRegulatoryOverridePatch,
+  defaultRegulatoryOverride,
+  deriveRegulatoryState,
+  legalLimitsForRegion,
+  mergeRegulatoryConfig,
+  OVERRIDE_WARNING,
+} from '../lib/regulatory';
+import { ConfigApiError, patchBridgeConfig } from '../lib/config-api';
 import type { ConfigPatch } from './reducers';
 import { deriveDelivery, mergeConfig, removeContact as removeContactReducer, upsertChannel, upsertGroupMessage, upsertMessage, upsertNode, applyAck, applyMessageUpdate, appendPositionHistory } from './reducers';
 import type { MeshTransport, TransportStatus } from '../lib/transport';
@@ -135,6 +145,14 @@ function initialUiMode(): UiMode {
 function forceSetupCardFromUrl(): boolean {
   try {
     return new URLSearchParams(window.location.search).get('setup') === 'card';
+  } catch {
+    return false;
+  }
+}
+
+function demoRegulatoryPreviewFromUrl(): boolean {
+  try {
+    return new URLSearchParams(window.location.search).get('regulatory') === 'active';
   } catch {
     return false;
   }
@@ -408,6 +426,13 @@ export interface AppState {
   clearComposerDraft: (key: string) => void;
   loadActivity: () => Promise<void>;
   revokeApiToken: () => Promise<string | null>;
+
+  /* v0.5 legal maxima + emergency regulatory override */
+  saveRegulatoryOverride: (
+    override: RegulatoryOverride,
+  ) => Promise<{ ok: boolean; message?: string; warning?: string }>;
+  disableRegulatoryOverride: () => Promise<boolean>;
+  setDemoOverrideActive: (active: boolean) => void;
   saveBackboneConfig: (patch: BackboneConfigPatch) => Promise<boolean>;
   setBackboneEnabled: (enabled: boolean) => Promise<boolean>;
   kickBackbonePeer: (nodeId: string) => Promise<void>;
@@ -759,6 +784,13 @@ export const useAppStore = create<AppState>()((set, get) => ({
     if (wantsOnboardingFromUrl()) {
       get().openOnboarding();
     }
+    if (demoRegulatoryPreviewFromUrl()) {
+      // The mock transport re-emits its seeded config shortly after connect; activate
+      // the demo-only preview after those snapshots so screenshots show the banner.
+      setTimeout(() => {
+        if (get().mode === 'demo') get().setDemoOverrideActive(true);
+      }, 500);
+    }
     if (!forced) {
       get().pushToast({
         kind: 'warn',
@@ -830,7 +862,7 @@ export const useAppStore = create<AppState>()((set, get) => ({
       demoReason: get().demoReason === 'none' ? 'user' : get().demoReason,
       bridgeVersion: dataset.hello.bridge_version,
       hello: dataset.hello,
-      config: dataset.config,
+      config: mergeRegulatoryConfig(null, dataset.config) ?? dataset.config,
       bridgeStatus: dataset.status,
       ownNodeId: dataset.ownNodeId,
       ownName: dataset.ownName,
@@ -1760,6 +1792,121 @@ export const useAppStore = create<AppState>()((set, get) => ({
     return null;
   },
 
+  /* -------------------- legal maxima + regulatory override (v0.5) -------------------- */
+
+  saveRegulatoryOverride: async (override) => {
+    const state = get();
+    const current = deriveRegulatoryState(state.config, state.bridgeStatus);
+    const acknowledged = Boolean(override.acknowledged);
+    if (state.mode === 'demo') {
+      const nextConfig =
+        mergeRegulatoryConfig(state.config, {
+          ...(state.config ?? {}),
+          legal: current.legal,
+          regulatory_override: override,
+          override_active: override.enabled && acknowledged,
+          override_warning: override.enabled && acknowledged ? OVERRIDE_WARNING : null,
+        }) ?? state.config;
+      set({ config: nextConfig });
+      get().pushToast({
+        kind: override.enabled ? 'warn' : 'success',
+        title: override.enabled ? 'Demo override active' : 'Override disabled',
+        message: override.enabled
+          ? 'Demo only — nothing is transmitted. The red banner is now visible on every screen.'
+          : 'The demo override is off again.',
+        helpTopic: 'regulatory-and-emergency',
+      });
+      return { ok: true };
+    }
+    try {
+      const response = await patchBridgeConfig({
+        baseUrl: state.settings.bridgeUrl,
+        token: state.settings.token || null,
+        patch: buildRegulatoryOverridePatch(override, acknowledged),
+        timeoutMs: 8000,
+      });
+      const merged = mergeRegulatoryConfig(state.config, response);
+      set({ config: merged });
+      get().pushToast(
+        override.enabled
+          ? {
+              kind: 'warn',
+              title: 'Regulatory override saved',
+              message: OVERRIDE_WARNING,
+              helpTopic: 'regulatory-and-emergency',
+              diagnostics: {
+                endpoint: 'PATCH /api/config',
+                bridge: state.settings.bridgeUrl,
+                duty_cycle_pct: override.duty_cycle_pct,
+                max_power_dbm: override.max_power_dbm,
+                frequency_khz: override.frequency_khz,
+              },
+            }
+          : {
+              kind: 'success',
+              title: 'Regulatory override disabled',
+              message: 'The radio is back on the legal region defaults.',
+              helpTopic: 'regulatory-and-emergency',
+            },
+      );
+      return { ok: true };
+    } catch (error) {
+      const configError = error instanceof ConfigApiError ? error : null;
+      const message = error instanceof Error ? error.message : String(error);
+      get().pushToast({
+        kind: 'error',
+        title: 'The bridge rejected the override',
+        message: configError?.warning ? `${message} ${configError.warning}` : message,
+        helpTopic: 'regulatory-and-emergency',
+        diagnostics: {
+          endpoint: 'PATCH /api/config',
+          bridge: state.settings.bridgeUrl,
+          status: configError?.status ?? null,
+          code: configError?.code ?? null,
+        },
+      });
+      return { ok: false, message, warning: configError?.warning ?? undefined };
+    }
+  },
+
+  disableRegulatoryOverride: async () => {
+    const state = get();
+    const current = deriveRegulatoryState(state.config, state.bridgeStatus);
+    const disabled: RegulatoryOverride = {
+      ...current.override,
+      enabled: false,
+      acknowledged: false,
+      reason: current.override.reason,
+    };
+    const result = await get().saveRegulatoryOverride(disabled);
+    return result.ok;
+  },
+
+  setDemoOverrideActive: (active) => {
+    const state = get();
+    if (state.mode !== 'demo') return;
+    const current = deriveRegulatoryState(state.config, state.bridgeStatus);
+    const override: RegulatoryOverride = active
+      ? {
+          ...current.override,
+          enabled: true,
+          acknowledged: true,
+          duty_cycle_pct: current.override.duty_cycle_pct ?? current.legal.duty_cycle_pct,
+          max_power_dbm: current.override.max_power_dbm ?? current.legal.max_power_dbm,
+          reason: current.override.reason ?? 'Demo preview (no transmissions)',
+        }
+      : defaultRegulatoryOverride();
+    const nextConfig =
+      mergeRegulatoryConfig(state.config, {
+        ...(state.config ?? {}),
+        legal: state.config?.legal ?? legalLimitsForRegion(state.config?.radio.region),
+        regulatory_override: override,
+        override_active: active,
+        override_warning: active ? OVERRIDE_WARNING : null,
+      }) ?? state.config;
+    set({ config: nextConfig });
+  },
+
   /* -------------------- toasts + errors -------------------- */
 
   pushToast: (toast) => {
@@ -1959,7 +2106,8 @@ export const useAppStore = create<AppState>()((set, get) => ({
         break;
       }
       case 'config': {
-        const data = event.data as ConfigData;
+        const raw = event.data as ConfigData;
+        const data = mergeRegulatoryConfig(state.config, raw) ?? raw;
         const channels: Record<string, Channel> = {};
         for (const channel of data.channels ?? []) {
           channels[channel.channel_id] = { ...state.channels[channel.channel_id], ...channel };

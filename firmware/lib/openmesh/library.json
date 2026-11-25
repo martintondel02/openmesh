@@ -1,7 +1,7 @@
 {
   "name": "openmesh",
-  "version": "0.1.0",
-  "description": "Portable OMP/1 protocol library: frame codec, announce, AEAD envelopes, dedup, managed flood, store-and-forward, companion link, GPS, power and duty-cycle budgeting. Arduino-free; HAL is injected by the embedder.",
+  "version": "0.5.0",
+  "description": "Portable OMP/1 protocol library: frame codec, announce, AEAD envelopes, dedup, managed flood, store-and-forward, companion link, GPS, power, and legal-maximum region table with the warning-gated regulatory override. Arduino-free; HAL is injected by the embedder.",
   "keywords": [
     "openmesh",
     "lora",

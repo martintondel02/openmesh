@@ -78,7 +78,7 @@ struct Args {
     #[arg(long, value_name = "PROFILE")]
     profile: Option<String>,
 
-    /// Regulatory region: EU868, US915, AU915, IN865, KR920, AS923.
+    /// Regulatory region: EU868, EU433, US915, AU915, IN865, KR920, AS923.
     #[arg(long, value_name = "REGION")]
     region: Option<String>,
 

@@ -27,6 +27,7 @@ import { Avatar, Badge, Button } from '../ui/primitives';
 import { copyText } from '../ui/signals';
 import { ModeToggle } from './ModeToggle';
 import { SystemBanners } from './SystemBanners';
+import { RegulatoryBanner } from '../regulatory/Regulatory';
 
 /* ------------------------------------------------------------------ */
 /* Brand mark                                                         */
@@ -108,6 +109,8 @@ export function ConnectionPill({ compact: _compact = false }: { compact?: boolea
   const bridgeStatus = useAppStore((state) => state.bridgeStatus);
   const hello = useAppStore((state) => state.hello);
   const settings = useAppStore((state) => state.settings);
+  const config = useAppStore((state) => state.config);
+  const overrideActive = Boolean(config?.override_active ?? bridgeStatus?.regulatory_override_active);
   const retryConnection = useAppStore((state) => state.retryConnection);
   const setDemoMode = useAppStore((state) => state.setDemoMode);
   const setScreen = useAppStore((state) => state.setScreen);
@@ -192,6 +195,12 @@ export function ConnectionPill({ compact: _compact = false }: { compact?: boolea
               <dt className="text-slate-500">Protocol</dt>
               <dd className="font-mono text-3xs text-slate-300">{hello?.protocol ?? 'omp/1'}</dd>
             </div>
+            {overrideActive ? (
+              <div className="flex items-start justify-between gap-3">
+                <dt className="text-slate-500">Regulatory</dt>
+                <dd className="max-w-[65%] text-right text-3xs font-medium text-rose-300">⚠ override active</dd>
+              </div>
+            ) : null}
             <div className="flex items-center justify-between gap-3">
               <dt className="text-slate-500">Radio</dt>
               <dd className="text-right text-3xs text-slate-300">
@@ -407,7 +416,7 @@ function Sidebar() {
           </div>
         </div>
         <p className="hidden px-1 text-center text-3xs leading-relaxed text-slate-600 xl:block">
-          OpenMesh v0.4.0
+          OpenMesh v0.5.0
           <br />
           AGPL-3.0-or-later
         </p>
@@ -647,6 +656,7 @@ export function AppShell({ children }: { children: ReactNode }) {
         </a>
         <TopBar />
         <DemoBanner />
+        <RegulatoryBanner />
         <SystemBanners />
         <main id="main-content" className="relative flex min-h-0 flex-1 flex-col overflow-hidden">
           {children}

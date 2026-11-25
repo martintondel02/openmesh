@@ -63,6 +63,8 @@ data class CoreStats(
     val nodes: Long = 0,
     val channels: Long = 0,
     val airtimeMs: Long = 0,
+    /** Effective duty cycle after the region/override policy (v0.5.0 FFI additive field). */
+    val effectiveDutyPct: Int? = null,
 )
 
 data class ChannelInvite(
@@ -318,6 +320,7 @@ class UniFfiEngineBridge : EngineBridge {
             nodes = stats.nodes,
             channels = stats.channels,
             airtimeMs = stats.airtimeMs,
+            effectiveDutyPct = stats.effectiveDutyPct,
         )
     } ?: CoreStats()
 

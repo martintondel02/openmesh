@@ -84,7 +84,7 @@ export const AGENT_SECURITY_NOTES = [
   'MCP reads the bridge token from a file, so the token never appears in a prompt or config snippet.',
   'Every write action appears in the activity log below with its source and result.',
   'Agents can act on anything the API allows. Read-only first, then narrow permissions on purpose.',
-  'To revoke access, rotate the bridge token file and restart the bridge — the panel cannot rotate it through the API in v0.4.0.',
+  'To revoke access, rotate the bridge token file and restart the bridge — the panel cannot rotate it through the API in v0.5.0.',
   'Help content and prompts live in the repo, so the app, docs and agents cannot drift apart.',
 ];
 

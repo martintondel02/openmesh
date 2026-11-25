@@ -28,6 +28,7 @@ import { formatRelativeTime, cn } from '../lib/utils';
 import { Badge, Button } from '../components/ui/primitives';
 import { Callout } from '../components/ui/forms';
 import { HelpLink, HelpTip } from '../components/ui/help';
+import { deriveRegulatoryState } from '../lib/regulatory';
 import { BackboneStats } from './backbone/BackboneStats';
 import { BackbonePeers } from './backbone/BackbonePeers';
 import { BackboneControls } from './backbone/BackboneControls';
@@ -96,6 +97,7 @@ export function BackboneScreen() {
     [mode, hello, ownNodeId, config, status, peers, setup, sessionToken],
   );
 
+  const regulatory = deriveRegulatoryState(useAppStore.getState().config, useAppStore.getState().bridgeStatus);
   const stats = useMemo(() => selectBackboneStats(stateSlice), [stateSlice]);
   const header = useMemo(() => selectBackboneHeader(stateSlice), [stateSlice]);
   const sortedPeers = useMemo(() => selectBackbonePeers({ backbonePeers: peers }), [peers]);
@@ -163,6 +165,11 @@ export function BackboneScreen() {
                   <span className="hidden text-slate-700 sm:inline">·</span>
                   <span className="hidden font-mono sm:inline">{header.listen}</span>
                 </>
+              ) : null}
+              {regulatory.active ? (
+                <span className="inline-flex items-center gap-1 rounded-full border border-rose-400/30 bg-rose-400/10 px-1.5 py-0.5 font-medium text-rose-300">
+                  ⚠ override active
+                </span>
               ) : null}
             </p>
           </div>

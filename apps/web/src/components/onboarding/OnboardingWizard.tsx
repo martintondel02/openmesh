@@ -19,6 +19,8 @@ import { Field, Select, TextInput } from '../../components/ui/forms';
 import { Modal } from '../../components/ui/overlay';
 import { Toggle } from '../../components/ui/primitives';
 import { HelpTip } from '../../components/ui/help';
+import { LegalLimitLine } from '../../components/regulatory/Regulatory';
+import { formatLegalLimit, legalLimitsForRegion } from '../../lib/regulatory';
 import { CopyButton } from '../../components/ui/signals';
 import { QRCode } from '../../components/common/QRCode';
 import { useAppStore } from '../../store/app';
@@ -86,6 +88,7 @@ export function OnboardingWizard() {
 
   const localRecommended = useMemo(() => recommendedFor(draft.country, draft.role), [draft.country, draft.role]);
   const recommended = recommendation ?? localRecommended;
+  const legal = recommended.legal ?? legalLimitsForRegion(recommended.region);
   const regionInfo = regionForCountry(draft.country);
   const isLast = step === 'secure';
   const meta = STEP_TITLES[step] ?? STEP_TITLES.role!;
@@ -281,6 +284,7 @@ export function OnboardingWizard() {
             {Math.round((recommended.announce_interval_s ?? 1800) / 60)} minutes.
             {recommended.warning ? <span className="mt-1 block text-amber-300/80">{recommended.warning}</span> : null}
           </div>
+          <LegalLimitLine legal={legal} mode={uiMode} className="mt-1" />
         </div>
       ) : null}
 
@@ -298,6 +302,7 @@ export function OnboardingWizard() {
                   <li>• A private channel with its own key, ready to invite someone.</li>
                   <li>• {draft.privacy === 'private' ? 'Position sharing off until you choose to share.' : 'Position sharing on, only with your channel.'}</li>
                   <li>• Legal radio region {recommended.region} and the {recommended.profile} profile.</li>
+                <li>• Legal maxima: {formatLegalLimit(legal, 'advanced')}</li>
                   <li>• Store-and-forward {recommended.store_forward ? 'on' : 'off'} for this role.</li>
                 </ul>
                 <div className="mt-2">

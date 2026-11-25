@@ -38,6 +38,7 @@ import { bytesToBase64, hexToBytes } from '../utils';
 import { mulberry32 } from '../audio';
 import { buildChannelLink, buildContactLink } from '../links';
 import { buildBackboneConnectionString, buildFallbackSetup } from '../backbone';
+import { defaultRegulatoryOverride, demoRegulatoryConfigFields } from '../regulatory';
 
 export interface DemoMessage extends MessageData {
   /** Local-only display URL (SVG data URL for seeded images, WAV for voice). */
@@ -771,10 +772,12 @@ export function createDemoDataset(nowMs: number = Date.now()): DemoDataset {
       duty_cycle_pct: 0.42,
     },
     storage: { used_bytes: 2_411_724, db_path: '~/.local/share/openmesh/openmesh.redb' },
+    regulatory_override_active: false,
+    regulatory_override_warning: null,
   };
 
   const hello: HelloData = {
-    bridge_version: '0.4.0-demo',
+    bridge_version: '0.5.0-demo',
     protocol: 'omp/1',
     node: { node_id: ownId, name: 'martin-nord', class: 'client', caps: 0b1010001 },
     radios: [
@@ -807,9 +810,13 @@ export function createDemoDataset(nowMs: number = Date.now()): DemoDataset {
       tx_power_dbm: 14,
       frequency_mhz: 869.525,
       interface: 'sim',
+      max_power_dbm: 27,
+      duty_cycle_pct: 10,
+      max_bw_khz: 250,
     },
     features: { auto_announce: true, store_forward: true, position_sharing: true },
     channels,
+    ...demoRegulatoryConfigFields('EU868'),
   };
 
   const positionHistories: Record<string, Position[]> = {
@@ -934,6 +941,8 @@ export function createDemoDataset(nowMs: number = Date.now()): DemoDataset {
         messages: messages.length + groupMessages.length,
       },
       ui_mode: 'beginner',
+      regulatory_override: defaultRegulatoryOverride(),
+      override_warning: null,
     },
     recommendation: setupRecommendation,
   };

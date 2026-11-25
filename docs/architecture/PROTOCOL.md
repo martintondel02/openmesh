@@ -404,10 +404,11 @@ future fields). Senders MUST ensure `chunk_count = ceil(total_len / chunk_bytes)
 
 ### 9.4 Size policy
 
-Airtime below is measured at 14 dBm, CR 4/5, 16-symbol preamble, CRC on, for the full transfer
+Airtime below is measured with CR 4/5, a 16-symbol preamble and CRC on, for the full transfer
 including manifest and ACKs (MEDIUM_FAST: a 240-byte frame is 611 ms; a 5 KiB image is ~18 s).
-In 1 % duty-cycle regions the sender MUST estimate airtime and either clamp or require explicit
-user confirmation. Estimator: `util::lora_airtime_ms`.
+TX power does not affect airtime. In duty-cycle regions the sender MUST estimate airtime and
+either clamp the attachment or require explicit user confirmation. Estimator:
+`util::lora_airtime_ms`.
 
 | Profile | 240 B frame | 5 KiB image | Default attachment cap | Default voice cap |
 | --- | --- | --- | --- | --- |
@@ -424,6 +425,66 @@ On `SHORT_*` profiles, voice notes are cheap enough to be the default way to sen
 Voice notes: Opus mono 6–10 kbps, 16 kHz, 20 ms frames, packaged as `audio/ogg; codecs=opus`
 (8 s ≈ 7 KiB ≈ 39 chunks); optional Codec2 700C profile (`audio/c2-700c`, 8 s ≈ 700 bytes) for
 the most constrained presets.
+
+**Region legal maxima.** Defaults are the legal maxima: selecting a region sets the TX power to
+`region.max_power_dbm`, the duty-cycle budget to `region.duty_cycle_pct` and the centre frequency
+to `region.freq_khz`, unless the user explicitly lowers them (or an active regulatory override,
+§9.5, says otherwise). `Region.bw_khz` is the **maximum legal bandwidth**: a profile wider than
+that is not selectable, and clients fall back to `MEDIUM_FAST` (`LONG_FAST` on `EU433`) with a
+visible note. The power values are EIRP ceilings — antenna gain can push effective radiated
+power over the limit. Every surface that shows these numbers MUST also say "verify your local
+rules"; this table is not legal advice. Per-country sources and caveats live in
+[regulatory-and-regions.md](../design/regulatory-and-regions.md) §1.
+
+| Region | Centre (kHz) | Max power (dBm EIRP) | Duty cycle | Max BW (kHz) | Notes |
+| --- | --- | --- | --- | --- | --- |
+| `EU868` | 869 525 | 27 | 10 % | 250 | CEPT 869.4–869.65 MHz, 500 mW ERP, ≤10 %; covers Norway (Nkom/EEA). No 500 kHz presets in this band. |
+| `EU433` | 433 920 | 10 | 10 % | 250 | CEPT 433.05–434.79 MHz, 10 mW; short range, good propagation. |
+| `US915` | 915 000 | 30 | none (fair use) | 500 | FCC 902–928 MHz, 1 W conducted with FHSS/DTS rules; 500 kHz presets allowed. |
+| `AU915` | 915 000 | 30 | none (fair use) | 500 | ACMA 915–928 MHz, 1 W EIRP. |
+| `IN865` | 865 000 | 30 | none | 250 | India 865–867 MHz; conservative 250 kHz until the max-BW audit completes. |
+| `KR920` | 920 000 | 23 | none | 250 | Korea 920–923 MHz. |
+| `AS923` | 923 200 | 20 | 10 % | 250 | Conservative floor across the AS923 group (SG/MY/TH/ID/PH/VN/JP…); per-country split is future work. |
+
+The effective TX power is always `min(region.max_power_dbm, hardware_max)`; board caps are
+22 dBm for SX1262 boards and 15 dBm for the LR1110 (T1000-E). `SHORT_TURBO` (500 kHz) is therefore
+only selectable in `US915` and `AU915`, and is rejected in `EU868`, `EU433`, `IN865`, `KR920` and
+`AS923`.
+
+### 9.5 Regulatory policy and override
+
+The wire protocol does not change: duty cycle, TX power and centre frequency are local radio
+configuration, never fields in a frame, and the golden vectors are independent of region
+settings. The normative contract for the numbers, UI rules and JSON surfaces is
+[regulatory-and-regions.md](../design/regulatory-and-regions.md).
+
+```
+policy = region defaults
+if override.enabled:
+    duty      = override.duty_cycle_pct ?? region.duty_cycle_pct
+    power     = min(override.max_power_dbm ?? region.max_power_dbm, hardware_max)
+    frequency = override.frequency_khz ?? region.freq_khz
+```
+
+* A regulatory override is **disabled by default** and only takes effect after the user has
+  explicitly acknowledged the warning defined in
+  [regulatory-and-regions.md](../design/regulatory-and-regions.md) §2.1
+  (`openmesh_core::regulatory::OVERRIDE_WARNING`). While active it MUST be shown on every
+  relevant surface with that warning text verbatim, and disabling it MUST take effect
+  immediately without acknowledgement.
+* Acknowledgement is required only when the override **exceeds a legal limit** (higher duty,
+  higher TX power, or a frequency different from the region centre). Lowering power or duty, or
+  staying on the region frequency, needs no acknowledgement. `duty_cycle_pct = 0` means
+  "transmit nothing", which is always legal and needs no acknowledgement. The optional reason is
+  limited to 120 characters.
+* The hardware cap always wins, even under an override; an override cannot raise effective
+  radiated power above the region's EIRP limit once antenna gain is accounted for. Antenna gain
+  is the operator's responsibility.
+* Enforcement points: firmware airtime token bucket (duty) and radio configuration (power,
+  frequency, PA clamp); bridge airtime estimates, config/status/setup and activity log; client
+  estimates and the override banner. No other protocol behaviour changes.
+* **Not legal advice.** National law changes; implementations MUST tell users to verify their
+  local rules.
 
 ---
 
@@ -481,8 +542,9 @@ on receive frame F on link L:
 
 * Default TTL: 5 for client frames, 8 for announces.
 * Dedup cache: `(src, seq)` with 30 min TTL and ≥ 2048 entries.
-* Relays SHOULD prioritise `PRIORITY` frames and SHOULD enforce an airtime budget
-  (token bucket) of at most 1 % duty cycle in EU868/AS923.
+* Relays SHOULD prioritise `PRIORITY` frames and SHOULD enforce the region's duty-cycle budget
+  (token bucket): 10 % in `EU868`/`EU433`/`AS923`, fair use in `US915`/`AU915`/`IN865`/`KR920`,
+  honouring an active regulatory override (§9.5).
 * Nodes MUST NOT originate more than `MAX_ORIGINATE_PER_MIN` frames in a minute unless the
   frames are ACKs or probe replies.
 

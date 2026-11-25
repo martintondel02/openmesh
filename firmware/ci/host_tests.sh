@@ -37,7 +37,7 @@ fi
 echo "==> compiler: $CXX"
 
 CXXFLAGS=(-std=c++17 -O2 -g -Wall -Wextra -Wno-unused-parameter -DOM_HOST_TESTS
-          -I"$LIB/include" -I"$TEST")
+          -I"$LIB/include" -I"$TEST" -I"$ROOT/firmware/boards")
 CFLAGS=(-std=c99 -O2 -g -I"$LIB/include")
 
 sources=()

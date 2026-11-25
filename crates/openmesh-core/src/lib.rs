@@ -26,6 +26,7 @@ pub mod crypto;
 pub mod engine;
 pub mod error;
 pub mod fragment;
+pub mod regulatory;
 pub mod resource;
 pub mod routing;
 pub mod services;
@@ -41,6 +42,7 @@ pub use engine::{
     Target, engine_from_seed,
 };
 pub use error::{Error, Result};
+pub use regulatory::{OVERRIDE_WARNING, RegulatoryOverride, RegulatoryOverrideError};
 pub use services::{
     Ack, AckKind, Announce, AppMessage, AttachmentRef, MessageKind, NodeClass, Position,
     ResourceKind, ResourceManifest, Telemetry,

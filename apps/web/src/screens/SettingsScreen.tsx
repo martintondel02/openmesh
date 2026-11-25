@@ -44,6 +44,7 @@ import { Callout, Field, Slider, TextInput, InlineCode } from '../components/ui/
 import { Modal } from '../components/ui/overlay';
 import { HelpTip } from '../components/ui/help';
 import { BeginnerSettings } from './settings/BeginnerSettings';
+import { LegalMaximaCard, RegulatoryOverrideCard } from '../components/regulatory/Regulatory';
 
 const NODE_CLASSES = [
   { value: 'client', label: 'Client', hint: 'Phone or handheld; sleeps to save power.' },
@@ -402,6 +403,9 @@ export function SettingsScreen() {
             </Callout>
           ) : null}
         </SectionCard>
+
+        <LegalMaximaCard />
+        <RegulatoryOverrideCard />
 
         {/* Features */}
         <SectionCard icon={SlidersHorizontal} title="Features" description="Behaviour toggles reported by the bridge config snapshot.">

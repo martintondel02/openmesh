@@ -27,6 +27,8 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use base64::Engine as _;
 use sha2::{Digest, Sha256};
 
+use openmesh_core::regulatory::{self, RegulatoryOverride};
+use openmesh_core::util;
 use openmesh_core::{
     Ack, AckKind, AppMessage, AttachmentRef, Engine, EngineConfig, Error, Event, Identity,
     LinkInfo, MessageKind, NodeClass, NodeId, NodeInfo, Position, Processed, PublicIdentity,
@@ -99,7 +101,7 @@ pub struct FfiConfig {
     pub node_class: String,
     /// LoRa profile (`LONG_SLOW`, `LONG_FAST`, `MEDIUM_FAST`, `SHORT_FAST`, `SHORT_TURBO`).
     pub profile: String,
-    /// Regulatory region (`EU868`, `US915`, `AU915`, `IN865`, `KR920`, `AS923`).
+    /// Regulatory region (`EU868`, `EU433`, `US915`, `AU915`, `IN865`, `KR920`, `AS923`).
     pub region: String,
     /// Enable store-and-forward for other nodes (repeater/gateway behaviour).
     pub store_forward: bool,
@@ -227,6 +229,9 @@ pub struct FfiStats {
     pub channels: i64,
     /// Best-effort transmitted airtime in milliseconds.
     pub airtime_ms: i64,
+    /// Effective duty cycle used by the engine (override or region default); `null` for fair-use
+    /// regions with no numeric limit.
+    pub effective_duty_pct: Option<i32>,
 }
 
 /// One event produced by the engine.
@@ -489,8 +494,35 @@ impl OpenMeshNode {
         let config = self
             .config
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        serde_json::to_string(&config_to_json(&config)).unwrap_or_else(|_| "{}".to_string())
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        let region = region_for(&config);
+        let (regulatory_override, effective_duty_pct) = {
+            let engine = match self.engine.lock() {
+                Ok(engine) => engine,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            (
+                engine.config().regulatory.clone(),
+                engine.config().effective_duty_pct(region),
+            )
+        };
+        let mut value = config_to_json(&config);
+        if let Some(object) = value.as_object_mut() {
+            object.insert(
+                "regulatoryOverride".into(),
+                override_to_json(&regulatory_override),
+            );
+            object.insert(
+                "overrideActive".into(),
+                serde_json::json!(regulatory_override.enabled),
+            );
+            object.insert(
+                "effectiveDutyPct".into(),
+                serde_json::json!(effective_duty_pct.map(i32::from)),
+            );
+        }
+        serde_json::to_string(&value).unwrap_or_else(|_| "{}".to_string())
     }
 
     /// Apply a partial configuration JSON patch (unknown fields are rejected).
@@ -505,6 +537,7 @@ impl OpenMeshNode {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone();
+        let mut regulatory_override: Option<RegulatoryOverride> = None;
         for (key, value) in object {
             let key = key.as_str();
             match key {
@@ -531,15 +564,43 @@ impl OpenMeshNode {
                         .as_i64()
                         .ok_or_else(|| FfiError::invalid(format!("{key} must be an integer")))?;
                 }
+                "regulatoryOverride" | "regulatory_override" => {
+                    let current = match &regulatory_override {
+                        Some(current) => current.clone(),
+                        None => {
+                            let engine = self.lock_engine()?;
+                            engine.config().regulatory.clone()
+                        }
+                    };
+                    regulatory_override = Some(parse_override_patch(value, &current)?);
+                }
                 other => {
                     return Err(FfiError::invalid(format!("unknown config field '{other}'")));
                 }
             }
         }
         validate_config(&config)?;
-        let engine_config = engine_config_for(&config)?;
+        let region = region_for(&config);
+        let mut engine_config = engine_config_for(&config)?;
         {
             let mut engine = self.lock_engine()?;
+            engine_config.regulatory = match regulatory_override {
+                Some(override_config) => {
+                    if let Some(frequency) = override_config.frequency_khz {
+                        if !regulatory::frequency_supported(frequency) {
+                            return Err(FfiError::invalid(format!(
+                                "frequency {frequency} kHz is outside the supported radio range {}..={} kHz",
+                                regulatory::RADIO_MIN_FREQUENCY_KHZ,
+                                regulatory::RADIO_MAX_FREQUENCY_KHZ
+                            )));
+                        }
+                    }
+                    regulatory::validate(region, &override_config)
+                        .map_err(|error| FfiError::invalid(error.message()))?;
+                    override_config
+                }
+                None => engine.config().regulatory.clone(),
+            };
             engine.set_config(engine_config);
         }
         *self
@@ -886,6 +947,15 @@ impl OpenMeshNode {
             Ok(engine) => engine,
             Err(poisoned) => poisoned.into_inner(),
         };
+        let config = self
+            .config
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        let effective_duty_pct = engine
+            .config()
+            .effective_duty_pct(region_for(&config))
+            .map(i32::from);
         let stats = engine.stats();
         FfiStats {
             tx_frames: stats.tx_frames as i64,
@@ -895,6 +965,7 @@ impl OpenMeshNode {
             nodes: stats.known_nodes as i64,
             channels: stats.channels as i64,
             airtime_ms: stats.airtime_tx_ms as i64,
+            effective_duty_pct,
         }
     }
 
@@ -1260,6 +1331,103 @@ fn engine_config_for(config: &FfiConfig) -> Result<EngineConfig, FfiError> {
         engine_config.role = Role::Client;
     }
     Ok(engine_config)
+}
+
+fn region_for(config: &FfiConfig) -> &'static util::Region {
+    util::region(&config.region).unwrap_or(&util::REGIONS[0])
+}
+
+/// Merge a camelCase (or snake_case) `regulatoryOverride` JSON object onto the current override.
+fn parse_override_patch(
+    value: &serde_json::Value,
+    current: &RegulatoryOverride,
+) -> Result<RegulatoryOverride, FfiError> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| FfiError::invalid("regulatoryOverride must be an object"))?;
+    let mut merged = current.clone();
+    for (key, value) in object {
+        match key.as_str() {
+            "enabled" => {
+                merged.enabled = value.as_bool().ok_or_else(|| {
+                    FfiError::invalid("regulatoryOverride.enabled must be a boolean")
+                })?;
+            }
+            "acknowledged" | "confirm" => {
+                merged.acknowledged = value.as_bool().ok_or_else(|| {
+                    FfiError::invalid(format!("regulatoryOverride.{key} must be a boolean"))
+                })?;
+            }
+            "dutyCyclePct" | "duty_cycle_pct" => {
+                merged.duty_cycle_pct = match value {
+                    serde_json::Value::Null => None,
+                    other => Some(other.as_u64().filter(|duty| *duty <= 100).ok_or_else(|| {
+                        FfiError::invalid("regulatoryOverride.dutyCyclePct must be 0..=100")
+                    })? as u8),
+                };
+            }
+            "maxPowerDbm" | "max_power_dbm" => {
+                merged.max_power_dbm = match value {
+                    serde_json::Value::Null => None,
+                    other => Some(
+                        other
+                            .as_i64()
+                            .and_then(|power| i8::try_from(power).ok())
+                            .ok_or_else(|| {
+                                FfiError::invalid(
+                                    "regulatoryOverride.maxPowerDbm must be an integer dBm value",
+                                )
+                            })?,
+                    ),
+                };
+            }
+            "frequencyKhz" | "frequency_khz" => {
+                merged.frequency_khz = match value {
+                    serde_json::Value::Null => None,
+                    other => Some(
+                        other
+                            .as_u64()
+                            .and_then(|frequency| u32::try_from(frequency).ok())
+                            .ok_or_else(|| {
+                                FfiError::invalid(
+                                    "regulatoryOverride.frequencyKhz must be a positive integer",
+                                )
+                            })?,
+                    ),
+                };
+            }
+            "reason" => {
+                merged.reason = match value {
+                    serde_json::Value::Null => None,
+                    other => Some(
+                        other
+                            .as_str()
+                            .ok_or_else(|| {
+                                FfiError::invalid("regulatoryOverride.reason must be a string")
+                            })?
+                            .to_string(),
+                    ),
+                };
+            }
+            other => {
+                return Err(FfiError::invalid(format!(
+                    "unknown regulatoryOverride field '{other}'"
+                )));
+            }
+        }
+    }
+    Ok(merged)
+}
+
+fn override_to_json(override_config: &RegulatoryOverride) -> serde_json::Value {
+    serde_json::json!({
+        "enabled": override_config.enabled,
+        "acknowledged": override_config.acknowledged,
+        "dutyCyclePct": override_config.duty_cycle_pct,
+        "maxPowerDbm": override_config.max_power_dbm,
+        "frequencyKhz": override_config.frequency_khz,
+        "reason": override_config.reason,
+    })
 }
 
 fn config_to_json(config: &FfiConfig) -> serde_json::Value {
@@ -1771,6 +1939,115 @@ mod tests {
         assert_eq!(channels.len(), 1);
         assert_eq!(channels[0].channel_id_hex, channel.channel_id_hex);
         assert!(channels[0].invite_url.contains("psk="));
+    }
+
+    fn config_value(node: &OpenMeshNode) -> serde_json::Value {
+        serde_json::from_str(&node.config_json()).expect("config_json is JSON")
+    }
+
+    #[test]
+    fn regulatory_override_defaults_disabled_and_echoes_state() {
+        let a = node("a", 30);
+        let config = config_value(&a);
+        assert_eq!(config["regulatoryOverride"]["enabled"], false);
+        assert_eq!(config["regulatoryOverride"]["acknowledged"], false);
+        assert!(config["regulatoryOverride"]["dutyCyclePct"].is_null());
+        assert_eq!(config["overrideActive"], false);
+        // Disabled override = legal region duty for EU868.
+        assert_eq!(config["effectiveDutyPct"], 10);
+        assert_eq!(a.stats().effective_duty_pct, Some(10));
+    }
+
+    #[test]
+    fn regulatory_override_requires_ack_only_when_exceeding() {
+        let a = node("a", 31);
+        let error = a
+            .set_config(r#"{"regulatoryOverride":{"enabled":true,"dutyCyclePct":100}}"#.to_string())
+            .unwrap_err();
+        let FfiError::InvalidArgument { msg } = error else {
+            panic!("expected InvalidArgument, got {error:?}");
+        };
+        assert!(msg.contains("acknowledg"), "message: {msg}");
+        // Nothing changed.
+        assert_eq!(config_value(&a)["overrideActive"], false);
+
+        // Acknowledged exceeding override is accepted and echoed in camelCase.
+        a.set_config(
+            r#"{"regulatoryOverride":{"enabled":true,"acknowledged":true,"dutyCyclePct":100,"maxPowerDbm":22,"reason":"emergency"}}"#
+                .to_string(),
+        )
+        .expect("acknowledged override");
+        let config = config_value(&a);
+        assert_eq!(config["regulatoryOverride"]["enabled"], true);
+        assert_eq!(config["regulatoryOverride"]["acknowledged"], true);
+        assert_eq!(config["regulatoryOverride"]["dutyCyclePct"], 100);
+        assert_eq!(config["regulatoryOverride"]["maxPowerDbm"], 22);
+        assert_eq!(config["overrideActive"], true);
+        assert_eq!(config["effectiveDutyPct"], 100);
+        assert_eq!(a.stats().effective_duty_pct, Some(100));
+
+        // Safe reductions need no acknowledgement (contract §2.1 rule 3).
+        let b = node("b", 32);
+        b.set_config(
+            r#"{"regulatoryOverride":{"enabled":true,"dutyCyclePct":5,"maxPowerDbm":15}}"#
+                .to_string(),
+        )
+        .expect("safe reduction");
+        let config = config_value(&b);
+        assert_eq!(config["regulatoryOverride"]["acknowledged"], false);
+        assert_eq!(config["regulatoryOverride"]["dutyCyclePct"], 5);
+        assert_eq!(config["overrideActive"], true);
+        assert_eq!(config["effectiveDutyPct"], 5);
+
+        // 0 % means "no transmissions", valid without acknowledgement.
+        let c = node("c", 33);
+        c.set_config(r#"{"regulatoryOverride":{"enabled":true,"dutyCyclePct":0}}"#.to_string())
+            .expect("zero TX override");
+        assert_eq!(config_value(&c)["effectiveDutyPct"], 0);
+    }
+
+    #[test]
+    fn regulatory_override_snake_case_reason_escaping_and_bounds() {
+        let a = node("a", 34);
+        let reason = "quote \" and backslash \\ and newline\n";
+        let patch = serde_json::json!({
+            "regulatory_override": {
+                "enabled": true,
+                "acknowledged": true,
+                "duty_cycle_pct": 20,
+                "reason": reason,
+            }
+        });
+        a.set_config(patch.to_string())
+            .expect("snake_case override with escaped reason");
+        let config = config_value(&a);
+        assert_eq!(config["regulatoryOverride"]["dutyCyclePct"], 20);
+        assert_eq!(config["regulatoryOverride"]["reason"], reason);
+
+        let error = a
+            .set_config(
+                serde_json::json!({"regulatoryOverride": {"frequencyKhz": 100_000}}).to_string(),
+            )
+            .unwrap_err();
+        assert!(matches!(error, FfiError::InvalidArgument { .. }));
+
+        let error = a
+            .set_config(
+                serde_json::json!({"regulatoryOverride": {"reason": "x".repeat(140)}}).to_string(),
+            )
+            .unwrap_err();
+        let FfiError::InvalidArgument { msg } = error else {
+            panic!("expected InvalidArgument");
+        };
+        assert!(
+            msg.contains("reason") || msg.contains("120"),
+            "message: {msg}"
+        );
+
+        let error = a
+            .set_config(serde_json::json!({"regulatoryOverride": {"bogus": true}}).to_string())
+            .unwrap_err();
+        assert!(matches!(error, FfiError::InvalidArgument { .. }));
     }
 
     #[test]

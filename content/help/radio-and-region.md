@@ -11,10 +11,11 @@ cost, and how to recognise when a message is too expensive.
 * **Profile (modem preset)** — the spread-spectrum settings: spreading factor (SF), bandwidth
   (BW) and coding rate (CR). Slower profiles hear weaker signals at longer range; faster profiles
   send more data per second. Nodes must use the **same** profile and region to talk.
-* **Airtime** — the time the radio spends transmitting. Regulators cap it (for example 1 % duty
-  cycle in much of the EU), and the mesh shares one channel, so every relay spends airtime too.
-* **Duty cycle** — the percentage of each hour a transmitter may be on air. A 1 % limit means
-  36 seconds of transmit time per hour, shared by everything the node sends.
+* **Airtime** — the time the radio spends transmitting. Regulators cap it (for example 10 % duty
+  cycle in the EU 869.4–869.65 MHz sub-band; the 868.0–868.6 MHz sub-band allows 1 % at lower
+  power), and the mesh shares one channel, so every relay spends airtime too.
+* **Duty cycle** — the percentage of each hour a transmitter may be on air. A 10 % limit means
+  6 minutes of transmit time per hour, shared by everything the node sends.
 
 ## Why it matters
 
@@ -54,34 +55,47 @@ depends on terrain, antennas and noise; speed and range trade off.
 
 ### Airtime budgets in practice
 
-* A 1 % duty cycle allows ~36 s of transmit time per hour. A 5 KiB image at `MEDIUM_FAST` uses
-  ~18 s — half the hourly budget, before relays.
+* A 10 % duty cycle allows ~6 minutes of transmit time per hour. A 5 KiB image at `MEDIUM_FAST`
+  uses ~18 s — about 5 % of the hourly budget, before relays. A 1 % band (such as 868.0–868.6 MHz
+  in parts of Europe) allows only ~36 s per hour, so the same image costs half the budget.
 * A 100-character text at `MEDIUM_FAST` costs ~0.5 s. That is the reference point the app uses for
   comparisons ("about the same as six text messages").
 * Every relay in range also retransmits, so dense meshes spend more aggregate airtime. This is
   why OpenMesh caps media per profile and warns before expensive sends.
 * Airtime is why `LONG_SLOW` is a last resort: a single photo can occupy the channel for minutes.
 
-### Region table (defaults)
+### Region table (legal-maximum defaults, v0.5)
 
-| Region | Typical band | Power (default max) | Duty cycle in the model |
-| --- | --- | --- | --- |
-| `EU868` | 868 MHz | 14 dBm | 1 % |
-| `US915` | 915 MHz | 20 dBm | fair use |
-| `AU915` | 915 MHz | 20 dBm | fair use |
-| `IN865` | 865 MHz | 20 dBm | fair use |
-| `KR920` | 920 MHz | 14 dBm | fair use |
-| `AS923` | 923 MHz | 14 dBm | 1 % |
+Since v0.5, OpenMesh defaults to the **legal maximum** power and duty cycle for the region instead
+of conservative values. The numbers are EIRP ceilings — antenna gain counts, so a high-gain antenna
+can put you over the limit even at the default setting.
 
-Exact legal limits vary by sub-band and country. The bridge model is conservative; verify with
-your local regulator and your hardware's certification before deploying a public network.
+| Region | Typical band | Max power | Duty cycle | Max bandwidth |
+| --- | --- | --- | --- | --- |
+| `EU868` | 869.4–869.65 MHz (covers Norway) | 27 dBm | 10 % | 250 kHz |
+| `EU433` | 433.05–434.79 MHz | 10 dBm | 10 % | 250 kHz |
+| `US915` | 902–928 MHz | 30 dBm | fair use | 500 kHz |
+| `AU915` | 915–928 MHz | 30 dBm | fair use | 500 kHz |
+| `IN865` | 865–867 MHz | 30 dBm | fair use | 250 kHz |
+| `KR920` | 920–923 MHz | 23 dBm | fair use | 250 kHz |
+| `AS923` | 923 MHz | 20 dBm | 10 % | 250 kHz |
+
+Exact legal limits vary by sub-band and country, and rules change. Verify with your local
+regulator (in Norway: Nkom) and your hardware's certification before deploying a public network.
+A profile whose bandwidth exceeds the region maximum (for example `SHORT_TURBO` at 500 kHz in
+`EU868`) is rejected by the app.
+
+If you need to go beyond the legal limits in a life-threatening emergency, read
+[Legal limits, power and emergency override](regulatory-and-emergency.md) — it is warning-gated,
+advanced-only and off by default.
 
 ### Changing settings safely
 
 * Region changes can require a radio restart; do it from Settings and re-check the Nodes screen.
 * Changing profile disconnects nodes using the old profile — plan it for a quiet moment and tell
   your group.
-* `radio.frequency` is an advanced override for test networks; leave it unset in production.
+* `radio.frequency` (like power and duty) is part of the warning-gated regulatory override; leave
+  it unset unless you are deliberately testing or responding to a genuine emergency.
 * Use the API (`GET/POST /api/config`) or the Settings screen; avoid hand-editing files while the
   bridge is running.
 
@@ -98,4 +112,5 @@ your local regulator and your hardware's certification before deploying a public
 ## Related topics
 
 [Images and voice notes](media.md) · [Nodes, roles and telemetry](nodes-telemetry.md) ·
+[Legal limits, power and emergency override](regulatory-and-emergency.md) ·
 [Build a tiny mesh](first-mesh.md) · [Troubleshooting](troubleshooting.md)

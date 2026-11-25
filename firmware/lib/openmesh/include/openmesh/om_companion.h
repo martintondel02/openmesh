@@ -48,7 +48,7 @@ struct CompanionEntry {
     char value[64]{};
 };
 
-constexpr size_t kCompanionMaxEntries = 8;
+constexpr size_t kCompanionMaxEntries = 12;
 
 struct CompanionMsg {
     CompanionType type = CompanionType::Ping;

@@ -7,6 +7,7 @@
 #ifndef OPENMESH_BOARD_H
 #define OPENMESH_BOARD_H
 
+#include <cstddef>
 #include <cstdint>
 
 #include "openmesh/om_messages.h"
@@ -16,6 +17,40 @@ namespace board {
 
 // Which firmware role the board runs unless the companion app configures otherwise.
 enum class DefaultRole : uint8_t { Tracker, Repeater, Gateway, Client };
+
+// Hard PA caps for the reference radios (v0.5.0 regulatory contract): SX1262 boards 22 dBm,
+// LR1110 (T1000-E) 15 dBm. These are absolute: neither region maxima nor the regulatory
+// override may exceed them. Single source of truth for both the board factories and the host
+// parity tests (firmware/test/test_protocol).
+constexpr int8_t kMaxTxPowerSx1262Dbm = 22;
+constexpr int8_t kMaxTxPowerLr1110Dbm = 15;
+
+struct PaCap {
+    const char* board_id;
+    int8_t max_tx_power_dbm;
+};
+
+constexpr PaCap kPaCaps[] = {
+    {"t1000e", kMaxTxPowerLr1110Dbm},
+    {"rak4631_solar", kMaxTxPowerSx1262Dbm},
+    {"seeed_solar", kMaxTxPowerSx1262Dbm},
+    {"heltec_tracker", kMaxTxPowerSx1262Dbm},
+};
+constexpr size_t kPaCapCount = sizeof(kPaCaps) / sizeof(kPaCaps[0]);
+
+inline const PaCap* paCapForBoard(const char* id) {
+    if (id == nullptr) return nullptr;
+    for (size_t i = 0; i < kPaCapCount; ++i) {
+        const char* a = kPaCaps[i].board_id;
+        const char* b = id;
+        while (*a != '\0' && *a == *b) {
+            ++a;
+            ++b;
+        }
+        if (*a == '\0' && *b == '\0') return &kPaCaps[i];
+    }
+    return nullptr;
+}
 
 enum class GnssModule : uint8_t { None, Airoha, L76K, UC6580 };
 
@@ -86,7 +121,8 @@ struct Board {
     bool has_ble = true;
     bool has_usb = true;
     bool has_solar = false;
-    int8_t default_tx_power_dbm = 14;
+    // Hardware PA ceiling in dBm; the effective TX power is min(region legal max, this).
+    int8_t max_tx_power_dbm = kMaxTxPowerSx1262Dbm;
 };
 
 // Implemented by exactly one firmware/boards/<board>.cpp, selected with -DOM_BOARD_*.

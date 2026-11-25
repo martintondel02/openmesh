@@ -89,6 +89,7 @@ class MainActivity : ComponentActivity() {
                         snackbarMessage = snackbar,
                         onSnackbarShown = { snackbar = null },
                         initialThread = pendingThread.value,
+                        regulatoryOverrideActive = settings.overrideEnabled,
                     )
                 }
             }

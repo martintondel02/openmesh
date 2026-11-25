@@ -233,7 +233,7 @@ destructive tools that require `"confirm": true` in their arguments.
 | `openmesh_announce` | — | force an announce |
 | `openmesh_mark_read` | `msg_id` | read receipt |
 | `openmesh_retry_message` | `msg_id` | retry delivery |
-| `openmesh_set_config` | `patch` (node/radio/features partial) | apply config live |
+| `openmesh_set_config` | `patch` (node/radio/features partial), `regulatory_override?` (emergency; enabling/exceeding requires `confirm: true`), `confirm?` | apply config live; returns the override warning when active |
 | `openmesh_setup_quick` | `role`, `country`, `node_name?`, `privacy?`, `create_channel?` | secure beginner preset (UX spec §5) |
 | `openmesh_create_channel` | `name`, `psk?` | create channel, returns invite URL + PSK **once** |
 | `openmesh_join_channel` | `url` or `name`+`psk` | join a channel |

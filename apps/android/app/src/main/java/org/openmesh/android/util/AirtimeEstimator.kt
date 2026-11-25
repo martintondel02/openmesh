@@ -86,14 +86,24 @@ fun wallClockMs(airtimeMs: Int, dutyCyclePct: Int?): Long =
     if (dutyCyclePct == null || dutyCyclePct <= 0) airtimeMs.toLong()
     else airtimeMs.toLong() * 100L / dutyCyclePct
 
-/** Region profiles from `crates/openmesh-core/src/util.rs`; keep in sync. */
-enum class Region(val label: String, val dutyCyclePct: Int?, val maxPowerDbm: Int) {
-    EU868("EU 868 MHz", 1, 14),
-    US915("US 915 MHz", null, 20),
-    AU915("AU 915 MHz", null, 20),
-    IN865("IN 865 MHz", null, 20),
-    KR920("KR 920 MHz", null, 14),
-    AS923("AS 923 MHz", 1, 14);
+/**
+ * Region profiles from `crates/openmesh-core/src/util.rs` (v0.5.0 legal maxima); keep in sync.
+ * Values are EIRP ceilings; antenna gain and national law can change the effective limit.
+ */
+enum class Region(
+    val label: String,
+    val freqKhz: Long,
+    val dutyCyclePct: Int?,
+    val maxPowerDbm: Int,
+    val maxBwKhz: Int,
+) {
+    EU868("EU 868 MHz", 869_525, 10, 27, 250),
+    EU433("EU 433 MHz", 433_920, 10, 10, 250),
+    US915("US 915 MHz", 915_000, null, 30, 500),
+    AU915("AU 915 MHz", 915_000, null, 30, 500),
+    IN865("IN 865 MHz", 865_000, null, 30, 250),
+    KR920("KR 920 MHz", 920_000, null, 23, 250),
+    AS923("AS 923 MHz", 923_200, 10, 20, 250);
 
     companion object {
         fun fromName(name: String): Region = entries.firstOrNull { it.name == name } ?: EU868

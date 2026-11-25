@@ -400,7 +400,7 @@ async fn setup_state_recommend_and_idempotent_quick_setup() {
     assert_eq!(recommend["profile"], "LONG_FAST");
     assert_eq!(recommend["store_forward"], true);
     assert_eq!(recommend["role"], "repeater");
-    assert_eq!(recommend["duty_cycle_pct"], 1);
+    assert_eq!(recommend["duty_cycle_pct"], 10);
     let unknown = get(addr, "/api/setup/recommend?country=ZZ&role=client").await;
     assert_eq!(unknown["region"], "EU868");
     assert!(

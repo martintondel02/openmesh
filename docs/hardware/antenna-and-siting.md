@@ -123,7 +123,8 @@ A repeater is infrastructure. Treat it like a hilltop radio site, not like a gad
 
 ## 6. Legal and duty-cycle notes
 
-* EU868/AS923 have a **1 % duty cycle** per sub-band. The firmware enforces a token bucket and
+* EU868/AS923 have a **10 % duty cycle** in their main sub-bands (EU 869.4–869.65 MHz;
+  the 868.0–868.6 MHz sub-band is 1 % at lower power). The firmware enforces a token bucket and
   will drop frames rather than exceed it; do not increase power or reduce the budget expecting
   better throughput — the radio is mostly limited by the duty cycle, not the PA.
 * US915/AU915 are fair-use with dwell-time and frequency-hopping expectations; the reference

@@ -44,7 +44,7 @@ import org.openmesh.android.ui.theme.MeshPrimary
 import org.openmesh.android.ui.theme.MeshSurfaceHigh
 import org.openmesh.android.ui.theme.MeshTertiary
 
-/** About, agents and backbone tips (v0.4.0 GA). */
+/** About, agents and backbone tips (v0.5.0). */
 @Composable
 fun AboutScreen(
     repository: MeshRepository,
@@ -90,7 +90,7 @@ fun AboutScreen(
                         color = MeshOnSurfaceVariant,
                     )
                     Text(
-                        "Android has no local MCP server in v0.4.0; agents never get your Android identity seed.",
+                        "Android has no local MCP server in v0.5.0; agents never get your Android identity seed.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MeshTertiary,
                     )
@@ -135,7 +135,7 @@ fun AboutScreen(
 
             SectionTitle("Open source")
             Text(
-                "OpenMesh v0.4.0 · AGPL-3.0-only. Includes osmdroid, zxing, usb-serial-for-android and Nordic BLE (see NOTICE in the repository). The Rust protocol core is linked through UniFFI; no analytics, no cloud, no account.",
+                "OpenMesh v0.5.0 · AGPL-3.0-only. Includes osmdroid, zxing, usb-serial-for-android and Nordic BLE (see NOTICE in the repository). The Rust protocol core is linked through UniFFI; no analytics, no cloud, no account.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MeshOnSurfaceVariant,
             )

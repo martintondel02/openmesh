@@ -477,6 +477,43 @@ export const HELP_TIPS: Record<string, HelpTipContent> = {
     topic: 'security',
   },
 
+  /* ---------------- legal maxima + emergency override ---------------- */
+  'regulatory.legal': {
+    what: 'The legal power, duty-cycle and bandwidth ceilings for your selected radio region.',
+    why: 'These are EIRP ceilings. High-gain antennas, wrong regions or custom power can break the law and void certification — verify your local rules.',
+    topic: 'regulatory-and-emergency',
+  },
+  'regulatory.override': {
+    what: 'An emergency-only switch that may raise duty cycle or power beyond the legal maxima.',
+    why: 'It can void your radio’s certification and cause interference. It is off by default, requires typed acknowledgement, and disables in one tap.',
+    topic: 'regulatory-and-emergency',
+  },
+  'regulatory.duty': {
+    what: 'The maximum percentage of time the radio may transmit.',
+    why: 'Higher duty means more airtime and interference. 0 % means the radio stays silent (still legal).',
+    topic: 'regulatory-and-emergency',
+  },
+  'regulatory.power': {
+    what: 'The transmit power ceiling, in dBm EIRP.',
+    why: 'Power is clamped by the region and the radio hardware; a high-gain antenna can push effective EIRP over the legal limit.',
+    topic: 'regulatory-and-emergency',
+  },
+  'regulatory.frequency': {
+    what: 'An optional custom centre frequency in kHz.',
+    why: 'Leaving it blank uses the region centre. Off-centre frequencies can detune the antenna and increase interference.',
+    topic: 'regulatory-and-emergency',
+  },
+  'regulatory.reason': {
+    what: 'A short note explaining why the override was needed.',
+    why: 'It is written to the activity log so you or an auditor can understand the emergency later. Never put secrets here.',
+    topic: 'regulatory-and-emergency',
+  },
+  'regulatory.ack': {
+    what: 'The typed confirmation that arms an emergency override.',
+    why: 'It makes the risk explicit: you are responsible for compliance, interference and any certification consequences.',
+    topic: 'regulatory-and-emergency',
+  },
+
   /* ---------------- generic ---------------- */
   'common.help': {
     what: 'Opens the in-app handbook, offline too.',

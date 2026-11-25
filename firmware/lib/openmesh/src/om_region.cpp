@@ -12,18 +12,21 @@ const LoraProfile kMediumFast = {"MEDIUM_FAST", 9, 250, 5, 16, true, true};
 const LoraProfile kShortFast = {"SHORT_FAST", 7, 250, 5, 16, true, true};
 const LoraProfile kShortTurbo = {"SHORT_TURBO", 7, 500, 5, 16, true, true};
 
-const Region kRegionEu868 = {"EU868", 869525, 14, 1, 250};
-const Region kRegionUs915 = {"US915", 915000, 20, -1, 250};
-const Region kRegionAu915 = {"AU915", 915000, 20, -1, 250};
-const Region kRegionIn865 = {"IN865", 865000, 20, -1, 250};
-const Region kRegionKr920 = {"KR920", 920000, 14, -1, 250};
-const Region kRegionAs923 = {"AS923", 923200, 14, 1, 250};
+// Region table v2 (v0.5.0): legal maxima, mirrored from crates/openmesh-core util.rs and
+// docs/design/regulatory-and-regions.md §1. Do not edit one without the other.
+const Region kRegionEu868 = {"EU868", 869525, 27, 10, 250};   // CEPT 869.4-869.65, 500 mW ERP
+const Region kRegionEu433 = {"EU433", 433920, 10, 10, 250};   // CEPT 433.05-434.79, 10 mW
+const Region kRegionUs915 = {"US915", 915000, 30, -1, 500};   // FCC 902-928
+const Region kRegionAu915 = {"AU915", 915000, 30, -1, 500};   // ACMA 915-928
+const Region kRegionIn865 = {"IN865", 865000, 30, -1, 250};   // India, max-BW audit pending
+const Region kRegionKr920 = {"KR920", 920000, 23, -1, 250};   // Korea
+const Region kRegionAs923 = {"AS923", 923200, 20, 10, 250};   // conservative AS923 floor
 
 namespace {
 const LoraProfile* const kProfiles[] = {&kLongSlow, &kLongFast, &kMediumFast, &kShortFast,
                                         &kShortTurbo};
-const Region* const kRegions[] = {&kRegionEu868, &kRegionUs915, &kRegionAu915, &kRegionIn865,
-                                  &kRegionKr920, &kRegionAs923};
+const Region* const kRegions[] = {&kRegionEu868, &kRegionEu433, &kRegionUs915, &kRegionAu915,
+                                  &kRegionIn865, &kRegionKr920, &kRegionAs923};
 }  // namespace
 
 const LoraProfile* profileByName(const char* name) {
@@ -79,18 +82,74 @@ size_t maxAttachmentBytes(const LoraProfile& profile, const Region& region) {
     return frames * 180 > 512 ? frames * 180 : 512;
 }
 
-void AirtimeBudget::configure(const Region& region, bool enabled) {
-    enabled_ = enabled && region.duty_cycle_pct > 0;
-    if (!enabled_) {
+bool profileFitsRegion(const LoraProfile& profile, const Region& region) {
+    return region.bw_khz != 0 && profile.bw_khz <= region.bw_khz;
+}
+
+bool validateFrequencyKhz(uint32_t khz) {
+    return khz >= kRadioMinFrequencyKhz && khz <= kRadioMaxFrequencyKhz;
+}
+
+int16_t effectiveDutyPct(const Region& region, int16_t override_pct) {
+    if (override_pct >= 0) {
+        return override_pct > 100 ? 100 : override_pct;
+    }
+    return region.duty_cycle_pct;
+}
+
+bool overrideExceedsLegal(const Region& region, int16_t duty_override_pct,
+                          uint32_t frequency_override_khz) {
+    if (duty_override_pct >= 0) {
+        // A legal region duty of -1 means "fair use, no percentage"; any explicit percentage is
+        // then a self-imposed restriction, not an excess.
+        if (region.duty_cycle_pct >= 0 && duty_override_pct > region.duty_cycle_pct) return true;
+    }
+    if (frequency_override_khz != 0 && frequency_override_khz != region.freq_khz) return true;
+    return false;
+}
+
+int8_t effectivePowerDbm(const Region& region, int8_t hardware_max_dbm, int8_t requested_dbm,
+                         bool override_active) {
+    int8_t target = requested_dbm >= -9 ? requested_dbm : region.max_power_dbm;
+    if (!override_active && target > region.max_power_dbm) {
+        // Without an active override, a power request is only ever a reduction: clamp to the
+        // legal ceiling (the docs' "defaults = legal maxima" rule).
+        target = region.max_power_dbm;
+    }
+    if (target > hardware_max_dbm) target = hardware_max_dbm;
+    if (target < -9) target = -9;
+    return target;
+}
+
+uint32_t effectiveFrequencyKhz(const Region& region, uint32_t frequency_override_khz) {
+    return frequency_override_khz != 0 ? frequency_override_khz : region.freq_khz;
+}
+
+void AirtimeBudget::configure(const Region& region, int16_t duty_override_pct, bool enabled) {
+    const int16_t pct = effectiveDutyPct(region, duty_override_pct);
+    duty_pct_ = pct;
+    if (!enabled || pct < 0) {
+        // Enforcement disabled, or fair-use region with no override: always allow.
+        enabled_ = false;
         capacity_ms_ = 0;
         refill_ms_per_sec_ = 0;
         tokens_us_ = 0;
         initialized_ = false;
         return;
     }
-    // One hour of budget at the allowed duty cycle, refilled continuously.
-    capacity_ms_ = (uint32_t)(3600u * 1000u * (uint32_t)region.duty_cycle_pct / 100u);
-    refill_ms_per_sec_ = (uint32_t)(1000u * (uint32_t)region.duty_cycle_pct / 100u);
+    enabled_ = true;
+    if (pct == 0) {
+        // Legal way to go silent: enabled budget with no tokens at all.
+        capacity_ms_ = 0;
+        refill_ms_per_sec_ = 0;
+        tokens_us_ = 0;
+        initialized_ = true;
+        last_ms_ = 0;
+        return;
+    }
+    // One hour of budget at the effective duty cycle, refilled continuously.
+    capacity_ms_ = (uint32_t)(3600u * 1000u * (uint32_t)pct / 100u);
+    refill_ms_per_sec_ = (uint32_t)(1000u * (uint32_t)pct / 100u);
     tokens_us_ = (int64_t)capacity_ms_ * 1000;
     initialized_ = false;
 }

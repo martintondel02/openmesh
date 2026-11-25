@@ -1,6 +1,6 @@
 # OpenMesh for Android
 
-Standalone Android client for OpenMesh v0.4.0 ("Android GA"). The Rust OMP/1 protocol engine runs
+Standalone Android client for OpenMesh v0.5.0 (regulatory maxima + emergency override). The Rust OMP/1 protocol engine runs
 **on the phone** through UniFFI; the LoRa radio is a dumb authenticated companion pipe over BLE or
 USB. No bridge, no server, no account.
 
@@ -43,12 +43,58 @@ USB. No bridge, no server, no account.
 | About/agents/backbone | ✅ MCP guidance, backbone tip with public-exposure/Openflare note, licences, version |
 | Tests | ✅ 39 JVM unit tests (preset parity with `content/presets/setup.json`, QR parse/build, media caps/math, notifications, help registry, framing, airtime) + `cargo test -p openmesh-ffi` (8) |
 
+A **regulatory override** is deliberately hard to enable and is never offered in beginner mode or the setup wizard. It is not legal advice: values are EIRP ceilings, antenna gain changes effective power, and national law varies. See “Regulatory override” below.
+
 Known limits (documented, not secrets): no Play Store/F-Droid listing yet (APK sideload only); no
 emulator instrumentation tests in CI (JVM tests only); voice uses AAC/MP4 on Android while the web
 client uses Opus/OGG (both playable by the other client); the map shows node positions and
 offline-cached tiles but does not yet draw a "my location" marker/history (needs a runtime location
 permission flow); radio firmware must be flashed with OpenMesh firmware that supports the companion
 protocol.
+
+---
+
+## Regulatory maxima and the emergency override (v0.5.0)
+
+Defaults are the **legal maxima** for the selected region. The Settings screen (Advanced) and the
+radio/status card show e.g. `Legal limit: 27 dBm · 10 % duty · 250 kHz bandwidth` (EU868) plus a
+“verify your local rules” note. The setup wizard shows the legal line but never offers an override.
+
+| Region | Centre | Max power (EIRP) | Duty | Max BW |
+| --- | --- | --- | --- | --- |
+| EU868 | 869 525 kHz | 27 dBm | 10 % | 250 kHz |
+| EU433 | 433 920 kHz | 10 dBm | 10 % | 250 kHz |
+| US915 | 915 000 kHz | 30 dBm | fair use | 500 kHz |
+| AU915 | 915 000 kHz | 30 dBm | fair use | 500 kHz |
+| IN865 | 865 000 kHz | 30 dBm | fair use | 250 kHz |
+| KR920 | 920 000 kHz | 23 dBm | fair use | 250 kHz |
+| AS923 | 923 200 kHz | 20 dBm | 10 % | 250 kHz |
+
+Effective TX power is always clamped to the radio hardware cap (SX1262 boards 22 dBm, LR1110
+15 dBm). Values are EIRP ceilings; **a high-gain antenna can push you over the legal limit**.
+
+### Enabling an override (Advanced → Settings → Regulatory)
+
+1. Tap **Enable override…**. The modal shows the full warning: transmissions may violate local law,
+   void certification and cause interference; use only in a life-threatening emergency where local
+   law permits; you are responsible.
+2. Enter duty % (default = legal max), TX power dBm (default = legal max, hard-capped by hardware),
+   optional frequency kHz (150 000–960 000 kHz, antenna warning) and an optional reason (≤120 chars,
+   recorded in the activity log).
+3. **Safe reductions** (duty/power at or below legal, region frequency) can be saved without a typed
+   acknowledgement.
+4. Going **above** a legal limit requires ticking “I understand” **and** typing `OVERRIDE` exactly.
+   The engine validates the same rule (`regulatoryOverride` patch, `FfiException.InvalidArgument`
+   on failure); the modal shows the error instead of silently failing.
+5. While active, every screen shows a red banner:
+   “⚠ Regulatory override active — may violate local law; you are responsible. Disable in Advanced →
+   Regulatory.” The radio/config sync sends the effective `radio.tx_power`,
+   `radio.duty_override` (`-1` = legal region duty) and `radio.frequency` (kHz).
+6. **Disable is one tap** in the same card; it clears the effect, the acknowledgement and the warning
+   immediately, and pushes the legal defaults back to the radio.
+
+QA tip (debug builds): long-press the “About & agents” title → **Reset & restart** clears the
+onboarding flag for re-testing; the override itself can be disabled in Settings at any time.
 
 ---
 
@@ -192,7 +238,7 @@ cd apps/android
 cargo test -p openmesh-ffi          # 8/8
 ```
 
-Current results: **39/39 JVM unit tests pass**, `lintDebug` passes, `assembleDebug` produces
+Current results: **62/62 JVM unit tests pass**, `lintDebug` passes, `assembleDebug` produces
 `app/build/outputs/apk/debug/app-debug.apk` (~23 MB), `assembleRelease` produces an unsigned
 ~5.1 MB APK. The APK contains `assets/help/*` (16 topics + index), `assets/presets/setup.json`, and
 `lib/{arm64-v8a,armeabi-v7a,x86_64}/libopenmesh_ffi.so`.

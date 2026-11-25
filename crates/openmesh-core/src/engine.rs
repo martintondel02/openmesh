@@ -184,6 +184,10 @@ pub struct EngineConfig {
     pub role: Role,
     /// Whether to accept and decrypt group (channel) traffic.
     pub accept_channels: bool,
+    /// Regulatory override (duty cycle / TX power / frequency). Defaults to disabled; the engine
+    /// only exposes the effective duty-cycle policy, radio power and frequency are applied by
+    /// the embedder (docs/design/regulatory-and-regions.md §2).
+    pub regulatory: crate::regulatory::RegulatoryOverride,
 }
 
 impl EngineConfig {
@@ -197,6 +201,7 @@ impl EngineConfig {
             default_ttl: DEFAULT_TTL,
             role: Role::Client,
             accept_channels: true,
+            regulatory: crate::regulatory::RegulatoryOverride::default(),
         }
     }
 
@@ -210,7 +215,17 @@ impl EngineConfig {
             default_ttl: DEFAULT_TTL,
             role: Role::Relay(RelayConfig::default()),
             accept_channels: false,
+            regulatory: crate::regulatory::RegulatoryOverride::default(),
         }
+    }
+
+    /// Effective duty-cycle budget in percent for `region`, honouring the configured regulatory
+    /// override (`None` for regions with only fair-use rules).
+    ///
+    /// This is the value the embedder's airtime budget should use; it does not affect the wire
+    /// protocol.
+    pub fn effective_duty_pct(&self, region: &crate::util::Region) -> Option<u8> {
+        crate::regulatory::effective_duty_pct(region, &self.regulatory)
     }
 }
 
@@ -3238,6 +3253,25 @@ mod tests {
         assert!(b.node_info(contact.node_id).unwrap().is_contact);
         assert_eq!(b.channels(), vec![(channel, "family".to_string())]);
         assert_eq!(b.seq, a.seq);
+    }
+
+    #[test]
+    fn engine_config_carries_the_regulatory_override() {
+        let region = crate::util::region("EU868").expect("EU868");
+        let mut config = EngineConfig::client("node");
+        assert_eq!(config.effective_duty_pct(region), Some(10));
+        assert!(!config.regulatory.is_active());
+        config.regulatory = crate::regulatory::RegulatoryOverride {
+            enabled: true,
+            acknowledged: true,
+            duty_cycle_pct: Some(100),
+            ..Default::default()
+        };
+        assert_eq!(config.effective_duty_pct(region), Some(100));
+        // An engine built from that config keeps the override (no wire effect).
+        let engine = Engine::new(Identity::from_seed(&[1u8; 32]), config);
+        assert_eq!(engine.config().effective_duty_pct(region), Some(100));
+        assert!(engine.config().regulatory.is_active());
     }
 
     #[test]

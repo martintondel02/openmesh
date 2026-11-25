@@ -1,5 +1,8 @@
 # OpenMesh firmware
 
+**Firmware version:** 0.5.0 · legal-maximum region table, board PA caps and the warning-gated
+regulatory override (see §3.1).
+
 One C++17 codebase for all four reference boards: Seeed SenseCAP T1000-E (nRF52840 + LR1110),
 RAK WisBlock 4631 in the solar enclosure (nRF52840 + SX1262), Seeed SenseCAP Solar Node P1
 (nRF52840 + SX1262 + GNSS) and Heltec Wireless Tracker (ESP32-S3 + SX1262 + GNSS + TFT).
@@ -34,13 +37,17 @@ firmware/
 
 ## 1. Build and flash matrix
 
-| Environment | Board | Flash | Upload |
-| --- | --- | --- | --- |
-| `t1000e` | Seeed SenseCAP T1000-E | 1 MiB internal, UF2 bootloader | UF2 copy / `nrfutil` |
-| `rak4631_solar` | RAK WisBlock 4631 (solar enclosure) | 1 MiB internal, UF2 bootloader | UF2 copy / `nrfutil` |
-| `seeed_solar` | Seeed SenseCAP Solar Node P1 | 2 MiB QSPI, UF2 bootloader | UF2 copy / `nrfutil` |
-| `heltec_tracker` | Heltec Wireless Tracker V1.1 | 8 MiB, Espressif bootloader | esptool / WebSerial |
-| `native` | host (no hardware) | — | `pio test -e native` |
+| Environment | Board | Radio / PA cap | Flash | Upload |
+| --- | --- | --- | --- | --- |
+| `t1000e` | Seeed SenseCAP T1000-E | LR1110 / **15 dBm** | 1 MiB internal, UF2 bootloader | UF2 copy / `nrfutil` |
+| `rak4631_solar` | RAK WisBlock 4631 (solar enclosure) | SX1262 / **22 dBm** | 1 MiB internal, UF2 bootloader | UF2 copy / `nrfutil` |
+| `seeed_solar` | Seeed SenseCAP Solar Node P1 | SX1262 / **22 dBm** | 2 MiB QSPI, UF2 bootloader | UF2 copy / `nrfutil` |
+| `heltec_tracker` | Heltec Wireless Tracker V1.1 | SX1262 / **22 dBm** | 8 MiB, Espressif bootloader | esptool / WebSerial |
+| `native` | host (no hardware) | — | — | `pio test -e native` |
+
+The PA cap is absolute: effective TX power is `min(region legal max, board PA cap)`, and the
+regulatory override can never exceed it. The single source of truth is `boards/board.h`
+(`kPaCaps[]`).
 
 ```bash
 python3 -m pip install -U platformio
@@ -83,7 +90,7 @@ $ ./ci/host_tests.sh
 ==> compiler: zig c++
 ==> running firmware protocol tests
 ...
-44 test case(s), 3421 assertion(s), 0 failure(s)
+51 test case(s), 3639 assertion(s), 0 failure(s)
 RESULT: PASS
 ```
 
@@ -92,7 +99,7 @@ The same suite runs under PlatformIO's native environment (verified locally by p
 
 ```
 $ pio test -e native
-44 test cases: 44 succeeded
+51 test cases: 51 succeeded
 ```
 
 Golden vectors in `protocol/vectors/*.json` are replayed as part of the same run. All seven files
@@ -102,7 +109,9 @@ seed→identity/channel/DM-key derivation, fixed-message Ed25519 signatures, ope
 fixed-nonce seal vectors in both DM directions and on a channel, complete sealed-body layouts
 (identity hint included), binary announce body/signature/TTL-derived hops, canonical
 AppMessage/Ack CBOR, resource blob/manifest/chunk/AAD-34 layout and ACK bitmaps, and companion
-payload/chunk/CRC/SLIP encoding. The vector replay adds ~950 assertions on top of the unit tests.
+payload/chunk/CRC/SLIP encoding. The vector replay adds ~950 assertions on top of the unit tests; seven additional v0.5.0 cases
+cover the region table, profile bandwidth validation, board PA caps, effective power policy, duty
+override capacity/blocking, frequency validation and override persistence.
 If a file is missing (partial checkout) the loader prints a visible `SKIP` and the suite still
 passes.
 
@@ -118,8 +127,79 @@ passes.
 | `client` | companion `ConfigSet` | Radio as a modem: app owns messaging; radio still relays/announces in standalone mode. |
 
 A radio with no app attached keeps announcing, relaying and storing (standalone repeater mode).
-Role, region, profile, TTL, store toggle and position sharing are settable at runtime through the
-companion API; region changes need a reboot for the radio to retune.
+Role, region, profile, TX power, custom frequency, duty override, TTL, store toggle and position
+sharing are settable at runtime through the companion API. Region/profile/power/frequency changes
+are applied to the radio without a reboot (`hal::Radio::reconfigure`); a profile whose bandwidth
+exceeds the new region's legal maximum is rejected (or falls back to `LONG_FAST` on EU433 /
+`MEDIUM_FAST` elsewhere when a region change invalidates the current profile).
+
+
+## 3.1 Legal maxima, board PA caps and the regulatory override (v0.5.0)
+
+> **Not legal advice.** The values below are our best reading of CEPT ERC/REC 70-03 Annex 1, the
+> Norwegian Nkom/EEA framework and the Meshtastic region table, cross-checked 2026-11. National
+> law changes and antenna gain change effective radiated power. **Verify your local rules** — the
+> power values are EIRP ceilings and a high-gain antenna can push you over the limit.
+
+Region table v2 (mirrored byte-for-byte in `lib/openmesh/src/om_region.cpp` from
+`crates/openmesh-core::util::REGIONS`; host test `test_region_table_v2` pins the numbers):
+
+| Region | Centre (kHz) | Max power (dBm EIRP) | Duty cycle | Max BW (kHz) |
+| --- | --- | --- | --- | --- |
+| `EU868` (incl. Norway) | 869 525 | 27 | 10 % | 250 |
+| `EU433` (new in v0.5.0) | 433 920 | 10 | 10 % | 250 |
+| `US915` | 915 000 | 30 | none (fair use) | 500 |
+| `AU915` | 915 000 | 30 | none (fair use) | 500 |
+| `IN865` | 865 000 | 30 | none | 250 |
+| `KR920` | 920 000 | 23 | none | 250 |
+| `AS923` | 923 200 | 20 | 10 % | 250 |
+
+**Defaults are the legal maxima.** On boot the firmware sets
+`tx_power_dbm = min(region.max_power_dbm, board.max_tx_power_dbm)` and configures the duty-cycle
+token bucket from the region. Board PA caps are hard limits (never exceeded, even with the
+override):
+
+| Board | Radio | PA cap |
+| --- | --- | --- |
+| Seeed T1000-E | LR1110 | 15 dBm |
+| RAK4631 solar | SX1262 | 22 dBm |
+| Seeed Solar P1 | SX1262 | 22 dBm |
+| Heltec Wireless Tracker | SX1262 | 22 dBm |
+
+**Profile validation:** a preset whose `bw_khz` exceeds `region.bw_khz` is rejected by
+`ConfigSet radio.profile` (clients get an `Event{kind:"error", detail:"profile_bw_exceeds_region_bw"}`);
+`SHORT_TURBO` (500 kHz) is therefore only selectable in US915/AU915. A region change that
+invalidates the current profile falls back to `LONG_FAST` on EU433 and `MEDIUM_FAST` elsewhere.
+
+**Override (advanced / emergency use only).** Three companion `ConfigSet` keys expose the
+regulatory override fields from `docs/design/regulatory-and-regions.md` §2.3:
+
+| Key | Meaning |
+| --- | --- |
+| `radio.duty_override` | `-1` legal region duty (default) or `0..100` %; `0` means "no transmissions". Re-configures the token bucket live. |
+| `radio.frequency` | custom centre in kHz (`0` clears). Validated against the radio range 150 000–960 000 kHz; out-of-range is rejected. |
+| `radio.tx_power` | requested power; clamped to `min(legal region max, board PA cap)` unless another override field is active, in which case it may rise to the **board PA cap only**. |
+
+When an override exceeds the legal defaults (`overrideActive()`), the firmware:
+
+* logs the full warning over the serial console once per activation,
+* emits a companion `Event{kind:"error", detail:"regulatory_override_active"}`,
+* reports `override_active=1`, `duty_pct`, `tx_power_dbm` and `frequency_khz` in the companion
+  `Stats` reply (no wire/telemetry schema change — golden vectors are unchanged).
+
+The warning string surfaced on every path is the contract text verbatim:
+
+> Regulatory override active — transmissions may violate local radio regulations and void your
+> radio's certification. Use only in a life-threatening emergency where local law permits. You
+> are responsible for compliance and for any interference or damage.
+
+Override settings (duty, power request, custom frequency, together with region/profile/mesh
+settings) are persisted to `om_cfg.bin` on an accepted `ConfigSet` and restored on the next boot;
+a corrupt or missing file falls back to board defaults. Enabling an override from the firmware
+companion API does **not** require the typed acknowledgement — the bridge/CLI/UI own that gated UX
+per the contract; the firmware companion link is a local, physical-access trust boundary (see
+`docs/architecture/COMPANION-API.md` §6). Treat the CLI/web surfaces as the acknowledgement gate
+and do not expose the raw serial/BLE link to untrusted users.
 
 ---
 
@@ -148,8 +228,9 @@ companion API; region changes need a reboot for the radio to retune.
   has no key material for the addressee. See "spec gaps" in §9.
 * **Dedup**: fixed 2048-entry ring `(src, seq)` with 30 min TTL, no heap; app-layer
   `(src, msg_ref)` replay cache for store replays.
-* **Duty cycle**: token bucket over transmitted airtime, 1 % for EU868/AS923, unlimited where the
-  region only has fair-use rules; LoRa airtime computed with the Semtech formula.
+* **Duty cycle**: token bucket over transmitted airtime using the v0.5.0 legal maxima (10 % for
+  EU868/EU433/AS923, unlimited where the region only has fair-use rules), with an optional
+  override (`radio.duty_override`); LoRa airtime computed with the Semtech formula.
 
 ### Why a hand-rolled CBOR codec?
 
@@ -191,9 +272,9 @@ Quick start with a serial terminal (or the bridge/web client):
 
 ```
 app → radio  Hello{proto:1, app_version:"...", wants_events:true}
-radio → app  HelloAck{proto:1, fw_version:"0.1.0", node_id:(8), max_frame:240,
+radio → app  HelloAck{proto:1, fw_version:"0.5.0", node_id:(8), max_frame:240,
                       caps:(u16), region:"EU868", profile:"MEDIUM_FAST"}
-radio → app  Event{kind:"boot", detail:"0.1.0"}
+radio → app  Event{kind:"boot", detail:"0.5.0"}
 radio → app  Rx{frame:(bytes), rssi:i16, snr:i16, link:"lora", at_ms:u64}
 app → radio  Tx{frame:(one whole OMP frame ≤240 B)}
 ```
@@ -204,9 +285,11 @@ Configuration keys accepted through `ConfigSet` (one key/value per message):
 | --- | --- | --- |
 | `node.name` | string ≤32 | announce display name |
 | `node.class` | `client` / `repeater` / `gateway` / `tracker` / `room_server` | reboot recommended |
-| `radio.region` | `EU868`, `US915`, `AU915`, `IN865`, `KR920`, `AS923` | reboot required |
-| `radio.profile` | `MEDIUM_FAST`, `LONG_FAST`, `LONG_SLOW`, `SHORT_FAST`, `SHORT_TURBO` | live |
-| `radio.tx_power` | `-9..22` dBm | clamped to the region maximum |
+| `radio.region` | `EU868`, `EU433`, `US915`, `AU915`, `IN865`, `KR920`, `AS923` | live retune |
+| `radio.profile` | `MEDIUM_FAST`, `LONG_FAST`, `LONG_SLOW`, `SHORT_FAST`, `SHORT_TURBO` | rejected if `bw_khz > region.bw_khz` |
+| `radio.tx_power` | `-9..30` dBm request | clamped to `min(region max, board PA cap)`; only exceeds the legal max when an override is active |
+| `radio.duty_override` | `-1` = legal region duty, `0..100` % | token bucket re-configured live; `0` blocks all TX |
+| `radio.frequency` | kHz, `0` = region centre | advanced/custom centre; out-of-radio-range rejected (150 000–960 000 kHz) |
 | `radio.frequency` | kHz (advanced) | test networks only |
 | `mesh.ttl` | `1..15` | default 5 |
 | `mesh.store` | `0`/`1` | store-and-forward on relays |
@@ -305,7 +388,13 @@ These are tracked for v0.1.x/M1 and are worth reading before trusting the firmwa
 11. **Store queue flash wear.** The queue is persisted every 5 minutes when dirty (13.4 KiB
     rewrite). Repeaters with high envelope turnover may rewrite frequently; long-term this wants
     an append-only log with wear levelling. v0.1 documents the trade-off rather than solving it.
-12. **Vectors.** All published golden vectors pass in the host suite (7/7 files, including
+12. **Regulatory override surfaces.** The firmware companion accepts override fields without the
+    typed acknowledgement required by the bridge/CLI/UI (local physical-access trust boundary).
+    The warning is surfaced as a serial log line, a companion `Event` and `Stats.override_active`;
+    it is not carried in a `Telemetry` wire field because v0.5.0 makes no wire-schema change.
+    `docs/hardware/boards.md` still carries the v0.1 region/power figures (owned by the docs
+    workstream, outside this task's write scope).
+13. **Vectors.** All published golden vectors pass in the host suite (7/7 files, including
     `seal.json` opened in both DM directions, channel sealing and a tampered-ciphertext reject;
     production sealing is covered by unit round-trips because fixed nonce prefixes are
     test-only). `vectors_are_current` in the Rust crate guards drift.
@@ -321,7 +410,7 @@ These are tracked for v0.1.x/M1 and are worth reading before trusting the firmwa
 | No serial output | USB CDC not enumerated; monitor speed | `pio device monitor -b 115200`; try the bootloader/USB-JTAG port |
 | Radio init error (`radio_error init`) | SPI pins/TCXO/RF-switch mismatch, missing power enable | Verify board build flag and `boards/<board>.cpp`; RAK4631 needs P1.05 high |
 | Announce never heard | No antenna, region mismatch, channel PSK mismatch | Attach antenna; `radio.region` via companion; check `Stats` |
-| Repeater drops frames | EU868/AS923 1 % duty budget exhausted | Expected under load; inspect `Stats.airtime_ms`/`budget_drops` |
+| Repeater drops frames | EU868/AS923 10 % duty budget exhausted | Expected under load; inspect `Stats.airtime_ms`/`budget_drops` |
 | GPS no fix | GNSS rail off, wrong baud, indoor | Check `gps.enabled`, board GNSS pins, move outdoors |
 | Companion Hello gets no reply | Wrong baud (USB CDC ignores baud but monitors), CRC/SLIP mismatch | Use the bridge/web client; verify CRC over type+len+payload |
 | Store replay not delivered | Addressee unknown to relay or offer cadence not elapsed | Wait ≥5 min or trigger a fresh announce |

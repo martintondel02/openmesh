@@ -15,6 +15,8 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 use tokio::time::Instant;
 
+use openmesh_core::OVERRIDE_WARNING;
+
 use crate::help;
 
 /// MCP protocol revision used when the client does not send one.
@@ -508,12 +510,28 @@ fn tool_catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "openmesh_set_config",
-            description: "Apply a config patch (node name/class, radio region/profile, feature toggles) live.",
+            description: "Apply a config patch (node name/class, radio region/profile, feature toggles) live. Emergency regulatory overrides are accepted as `regulatory_override` and require confirm:true when they enable or exceed the legal maxima; the result includes the warning string.",
             write: true,
             confirm: false,
             input_schema: schema(
-                json!({ "patch": { "type": "object", "description": "partial config: {node,radio,features,position}" } }),
-                &["patch"],
+                json!({
+                    "patch": { "type": "object", "description": "partial config: {node,radio,features,position}" },
+                    "regulatory_override": {
+                        "type": "object",
+                        "description": "Emergency override: {enabled, acknowledged/confirm, duty_cycle_pct, max_power_dbm, frequency_khz, reason}. Enabling/exceeding requires confirm:true; disabling is always allowed.",
+                        "properties": {
+                            "enabled": { "type": "boolean" },
+                            "acknowledged": { "type": "boolean" },
+                            "confirm": { "type": "boolean" },
+                            "duty_cycle_pct": { "type": "integer", "minimum": 0, "maximum": 100 },
+                            "max_power_dbm": { "type": "integer" },
+                            "frequency_khz": { "type": "integer" },
+                            "reason": { "type": "string", "maxLength": 120 }
+                        }
+                    },
+                    "confirm": { "type": "boolean", "description": "Required to enable the override or exceed legal maxima" }
+                }),
+                &[],
             ),
         },
         ToolDef {
@@ -1243,11 +1261,82 @@ impl McpServer {
                 ))
             }
             "openmesh_set_config" => {
-                let patch = args.get("patch").cloned().ok_or_else(|| {
-                    ToolError::new("bad_request", "patch object required", "troubleshooting")
-                })?;
-                let result = self.patch("/api/config", patch).await?;
-                Ok(ToolOutcome::new("Configuration applied.", result))
+                let patch = args.get("patch").cloned();
+                let override_patch = args
+                    .get("regulatory_override")
+                    .filter(|value| value.is_object())
+                    .cloned();
+                if patch.is_none() && override_patch.is_none() {
+                    return Err(ToolError::new(
+                        "bad_request",
+                        "pass patch and/or regulatory_override",
+                        "troubleshooting",
+                    ));
+                }
+                let mut body = patch.unwrap_or_else(|| json!({}));
+                let mut warning = None;
+                if let Some(override_patch) = override_patch {
+                    let config = self.get("/api/config").await?;
+                    let current = config
+                        .get("regulatory_override")
+                        .cloned()
+                        .unwrap_or(json!({}));
+                    let desired_enabled = override_patch
+                        .get("enabled")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or_else(|| {
+                            current
+                                .get("enabled")
+                                .and_then(|v| v.as_bool())
+                                .unwrap_or(false)
+                        });
+                    let current_enabled = current
+                        .get("enabled")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
+                    let exceeds = override_merged_exceeds_legal(&config, &current, &override_patch);
+                    let requires_confirm = desired_enabled && (!current_enabled || exceeds);
+                    if requires_confirm
+                        && args.get("confirm").and_then(|v| v.as_bool()) != Some(true)
+                    {
+                        return Err(ToolError::new(
+                            "confirm_required",
+                            format!(
+                                "openmesh_set_config wants to enable a regulatory override (exceeds legal maxima: {exceeds}). Ask the human first and retry with confirm:true. {OVERRIDE_WARNING}"
+                            ),
+                            "regulatory-and-emergency",
+                        ));
+                    }
+                    let mut merged = override_patch.clone();
+                    if let Some(object) = merged.as_object_mut() {
+                        object.insert("enabled".into(), json!(desired_enabled));
+                        if desired_enabled && requires_confirm {
+                            object.insert("acknowledged".into(), json!(true));
+                            object.remove("confirm");
+                        } else {
+                            object.remove("confirm");
+                        }
+                    }
+                    if desired_enabled {
+                        warning = Some(OVERRIDE_WARNING.to_string());
+                    }
+                    if let Some(object) = body.as_object_mut() {
+                        object.insert("regulatory_override".into(), merged);
+                    } else {
+                        body = json!({ "regulatory_override": merged });
+                    }
+                }
+                let result = self.patch("/api/config", body).await?;
+                let mut text = String::from("Configuration applied.");
+                if let Some(warning) = result
+                    .get("override_warning")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string)
+                    .or(warning)
+                {
+                    text.push_str(&format!(" Warning: {warning}"));
+                }
+                Ok(ToolOutcome::new(text, result))
             }
             "openmesh_setup_quick" => {
                 let role = required_str(args, "role")?;
@@ -1537,6 +1626,41 @@ impl ToolOutcome {
             structured,
         }
     }
+}
+
+/// Whether merging a partial override onto the current one exceeds the legal maxima.
+fn override_merged_exceeds_legal(config: &Value, current: &Value, patch: &Value) -> bool {
+    let region_name = config
+        .pointer("/legal/region")
+        .and_then(|v| v.as_str())
+        .or_else(|| config.pointer("/radio/region").and_then(|v| v.as_str()))
+        .unwrap_or("EU868");
+    let Some(region) = openmesh_core::util::REGIONS
+        .iter()
+        .find(|region| region.name.eq_ignore_ascii_case(region_name))
+    else {
+        return true;
+    };
+    let merged = |key: &str| patch.get(key).or_else(|| current.get(key));
+    if let Some(duty) = merged("duty_cycle_pct").and_then(|v| v.as_u64()) {
+        if region
+            .duty_cycle_pct
+            .is_some_and(|legal| duty > u64::from(legal))
+        {
+            return true;
+        }
+    }
+    if let Some(power) = merged("max_power_dbm").and_then(|v| v.as_i64()) {
+        if power > i64::from(region.max_power_dbm) {
+            return true;
+        }
+    }
+    if let Some(frequency) = merged("frequency_khz").and_then(|v| v.as_u64()) {
+        if frequency != u64::from(region.freq_khz) {
+            return true;
+        }
+    }
+    false
 }
 
 fn tool_result_response(id: &Value, outcome: Result<ToolOutcome, ToolError>) -> String {

@@ -475,11 +475,12 @@ bool decodeAck(const uint8_t* cbor, size_t len, Ack& out) {
             out.has_bitmap = true;
         } else if (keyIs(key, key_len, "timestamp_ms")) {
             if (!r.readUint(out.timestamp_ms)) return false;
+            have_timestamp = true;
         } else if (!r.skipValue()) {
             return false;
         }
     }
-    return r.ok() && have_kind && have_msg_id;
+    return r.ok() && have_kind && have_msg_id && have_timestamp;
 }
 
 // --- ResourceManifest ----------------------------------------------------------------------

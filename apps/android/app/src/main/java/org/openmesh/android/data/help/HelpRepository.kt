@@ -93,6 +93,7 @@ object HelpKeys {
     const val AGENTS = "agents"
     const val SECURITY = "security"
     const val TROUBLESHOOTING = "troubleshooting"
+    const val REGULATORY = "regulatory-and-emergency"
 
     /** control id -> help slug */
     val registry: Map<String, String> = linkedMapOf(
@@ -102,6 +103,9 @@ object HelpKeys {
         "settings.radio.profile" to RADIO,
         "settings.radio.region" to RADIO,
         "settings.radio.tx_power" to RADIO,
+        "settings.regulatory.legal" to REGULATORY,
+        "settings.regulatory.override" to REGULATORY,
+        "settings.regulatory.banner" to REGULATORY,
         "settings.radio.announce" to NODES,
         "settings.features.store_forward" to MESSAGING,
         "settings.features.position" to MAP,

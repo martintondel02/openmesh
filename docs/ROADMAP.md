@@ -1,6 +1,6 @@
 # OpenMesh roadmap
 
-**Status:** living document · v0.4.0 · **Last updated:** 2026-11-25
+**Status:** living document · v0.5.0 · **Last updated:** 2026-11-26
 **Calendar model:** one maintainer working with an AI agent team (DeepSeek Harness), roughly
 30–40 focused hours per week, with hardware available from M1 onward. Dates are *relative
 weeks from v0.1.0*, not promises; a 20 % buffer is included per milestone.
@@ -34,6 +34,7 @@ Related: [Architecture](architecture/ARCHITECTURE.md) ·
 | **v0.2** | Backbone mode: OBB/1 authenticated TCP relay, live control panel, installer + ops docs (ships alongside M1) | weeks 1–2 | infrastructure |
 | **v0.3** | Beginner-friendly + AI-native: guided setup, one help corpus, local MCP agent server, OpenAPI, QUICKSTART/guides | weeks 3–4 | product + developer experience |
 | **v0.4** | Android GA: on-device engine via UniFFI, BLE/USB companion sync, media/QR/notifications, shared presets; public-exposure guidance (Openflare/WireGuard/Tailscale) | weeks 5–8 (early, pulled from M2) | client + operations |
+| **v0.5** | Legal-maximum region defaults (EU/Norway audited, EU433), warning-gated regulatory override (duty/power/frequency) across core, firmware, bridge, web, Android | weeks 9–10 (early, pulled from M3) | radio compliance + resilience |
 | **M1** | Field-ready text mesh: hardware bring-up, store-forward tuning, OTA, invites, airtime caps | weeks 1–8 | hardware + tuning |
 | **M2** | Android GA + companion polish + background sync + media UX | weeks 9–20 | mobile product |
 | **M3** | OMP/2: ratchets, optional directed routing, voice calls (gated) | weeks 21–34 | protocol |
@@ -184,6 +185,33 @@ OMP/2. See M2/M3.
 **Exit criteria (met):** `cargo fmt/clippy -D warnings/test --workspace --all-targets`, web build +
 tests, firmware host vectors, docs/help/OpenAPI checkers, Android lint/unit tests/debug APK, and a
 real-device walkthrough all green.
+
+
+## 3e. v0.5 — Legal maxima and the emergency override (shipped)
+
+**Theme:** stop leaving legal radio capacity unused, and give preparedness users a documented,
+warning-gated emergency path instead of forcing them to fork the firmware.
+
+**Shipped in the v0.5.0 tree:**
+
+* Region table v2 with **legal-maximum defaults**: EU868 (incl. Norway) 27 dBm / 10 % / 250 kHz,
+  new EU433, US915/AU915 30 dBm and 500 kHz, plus IN865/KR920/AS923 updates. Profile/bandwidth
+  validation and board PA caps (SX1262 22 dBm, LR1110 15 dBm) are enforced in firmware and shared
+  with every client as a `legal` block.
+* **Regulatory override** for duty cycle, TX power and frequency: advanced-only, off by default,
+  full warning + "I understand" + typed `OVERRIDE` in web/Android, `--i-understand-risk` in the
+  CLI, `confirm: true` in MCP, activity-log audit, persistent banner, one-tap disable, hardware
+  caps absolute. Safe reductions need no acknowledgement.
+* Docs: help topic 17, `docs/guides/regulatory-and-emergency.md`, ADR 0011, implementation
+  contract, region source notes and "not legal advice / antenna EIRP" caveats.
+* No wire/protocol change; golden vectors unchanged.
+
+**Explicitly not in v0.5:** media tiers and Codec2 (approved, next release), per-country region
+split (EU/NO audited; others marked audit-pending), automatic emergency detection, "wartime"
+permissions (software cannot grant them).
+
+**Exit criteria (met):** Rust/firmware/web/Android gates incl. new override tests, docs/help/OpenAPI
+checkers, and a real-device spot-check of the override flow.
 
 ## 4. M1 — Field-ready text mesh (weeks 1–8)
 

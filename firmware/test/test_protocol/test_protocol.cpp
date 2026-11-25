@@ -13,6 +13,7 @@
 #include "test_shim.h"
 #endif
 
+#include "board.h"
 #include "openmesh/om_companion.h"
 #include "openmesh/om_dedup.h"
 #include "openmesh/om_engine.h"
@@ -97,9 +98,56 @@ Identity makeIdentity(uint8_t seed_byte) {
     return id;
 }
 
-std::unique_ptr<Node> makeNode(uint8_t seed_byte, bool relay, bool store, bool channels = false) {
-    auto node = std::unique_ptr<Node>(new Node());
-    node->id = makeIdentity(seed_byte);
+// RAM-only storage backend for config-persistence tests.
+class InMemoryStorage : public StorageBackend {
+public:
+    bool load(const char* name, uint8_t* out, size_t capacity, size_t& len) override {
+        for (const auto& file : files_) {
+            if (std::strcmp(file.name, name) != 0) continue;
+            if (file.len > capacity) return false;
+            std::memcpy(out, file.data, file.len);
+            len = file.len;
+            return true;
+        }
+        len = 0;
+        return false;
+    }
+    bool save(const char* name, const uint8_t* data, size_t len) override {
+        if (len > sizeof(File::data)) return false;
+        for (auto& file : files_) {
+            if (std::strcmp(file.name, name) == 0) {
+                std::memcpy(file.data, data, len);
+                file.len = len;
+                return true;
+            }
+        }
+        File file;
+        std::snprintf(file.name, sizeof(file.name), "%s", name);
+        std::memcpy(file.data, data, len);
+        file.len = len;
+        files_.push_back(file);
+        return true;
+    }
+    bool remove(const char* name) override {
+        for (size_t i = 0; i < files_.size(); ++i) {
+            if (std::strcmp(files_[i].name, name) == 0) {
+                files_.erase(files_.begin() + (long)i);
+                return true;
+            }
+        }
+        return false;
+    }
+
+private:
+    struct File {
+        char name[40];
+        uint8_t data[512];
+        size_t len = 0;
+    };
+    std::vector<File> files_;
+};
+
+EngineConfig defaultEngineConfig(uint8_t seed_byte, bool relay, bool store, bool channels) {
     EngineConfig config;
     config.cls = store ? NodeClass::Repeater : (relay ? NodeClass::Repeater : NodeClass::Client);
     config.name_len = (uint8_t)std::snprintf(config.name, sizeof(config.name), "node-%u",
@@ -114,11 +162,25 @@ std::unique_ptr<Node> makeNode(uint8_t seed_byte, bool relay, bool store, bool c
     config.position_sharing = true;
     config.announce_interval_ms = (uint32_t)kAnnounceIntervalClientMs;
     config.telemetry_interval_ms = 3600000;
+    config.hardware_max_power_dbm = board::kMaxTxPowerSx1262Dbm;
+    config.tx_power_dbm = effectivePowerDbm(*config.region, config.hardware_max_power_dbm,
+                                            kNoTxPowerOverrideDbm, false);
+    return config;
+}
+
+std::unique_ptr<Node> makeNodeWithConfig(uint8_t seed_byte, const EngineConfig& config,
+                                         StorageBackend* storage = nullptr) {
+    auto node = std::unique_ptr<Node>(new Node());
+    node->id = makeIdentity(seed_byte);
     static RngState rng_state;
     node->engine = new Engine();
-    TEST_ASSERT_TRUE(node->engine->begin(node->id, config, testRng, &rng_state, nullptr));
+    TEST_ASSERT_TRUE(node->engine->begin(node->id, config, testRng, &rng_state, storage));
     node->engine->start(1000);
     return node;
+}
+
+std::unique_ptr<Node> makeNode(uint8_t seed_byte, bool relay, bool store, bool channels = false) {
+    return makeNodeWithConfig(seed_byte, defaultEngineConfig(seed_byte, relay, store, channels));
 }
 
 Frame makeSealedDirectFrame(const Identity& from, const PublicIdentity& to, const NodeId& dst,
@@ -779,17 +841,19 @@ void test_airtime_and_budget() {
     TEST_ASSERT_TRUE(loraAirtimeMs(kLongSlow, 240) > loraAirtimeMs(kShortFast, 240));
     TEST_ASSERT_TRUE(loraAirtimeMs(kMediumFast, 40) < loraAirtimeMs(kMediumFast, 240));
     AirtimeBudget budget;
-    budget.configure(kRegionEu868, true);
+    budget.configure(kRegionEu868);
     TEST_ASSERT_TRUE(budget.enabled());
+    TEST_ASSERT_EQUAL_INT(10, (int)budget.dutyPct());
     budget.reset(0);
-    // 1 % of one hour = 36 s of airtime.
-    TEST_ASSERT_TRUE(budget.tryConsume(36000, 0));
+    // v2 legal EU868 duty is 10 %: 360 s of airtime per hour.
+    TEST_ASSERT_EQUAL_UINT32(360000, budget.capacityMs());
+    TEST_ASSERT_TRUE(budget.tryConsume(360000, 0));
     TEST_ASSERT_FALSE(budget.tryConsume(1, 0));
-    // Refill: 10 ms of airtime budget per second of wall clock.
-    TEST_ASSERT_TRUE(budget.tryConsume(1000, 100000));
+    // Refill: 100 ms of airtime budget per second of wall clock at 10 %.
+    TEST_ASSERT_TRUE(budget.tryConsume(10000, 100000));
     TEST_ASSERT_FALSE(budget.tryConsume(1, 100000));
     AirtimeBudget unlimited;
-    unlimited.configure(kRegionUs915, true);
+    unlimited.configure(kRegionUs915);
     TEST_ASSERT_FALSE(unlimited.enabled());
     TEST_ASSERT_TRUE(unlimited.tryConsume(1000000, 0));
     // Origination rate limit (ACKs bypass it).
@@ -1202,7 +1266,8 @@ void test_engine_config_and_companion_views() {
     TEST_ASSERT_TRUE(node->engine->applyConfig("radio.profile", "LONG_FAST"));
     TEST_ASSERT_EQUAL_STRING("LONG_FAST", node->engine->config().profile->name);
     TEST_ASSERT_TRUE(node->engine->applyConfig("radio.tx_power", "30"));
-    TEST_ASSERT_EQUAL_INT(14, node->engine->config().tx_power_dbm);  // clamped to EU868 max
+    // Legal-region ceiling 27 dBm, board PA cap 22 dBm -> 22; never 14 and never 30.
+    TEST_ASSERT_EQUAL_INT(22, node->engine->config().tx_power_dbm);
     TEST_ASSERT_FALSE(node->engine->applyConfig("nope.nope", "1"));
 
     CompanionMsg ack;
@@ -1246,4 +1311,253 @@ void test_engine_config_and_companion_views() {
     node->engine->outbox().clear();
     TEST_ASSERT_TRUE(node->engine->originateFromApp(encoded, encoded_len, 5000));
     TEST_ASSERT_EQUAL_UINT32(1, (unsigned)node->engine->outbox().size());
+}
+
+// --- Regulatory policy (v0.5.0) --------------------------------------------------------------
+namespace {
+
+const char* configValue(const CompanionMsg& msg, const char* key) {
+    for (uint8_t i = 0; i < msg.entry_count; ++i) {
+        if (std::strcmp(msg.entries[i].key, key) == 0) return msg.entries[i].value;
+    }
+    return nullptr;
+}
+
+}  // namespace
+
+void test_region_table_v2() {
+    struct RegionExpect {
+        const char* name;
+        uint32_t freq_khz;
+        int8_t max_power_dbm;
+        int8_t duty_cycle_pct;
+        uint16_t bw_khz;
+    };
+    // Hardcoded normative values (docs/design/regulatory-and-regions.md §1; core util.rs).
+    const RegionExpect expected[] = {
+        {"EU868", 869525, 27, 10, 250}, {"EU433", 433920, 10, 10, 250},
+        {"US915", 915000, 30, -1, 500}, {"AU915", 915000, 30, -1, 500},
+        {"IN865", 865000, 30, -1, 250}, {"KR920", 920000, 23, -1, 250},
+        {"AS923", 923200, 20, 10, 250},
+    };
+    for (const auto& e : expected) {
+        const Region* region = regionByName(e.name);
+        TEST_ASSERT_NOT_NULL(region);
+        TEST_ASSERT_EQUAL_STRING(e.name, region->name);
+        TEST_ASSERT_EQUAL_UINT32(e.freq_khz, region->freq_khz);
+        TEST_ASSERT_EQUAL_INT(e.max_power_dbm, (int)region->max_power_dbm);
+        TEST_ASSERT_EQUAL_INT(e.duty_cycle_pct, (int)region->duty_cycle_pct);
+        TEST_ASSERT_EQUAL_UINT16(e.bw_khz, region->bw_khz);
+    }
+    TEST_ASSERT_TRUE(&kRegionEu433 == regionByName("EU433"));
+    TEST_ASSERT_NULL(regionByName("EU999"));
+    // Region names are unique and defaultRegion() resolves to a table entry.
+    for (size_t i = 0; i < sizeof(expected) / sizeof(expected[0]); ++i) {
+        for (size_t k = i + 1; k < sizeof(expected) / sizeof(expected[0]); ++k) {
+            TEST_ASSERT_TRUE(std::strcmp(expected[i].name, expected[k].name) != 0);
+        }
+    }
+    const Region& def = defaultRegion();
+    TEST_ASSERT_NOT_NULL(regionByName(def.name));
+    // Profiles are still resolvable and their bandwidths are the presets we claim.
+    TEST_ASSERT_EQUAL_UINT16(500, profileByName("SHORT_TURBO")->bw_khz);
+    TEST_ASSERT_EQUAL_UINT16(250, profileByName("MEDIUM_FAST")->bw_khz);
+    TEST_ASSERT_EQUAL_UINT16(125, profileByName("LONG_SLOW")->bw_khz);
+}
+
+void test_profile_bandwidth_validation() {
+    // SHORT_TURBO (500 kHz) is legal only in the 500 kHz regions (US915/AU915).
+    for (const char* name : {"EU868", "EU433", "IN865", "KR920", "AS923"}) {
+        const Region* region = regionByName(name);
+        TEST_ASSERT_FALSE(profileFitsRegion(*profileByName("SHORT_TURBO"), *region));
+        TEST_ASSERT_TRUE(profileFitsRegion(*profileByName("MEDIUM_FAST"), *region));
+        TEST_ASSERT_TRUE(profileFitsRegion(*profileByName("LONG_FAST"), *region));
+    }
+    for (const char* name : {"US915", "AU915"}) {
+        const Region* region = regionByName(name);
+        TEST_ASSERT_TRUE(profileFitsRegion(*profileByName("SHORT_TURBO"), *region));
+        TEST_ASSERT_TRUE(profileFitsRegion(*profileByName("MEDIUM_FAST"), *region));
+    }
+    // Engine rejects an illegal profile instead of silently clamping it.
+    auto node = makeNode(0x72, false, false);
+    TEST_ASSERT_FALSE(node->engine->applyConfig("radio.profile", "SHORT_TURBO"));
+    TEST_ASSERT_EQUAL_STRING("MEDIUM_FAST", node->engine->config().profile->name);
+    TEST_ASSERT_TRUE(node->engine->applyConfig("radio.region", "US915"));
+    TEST_ASSERT_TRUE(node->engine->applyConfig("radio.profile", "SHORT_TURBO"));
+    TEST_ASSERT_EQUAL_STRING("SHORT_TURBO", node->engine->config().profile->name);
+    // A region change that invalidates the profile falls back safely (LONG_FAST on EU433).
+    TEST_ASSERT_TRUE(node->engine->applyConfig("radio.region", "EU433"));
+    TEST_ASSERT_EQUAL_STRING("LONG_FAST", node->engine->config().profile->name);
+    TEST_ASSERT_EQUAL_STRING("EU433", node->engine->config().region->name);
+    TEST_ASSERT_FALSE(node->engine->applyConfig("radio.region", "NOPE"));
+}
+
+void test_board_power_caps() {
+    // Single source of truth: firmware/boards/board.h kPaCaps[].
+    TEST_ASSERT_EQUAL_INT(15, board::paCapForBoard("t1000e")->max_tx_power_dbm);
+    TEST_ASSERT_EQUAL_INT(22, board::paCapForBoard("rak4631_solar")->max_tx_power_dbm);
+    TEST_ASSERT_EQUAL_INT(22, board::paCapForBoard("seeed_solar")->max_tx_power_dbm);
+    TEST_ASSERT_EQUAL_INT(22, board::paCapForBoard("heltec_tracker")->max_tx_power_dbm);
+    TEST_ASSERT_NULL(board::paCapForBoard("nope"));
+    TEST_ASSERT_NULL(board::paCapForBoard(nullptr));
+    TEST_ASSERT_EQUAL_INT(4, (int)board::kPaCapCount);
+    // Default TX power is min(legal region max, board PA cap) for every board.
+    const char* board_ids[] = {"t1000e", "rak4631_solar", "seeed_solar", "heltec_tracker"};
+    for (const char* id : board_ids) {
+        const int8_t cap = board::paCapForBoard(id)->max_tx_power_dbm;
+        struct Case {
+            const Region* region;
+            int8_t expected;
+        };
+        const Case cases[] = {
+            {&kRegionEu868, (int8_t)(cap < 27 ? cap : 27)},
+            {&kRegionEu433, (int8_t)(cap < 10 ? cap : 10)},
+            {&kRegionUs915, (int8_t)(cap < 30 ? cap : 30)},
+            {&kRegionKr920, (int8_t)(cap < 23 ? cap : 23)},
+            {&kRegionAs923, (int8_t)(cap < 20 ? cap : 20)},
+        };
+        for (const Case& c : cases) {
+            TEST_ASSERT_EQUAL_INT(c.expected,
+                                  effectivePowerDbm(*c.region, cap, kNoTxPowerOverrideDbm, false));
+        }
+    }
+}
+
+void test_effective_power_policy() {
+    // Effective power is min(region legal max, board PA cap); an active override may rise only
+    // up to the PA cap, never above it.
+    TEST_ASSERT_EQUAL_INT(22, effectivePowerDbm(kRegionEu868, 22, kNoTxPowerOverrideDbm, false));
+    TEST_ASSERT_EQUAL_INT(15, effectivePowerDbm(kRegionEu868, 15, kNoTxPowerOverrideDbm, false));
+    TEST_ASSERT_EQUAL_INT(10, effectivePowerDbm(kRegionEu433, 22, kNoTxPowerOverrideDbm, false));
+    // Under an override the power request may exceed the legal region max; only the PA cap
+    // is absolute (contract §2.2: power = min(override request, hardware max)).
+    TEST_ASSERT_EQUAL_INT(22, effectivePowerDbm(kRegionEu433, 22, 30, true));
+    TEST_ASSERT_EQUAL_INT(22, effectivePowerDbm(kRegionUs915, 22, 30, true));
+    TEST_ASSERT_EQUAL_INT(22, effectivePowerDbm(kRegionEu868, 22, 30, true));
+    TEST_ASSERT_EQUAL_INT(15, effectivePowerDbm(kRegionEu868, 15, 30, true));
+    // Without an active override, requests above the legal max are clamped to the legal max.
+    TEST_ASSERT_EQUAL_INT(22, effectivePowerDbm(kRegionEu868, 22, 30, false));
+    TEST_ASSERT_EQUAL_INT(15, effectivePowerDbm(kRegionEu868, 15, 30, false));
+    // Reductions are always honoured, and -9 dBm is the radio floor.
+    TEST_ASSERT_EQUAL_INT(10, effectivePowerDbm(kRegionEu868, 22, 10, false));
+    TEST_ASSERT_EQUAL_INT(-9, effectivePowerDbm(kRegionEu868, 22, -9, false));
+    // Override legality is judged from duty/frequency requests (contract §2.1).
+    TEST_ASSERT_FALSE(overrideExceedsLegal(kRegionEu868, -1, 0));
+    TEST_ASSERT_FALSE(overrideExceedsLegal(kRegionEu868, 10, kRegionEu868.freq_khz));
+    TEST_ASSERT_FALSE(overrideExceedsLegal(kRegionEu868, 5, 0));   // reducing duty is legal
+    TEST_ASSERT_TRUE(overrideExceedsLegal(kRegionEu868, 50, 0));
+    TEST_ASSERT_TRUE(overrideExceedsLegal(kRegionEu868, -1, 869000));
+    TEST_ASSERT_FALSE(overrideExceedsLegal(kRegionUs915, 100, 0));  // fair-use: no legal %
+}
+
+void test_duty_override_policy() {
+    TEST_ASSERT_EQUAL_INT(10, (int)effectiveDutyPct(kRegionEu868, -1));
+    TEST_ASSERT_EQUAL_INT(-1, (int)effectiveDutyPct(kRegionUs915, -1));
+    TEST_ASSERT_EQUAL_INT(0, (int)effectiveDutyPct(kRegionEu868, 0));
+    TEST_ASSERT_EQUAL_INT(100, (int)effectiveDutyPct(kRegionEu868, 100));
+    TEST_ASSERT_EQUAL_INT(100, (int)effectiveDutyPct(kRegionEu868, 150));  // clamped
+    AirtimeBudget legal;
+    legal.configure(kRegionEu868);
+    TEST_ASSERT_TRUE(legal.enabled());
+    TEST_ASSERT_FALSE(legal.blocksAllTx());
+    TEST_ASSERT_EQUAL_UINT32(360000, legal.capacityMs());
+    AirtimeBudget full;
+    full.configure(kRegionEu868, 100);
+    TEST_ASSERT_EQUAL_INT(100, (int)full.dutyPct());
+    TEST_ASSERT_EQUAL_UINT32(3600000, full.capacityMs());  // 100 % of an hour
+    full.reset(0);
+    TEST_ASSERT_TRUE(full.tryConsume(3600000, 0));
+    TEST_ASSERT_FALSE(full.tryConsume(1, 0));
+    AirtimeBudget silent;
+    silent.configure(kRegionEu868, 0);
+    TEST_ASSERT_TRUE(silent.enabled());
+    TEST_ASSERT_TRUE(silent.blocksAllTx());
+    TEST_ASSERT_EQUAL_UINT32(0, silent.capacityMs());
+    TEST_ASSERT_FALSE(silent.tryConsume(1, 0));
+    AirtimeBudget reduced;
+    reduced.configure(kRegionEu868, 5);
+    TEST_ASSERT_EQUAL_UINT32(180000, reduced.capacityMs());
+    // Fair-use regions stay unlimited unless an override imposes a limit.
+    AirtimeBudget fair;
+    fair.configure(kRegionUs915);
+    TEST_ASSERT_FALSE(fair.enabled());
+    TEST_ASSERT_TRUE(fair.tryConsume(1000000, 0));
+    fair.configure(kRegionUs915, 0);
+    TEST_ASSERT_TRUE(fair.enabled());
+    TEST_ASSERT_TRUE(fair.blocksAllTx());
+}
+
+void test_frequency_override_and_config() {
+    TEST_ASSERT_TRUE(validateFrequencyKhz(150000));
+    TEST_ASSERT_TRUE(validateFrequencyKhz(433920));
+    TEST_ASSERT_TRUE(validateFrequencyKhz(869525));
+    TEST_ASSERT_TRUE(validateFrequencyKhz(960000));
+    TEST_ASSERT_FALSE(validateFrequencyKhz(149999));
+    TEST_ASSERT_FALSE(validateFrequencyKhz(960001));
+    TEST_ASSERT_FALSE(validateFrequencyKhz(0));  // 0 means "clear override", not a frequency
+    TEST_ASSERT_EQUAL_UINT32(869525, effectiveFrequencyKhz(kRegionEu868, 0));
+    TEST_ASSERT_EQUAL_UINT32(433920, effectiveFrequencyKhz(kRegionEu868, 433920));
+
+    auto node = makeNode(0x73, false, false);
+    TEST_ASSERT_TRUE(node->engine->applyConfig("radio.frequency", "433920"));
+    TEST_ASSERT_EQUAL_UINT32(433920, node->engine->config().frequency_override_khz);
+    TEST_ASSERT_EQUAL_UINT32(433920, node->engine->effectiveFrequencyKhzValue());
+    TEST_ASSERT_FALSE(node->engine->applyConfig("radio.frequency", "149999"));
+    TEST_ASSERT_FALSE(node->engine->applyConfig("radio.frequency", "960001"));
+    TEST_ASSERT_TRUE(node->engine->applyConfig("radio.frequency", "0"));
+    TEST_ASSERT_EQUAL_UINT32(0, node->engine->config().frequency_override_khz);
+    // Duty override keys and their reflection in companion Config/Stats.
+    TEST_ASSERT_FALSE(node->engine->applyConfig("radio.duty_override", "101"));
+    TEST_ASSERT_FALSE(node->engine->applyConfig("radio.duty_override", "-2"));
+    TEST_ASSERT_TRUE(node->engine->applyConfig("radio.duty_override", "100"));
+    TEST_ASSERT_EQUAL_INT(100, (int)node->engine->config().duty_override_pct);
+    TEST_ASSERT_TRUE(node->engine->overrideActive());
+    TEST_ASSERT_EQUAL_STRING(kRegulatoryOverrideWarning, node->engine->overrideWarning());
+    CompanionMsg config;
+    node->engine->fillConfig(config);
+    TEST_ASSERT_EQUAL_STRING("100", configValue(config, "radio.duty_override"));
+    TEST_ASSERT_EQUAL_STRING("0", configValue(config, "radio.frequency"));
+    CompanionMsg stats;
+    node->engine->fillStats(stats);
+    TEST_ASSERT_EQUAL_STRING("1", configValue(stats, "override_active"));
+    TEST_ASSERT_EQUAL_STRING("100", configValue(stats, "duty_pct"));
+    TEST_ASSERT_EQUAL_STRING("22", configValue(stats, "tx_power_dbm"));
+    // Clearing the override returns to the legal duty and legal-max power.
+    TEST_ASSERT_TRUE(node->engine->applyConfig("radio.duty_override", "-1"));
+    TEST_ASSERT_FALSE(node->engine->overrideActive());
+    TEST_ASSERT_NULL(node->engine->overrideWarning());
+    CompanionMsg stats_after;
+    node->engine->fillStats(stats_after);
+    TEST_ASSERT_EQUAL_STRING("10", configValue(stats_after, "duty_pct"));
+    TEST_ASSERT_EQUAL_STRING("0", configValue(stats_after, "override_active"));
+}
+
+void test_regulatory_override_persistence() {
+    InMemoryStorage storage;
+    {
+        auto node = makeNodeWithConfig(0x81, defaultEngineConfig(0x81, false, false, false),
+                                       &storage);
+        TEST_ASSERT_TRUE(node->engine->applyConfig("radio.duty_override", "100"));
+        TEST_ASSERT_TRUE(node->engine->applyConfig("radio.tx_power", "30"));
+        TEST_ASSERT_TRUE(node->engine->applyConfig("radio.frequency", "869000"));
+        TEST_ASSERT_TRUE(node->engine->overrideActive());
+        TEST_ASSERT_EQUAL_INT(22, node->engine->config().tx_power_dbm);  // board cap
+    }
+    // A fresh boot with the same storage restores the override and policy.
+    auto restored = makeNodeWithConfig(0x82, defaultEngineConfig(0x82, false, false, false),
+                                       &storage);
+    TEST_ASSERT_EQUAL_INT(100, (int)restored->engine->config().duty_override_pct);
+    TEST_ASSERT_EQUAL_INT(30, (int)restored->engine->config().power_override_dbm);
+    TEST_ASSERT_EQUAL_UINT32(869000, restored->engine->config().frequency_override_khz);
+    TEST_ASSERT_TRUE(restored->engine->overrideActive());
+    TEST_ASSERT_EQUAL_INT(100, (int)restored->engine->effectiveDutyPctValue());
+    TEST_ASSERT_EQUAL_INT(22, restored->engine->config().tx_power_dbm);
+    TEST_ASSERT_NOT_NULL(restored->engine->overrideWarning());
+    // Disable in two steps (frequency, then duty); policy returns to the legal maxima.
+    TEST_ASSERT_TRUE(restored->engine->applyConfig("radio.frequency", "0"));
+    TEST_ASSERT_TRUE(restored->engine->applyConfig("radio.duty_override", "-1"));
+    TEST_ASSERT_FALSE(restored->engine->overrideActive());
+    TEST_ASSERT_NULL(restored->engine->overrideWarning());
+    TEST_ASSERT_EQUAL_INT(10, (int)restored->engine->effectiveDutyPctValue());
+    TEST_ASSERT_EQUAL_INT(22, restored->engine->config().tx_power_dbm);
 }

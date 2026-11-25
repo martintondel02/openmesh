@@ -307,11 +307,16 @@ pub fn recommend(country: Option<&str>, role: Option<&str>, current: &ConfigJson
             ));
         }
     }
+    let legal = region_info(&region)
+        .map(crate::json::LegalRegionJson::for_region)
+        .and_then(|legal| serde_json::to_value(legal).ok())
+        .unwrap_or(Value::Null);
     json!({
         "country": country,
         "role": role,
         "region": region,
         "profile": preset.profile,
+        "legal": legal,
         "store_forward": preset.store_forward,
         "position_sharing": preset.position_sharing,
         "announce_interval_s": preset.announce_interval_s,
@@ -379,6 +384,8 @@ pub async fn state(
     let radios_connected = !snapshot.radios.is_empty();
     let channel_count = snapshot.store.channels;
     let recommended = recommend(None, None, &snapshot.config);
+    let override_json = snapshot.config.regulatory_override.clone();
+    let override_active = override_json.enabled;
     let checks = json!({
         "identity": {
             "ok": !snapshot.node_id.is_empty(),
@@ -422,7 +429,14 @@ pub async fn state(
             "region": recommended["region"],
             "profile": recommended["profile"],
             "role": recommended["role"],
+            "legal": recommended["legal"],
         },
+        "regulatory_override": {
+            "enabled": override_json.enabled,
+            "acknowledged": override_json.acknowledged,
+        },
+        "override_active": override_active,
+        "override_warning": override_json.warning(),
         "counts": {
             "nodes": snapshot.nodes.len(),
             "messages": snapshot.store.messages,

@@ -37,6 +37,12 @@ data class LocalPrefs(
     val demoMode: Boolean = false,
     val identityCiphertext: String? = null,
     val engineStateB64: String? = null,
+    val overrideEnabled: Boolean = false,
+    val overrideAcknowledged: Boolean = false,
+    val overrideDutyPct: Int? = null,
+    val overridePowerDbm: Int? = null,
+    val overrideFreqKhz: Long? = null,
+    val overrideReason: String? = null,
 )
 
 /** DataStore-backed app preferences and identity ciphertext (never the raw seed). */
@@ -57,6 +63,12 @@ class AppPreferences(private val context: Context) {
         val demoMode = booleanPreferencesKey("demo_mode")
         val identityCiphertext = stringPreferencesKey("identity_ciphertext")
         val engineState = stringPreferencesKey("engine_state_b64")
+        val overrideEnabled = booleanPreferencesKey("override_enabled")
+        val overrideAcknowledged = booleanPreferencesKey("override_acknowledged")
+        val overrideDuty = intPreferencesKey("override_duty_pct")
+        val overridePower = intPreferencesKey("override_power_dbm")
+        val overrideFreq = longPreferencesKey("override_frequency_khz")
+        val overrideReason = stringPreferencesKey("override_reason")
     }
 
     val prefs: Flow<LocalPrefs> = context.dataStore.data.map { p ->
@@ -76,6 +88,12 @@ class AppPreferences(private val context: Context) {
             demoMode = p[Keys.demoMode] ?: false,
             identityCiphertext = p[Keys.identityCiphertext],
             engineStateB64 = p[Keys.engineState],
+            overrideEnabled = p[Keys.overrideEnabled] ?: false,
+            overrideAcknowledged = p[Keys.overrideAcknowledged] ?: false,
+            overrideDutyPct = p[Keys.overrideDuty],
+            overridePowerDbm = p[Keys.overridePower],
+            overrideFreqKhz = p[Keys.overrideFreq],
+            overrideReason = p[Keys.overrideReason],
         )
     }
 
@@ -96,6 +114,22 @@ class AppPreferences(private val context: Context) {
     suspend fun setDemoMode(value: Boolean) = edit { it[Keys.demoMode] = value }
 
     suspend fun setIdentityCiphertext(value: String) = edit { it[Keys.identityCiphertext] = value }
+
+    suspend fun setOverride(
+        enabled: Boolean,
+        acknowledged: Boolean,
+        dutyPct: Int?,
+        powerDbm: Int?,
+        freqKhz: Long?,
+        reason: String?,
+    ) = edit { prefs ->
+        prefs[Keys.overrideEnabled] = enabled
+        prefs[Keys.overrideAcknowledged] = acknowledged
+        if (dutyPct != null) prefs[Keys.overrideDuty] = dutyPct else prefs.remove(Keys.overrideDuty)
+        if (powerDbm != null) prefs[Keys.overridePower] = powerDbm else prefs.remove(Keys.overridePower)
+        if (freqKhz != null) prefs[Keys.overrideFreq] = freqKhz else prefs.remove(Keys.overrideFreq)
+        if (reason != null) prefs[Keys.overrideReason] = reason else prefs.remove(Keys.overrideReason)
+    }
     suspend fun setEngineState(bytes: ByteArray) =
         edit { it[Keys.engineState] = Base64.encodeToString(bytes, Base64.NO_WRAP) }
 
@@ -113,5 +147,6 @@ class AppPreferences(private val context: Context) {
         val PROFILES = listOf("LONG_SLOW", "LONG_FAST", "MEDIUM_FAST", "SHORT_FAST", "SHORT_TURBO")
         val REGIONS = listOf("EU868", "US915", "AU915", "IN865", "KR920", "AS923")
         val ROLES = listOf("client", "tracker", "repeater", "gateway")
+        val REGIONS_V2 = listOf("EU868", "EU433", "US915", "AU915", "IN865", "KR920", "AS923")
     }
 }

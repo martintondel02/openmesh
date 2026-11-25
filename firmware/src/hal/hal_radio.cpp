@@ -18,7 +18,7 @@ using RadioLibRadio = SX1262;
 #endif
 
 bool Radio::begin(const board::Board& board, const LoraProfile& profile, const Region& region,
-                  int8_t tx_power_dbm) {
+                  int8_t tx_power_dbm, uint32_t frequency_override_khz) {
     board_ = &board;
     if (board.radio.power_en >= 0) {
         pinMode((uint32_t)board.radio.power_en, OUTPUT);
@@ -32,16 +32,22 @@ bool Radio::begin(const board::Board& board, const LoraProfile& profile, const R
     auto* radio = new RadioLibRadio(module);
     module_ = module;
     radio_ = radio;
-    if (!applyConfig(profile, region, tx_power_dbm)) return false;
+    if (!applyConfig(profile, region, tx_power_dbm, frequency_override_khz)) return false;
     startReceive();
     ok_ = true;
     return true;
 }
 
-bool Radio::applyConfig(const LoraProfile& profile, const Region& region, int8_t tx_power_dbm) {
+bool Radio::applyConfig(const LoraProfile& profile, const Region& region, int8_t tx_power_dbm,
+                        uint32_t frequency_override_khz) {
     auto* radio = static_cast<RadioLibRadio*>(radio_);
     if (radio == nullptr) return false;
-    const float freq_mhz = (float)region.freq_khz / 1000.0f;
+    // Advance/test-network custom centre (already range-validated by the engine); 0 = region
+    // default. Never silently ignore a requested frequency.
+    const uint32_t freq_khz =
+        frequency_override_khz != 0 ? frequency_override_khz : region.freq_khz;
+    if (freq_khz < kRadioMinFrequencyKhz || freq_khz > kRadioMaxFrequencyKhz) return false;
+    const float freq_mhz = (float)freq_khz / 1000.0f;
     int8_t power = tx_power_dbm;
     if (power > region.max_power_dbm) power = region.max_power_dbm;
     if (power < -9) power = -9;
@@ -68,8 +74,9 @@ bool Radio::applyConfig(const LoraProfile& profile, const Region& region, int8_t
     return true;
 }
 
-bool Radio::reconfigure(const LoraProfile& profile, const Region& region, int8_t tx_power_dbm) {
-    return applyConfig(profile, region, tx_power_dbm);
+bool Radio::reconfigure(const LoraProfile& profile, const Region& region, int8_t tx_power_dbm,
+                        uint32_t frequency_override_khz) {
+    return applyConfig(profile, region, tx_power_dbm, frequency_override_khz);
 }
 
 bool Radio::transmit(const uint8_t* data, size_t len) {
@@ -115,8 +122,10 @@ void Radio::sleep() {
 
 #else
 // Host build: no radio hardware.
-bool Radio::begin(const board::Board&, const LoraProfile&, const Region&, int8_t) { return false; }
-bool Radio::reconfigure(const LoraProfile&, const Region&, int8_t) { return false; }
+bool Radio::begin(const board::Board&, const LoraProfile&, const Region&, int8_t, uint32_t) {
+    return false;
+}
+bool Radio::reconfigure(const LoraProfile&, const Region&, int8_t, uint32_t) { return false; }
 bool Radio::transmit(const uint8_t*, size_t) { return false; }
 int Radio::receive(uint8_t*, size_t, int16_t&, int16_t&) { return 0; }
 void Radio::startReceive() {}

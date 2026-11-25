@@ -84,7 +84,7 @@ envelopes) and reject what makes life hard on a 240-byte MTU: global routing sta
 per message, and client stacks nobody wants to use. Details and trade-offs:
 [ADR-0001](docs/adr/0001-own-protocol-vs-reticulum.md), [research notes](docs/research/).
 
-## Feature status (v0.4.0)
+## Feature status (v0.5.0)
 
 | Area | Status |
 | --- | --- |
@@ -99,6 +99,8 @@ per message, and client stacks nobody wants to use. Details and trade-offs:
 | **AI-native** (MCP server, 27 agent tools, activity log, OpenAPI 3.1, prompt pack) | ✅ v0.3 |
 | **Android app** (on-device Rust engine via UniFFI, BLE/USB, images, voice, QR, notifications) | ✅ v0.4 |
 | **Public exposure guidance** (Openflare tunnel, WireGuard/Tailscale/TLS alternatives) | ✅ v0.4 |
+| **Legal-maximum region defaults** (EU/Norway audited, EU433, bandwidth validation) | ✅ v0.5 |
+| **Regulatory override** (duty/power/frequency, warning + typed confirmation + audit) | ✅ v0.5 |
 | Web / PWA client (chat, groups, map, voice, images, demo mode) | ✅ |
 | Desktop packaging (Tauri 2, Linux/macOS/Windows) | ✅ config; build needs system webkit2gtk/WebView deps |
 | Firmware: 4 reference boards + golden-vector conformance | ✅ code complete, build matrix in CI |
@@ -290,6 +292,34 @@ adb install openmesh-v0.4.0-android-debug.apk
 | Radio link | Settings (advanced) | Invite QR |
 | --- | --- | --- |
 | ![Android radio](docs/assets/screenshots/android-radio.jpg) | ![Android settings](docs/assets/screenshots/android-settings.jpg) | ![Android invite](docs/assets/screenshots/android-onboarding-invite.jpg) |
+
+## Legal limits and emergency override (v0.5)
+
+Radio is regulated, and defaults matter. Since v0.5 OpenMesh ships **legal-maximum region
+defaults** instead of conservative ones: for most of Europe and Norway, `EU868` now defaults to
+**27 dBm EIRP / 10 % duty cycle** in the 869.4–869.65 MHz sub-band (the old 14 dBm / 1 % values
+were a hybrid of the 868.0–868.6 MHz rules — about 10× less airtime and 13 dB less link budget
+than the law permits). A new `EU433` region is available, and profiles wider than a region's
+legal bandwidth (e.g. 500 kHz `SHORT_TURBO` in `EU868`) are rejected.
+
+For genuine emergencies there is a **regulatory override** — advanced mode only, off by default,
+for duty cycle, TX power and frequency. It shows a full warning, requires an "I understand"
+checkbox and typing `OVERRIDE`, keeps a persistent red banner and an activity-log entry, and is
+one tap to disable. Hardware PA caps still apply (22 dBm SX1262, 15 dBm LR1110), so it cannot damage
+the radio. Lowering power/duty never needs the override.
+
+> **Not legal advice.** Region values are EIRP ceilings (antenna gain counts) and rules differ by
+> country. Verify with your regulator (Nkom in Norway) before deploying. "Wartime" is not a legal
+> permission software can grant; no blanket emergency waiver exists.
+
+| Regulatory override modal (advanced) | Legal maxima in advanced settings |
+| --- | --- |
+| ![Regulatory override](docs/assets/screenshots/regulatory-override.jpg) | ![Legal maxima](docs/assets/screenshots/regulatory-legal-maxima.jpg) |
+
+Guides: [legal limits and emergency override](docs/guides/regulatory-and-emergency.md) ·
+[help topic](content/help/regulatory-and-emergency.md) ·
+[ADR 0011](docs/adr/0011-regulatory-override.md) ·
+[implementation contract](docs/design/regulatory-and-regions.md)
 
 ## Repository layout
 

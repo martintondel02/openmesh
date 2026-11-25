@@ -680,22 +680,26 @@ fn bad_request(message: &str) -> HttpResponse {
 
 /// Map an engine command error to an HTTP response with the MCP-style code/help_topic fields.
 fn command_error_response(error: CommandError) -> HttpResponse {
+    let regulatory = error.code.starts_with("regulatory_override_");
     let status = match error.code.as_str() {
         "bad_request" => 400,
         "not_found" | "unknown_peer" => 404,
         "radio_busy" => 409,
         "unavailable" | "timeout" => 503,
+        // Regulatory gating and profile/region legality are validation failures (contract §2.3).
+        _ if regulatory || error.code == "profile_not_allowed_in_region" => 422,
         _ => 400,
     };
-    HttpResponse::json(
-        status,
-        serde_json::json!({
-            "error": error.code,
-            "code": error.code,
-            "message": error.message,
-            "help_topic": help_topic_for_code(&error.code),
-        }),
-    )
+    let mut body = serde_json::json!({
+        "error": error.code,
+        "code": error.code,
+        "message": error.message,
+        "help_topic": help_topic_for_code(&error.code),
+    });
+    if regulatory {
+        body["warning"] = serde_json::json!(openmesh_core::OVERRIDE_WARNING);
+    }
+    HttpResponse::json(status, body)
 }
 
 fn help_topic_for_code(code: &str) -> &'static str {
@@ -705,6 +709,8 @@ fn help_topic_for_code(code: &str) -> &'static str {
         "radio_busy" | "radio_unavailable" => "radio-and-region",
         "timeout" | "unavailable" | "internal" => "troubleshooting",
         "confirm_required" => "agents",
+        "profile_not_allowed_in_region" => "radio-and-region",
+        code if code.starts_with("regulatory_override_") => "regulatory-and-emergency",
         _ => "getting-started",
     }
 }
@@ -776,7 +782,41 @@ fn summarize_activity(request: &HttpRequest) -> String {
         ),
         ("POST", "/api/position") => "share position".to_string(),
         ("POST", "/api/announce") => "announce".to_string(),
-        ("PATCH", "/api/config") | ("POST", "/api/config") => "update config".to_string(),
+        ("PATCH", "/api/config") | ("POST", "/api/config") => {
+            let override_patch = body
+                .as_ref()
+                .and_then(|body| body.get("regulatory_override"))
+                .filter(|value| value.is_object());
+            match override_patch {
+                Some(patch) => {
+                    let enabled = patch.get("enabled").and_then(|v| v.as_bool());
+                    let mut summary = String::from("regulatory override");
+                    if let Some(enabled) = enabled {
+                        summary.push_str(&format!(" enabled={enabled}"));
+                    }
+                    if let Some(duty) = patch.get("duty_cycle_pct").and_then(|v| v.as_u64()) {
+                        summary.push_str(&format!(" duty={duty}%"));
+                    }
+                    if let Some(power) = patch.get("max_power_dbm").and_then(|v| v.as_i64()) {
+                        summary.push_str(&format!(" power={power}dBm"));
+                    }
+                    if let Some(frequency) = patch.get("frequency_khz").and_then(|v| v.as_u64()) {
+                        summary.push_str(&format!(" frequency={frequency}kHz"));
+                    }
+                    if patch.get("acknowledged").and_then(|v| v.as_bool()) == Some(true)
+                        || patch.get("confirm").and_then(|v| v.as_bool()) == Some(true)
+                    {
+                        summary.push_str(" acknowledged=true");
+                    }
+                    if let Some(reason) = patch.get("reason").and_then(|v| v.as_str()) {
+                        let reason: String = reason.chars().take(80).collect();
+                        summary.push_str(&format!(" reason={reason:?}"));
+                    }
+                    summary
+                }
+                None => "update config".to_string(),
+            }
+        }
         ("POST", "/api/channels") => {
             format!("create channel {}", text("name").unwrap_or("?"))
         }

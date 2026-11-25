@@ -1,12 +1,13 @@
 /**
  * Wire types for the OpenMesh Bridge API.
  *
- * Normative source: `docs/architecture/WEBSOCKET-API.md` (v0.4.0).
+ * Normative source: `docs/architecture/WEBSOCKET-API.md` (v0.5.0).
  * Field names here are copied verbatim from the spec — do not rename them.
  * Per spec §7, clients MUST ignore unknown event types and unknown fields.
  */
 
 import type { BackboneConfig, BackbonePeerEvent, BackboneStatusEvent, BackboneTokenEvent } from './backbone';
+import type { LegalLimits, RegulatoryOverride } from './regulatory';
 
 /** Every WS message in either direction (spec §2). */
 export interface Envelope<T = unknown> {
@@ -90,6 +91,9 @@ export interface StatusData {
     duty_cycle_pct: number;
   };
   storage: { used_bytes: number; db_path: string };
+  /** v0.5 regulatory override status (optional; top-level per the design contract). */
+  regulatory_override_active?: boolean;
+  regulatory_override_warning?: string | null;
 }
 
 export interface NodeData {
@@ -212,6 +216,10 @@ export interface ConfigData {
     tx_power_dbm: number;
     frequency_mhz?: number | null;
     interface?: string | null;
+    /** v0.5 legal maxima mirrored on the radio block. */
+    max_power_dbm?: number | null;
+    duty_cycle_pct?: number | null;
+    max_bw_khz?: number | null;
   };
   features: {
     auto_announce: boolean;
@@ -223,6 +231,12 @@ export interface ConfigData {
   channels: ConfigChannel[];
   /** Optional backbone section pushed with `config` after set_backbone_config (BACKBONE.md §7.2). */
   backbone?: BackboneConfig;
+  /** v0.5 legal maxima for the selected region (optional for older bridges). */
+  legal?: LegalLimits | null;
+  /** v0.5 emergency override state; absent on older bridges. */
+  regulatory_override?: RegulatoryOverride | null;
+  override_active?: boolean;
+  override_warning?: string | null;
 }
 
 export interface ContactData {
