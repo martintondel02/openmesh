@@ -16,11 +16,15 @@
 //! # Ok(()) }
 //! ```
 
+pub mod activity;
 pub mod attachments;
 pub mod demo;
+pub mod help;
 pub mod http;
 pub mod json;
+pub mod mcp;
 pub mod runtime;
+pub mod setup;
 pub mod store;
 pub mod token;
 pub mod transport;
@@ -390,6 +394,7 @@ impl Bridge {
         }
 
         // 9. HTTP/WS API server (listener bound early above).
+        let activity = Arc::new(crate::activity::ActivityLog::new());
         let web_root = http::resolve_web_root(options.serve_web.clone());
         if let Some(root) = &web_root {
             tracing::info!(path = %root.display(), "serving web client");
@@ -398,6 +403,7 @@ impl Bridge {
             token: Arc::new(token.clone()),
             shared: shared.clone(),
             backbone: backbone.clone(),
+            activity: activity.clone(),
             web_root,
             shutdown: shutdown_rx.clone(),
         });

@@ -30,7 +30,11 @@ for rel in REQUIRED:
         problems.append(f"missing required document: {rel}")
 
 for md in ROOT.rglob("*.md"):
-    if any(part in {".git", "node_modules", "target", ".pio", "build"} for part in md.parts):
+    skip_parts = {".git", "node_modules", "target", ".pio", "build", "dist"}
+    if any(part in skip_parts for part in md.parts):
+        continue
+    # generated copies of embedded content (help corpus is checked at the source by check_help.py)
+    if md.as_posix().endswith("/public/help/" + md.name) or "/public/help/" in md.as_posix():
         continue
     text = md.read_text(encoding="utf-8", errors="ignore")
     for target in LINK_RE.findall(text):

@@ -27,6 +27,7 @@ import { formatBackboneUptime } from '../lib/backbone';
 import { formatRelativeTime, cn } from '../lib/utils';
 import { Badge, Button } from '../components/ui/primitives';
 import { Callout } from '../components/ui/forms';
+import { HelpLink, HelpTip } from '../components/ui/help';
 import { BackboneStats } from './backbone/BackboneStats';
 import { BackbonePeers } from './backbone/BackbonePeers';
 import { BackboneControls } from './backbone/BackboneControls';
@@ -49,6 +50,8 @@ export function BackboneScreen() {
   const setup = useAppStore((state) => state.backboneSetup);
   const sessionToken = useAppStore((state) => state.backboneSessionToken);
   const tokenFresh = useAppStore((state) => state.backboneTokenFresh);
+  const uiMode = useAppStore((state) => state.uiMode);
+  const setUiMode = useAppStore((state) => state.setUiMode);
   const ownNodeId = useAppStore((state) => state.ownNodeId);
   const loading = useAppStore((state) => state.backboneLoading);
   const saving = useAppStore((state) => state.backboneSaving);
@@ -235,19 +238,46 @@ export function BackboneScreen() {
                   peers={sortedPeers}
                   maxPeers={stats.maxPeers}
                   demo={demo}
+                  canKick={uiMode === 'advanced'}
                   onKick={(nodeId) => void useAppStore.getState().kickBackbonePeer(nodeId)}
                   onOpenSetup={() => setSetupOpen(true)}
                 />
-                <BackboneControls
-                  config={config}
-                  saving={saving}
-                  demo={demo}
-                  sessionTokenSet={Boolean(sessionToken) && tokenFresh}
-                  onSave={(patch) => saveBackboneConfig(patch)}
-                  onRotateToken={() => {
-                    void rotateBackboneToken().catch(() => undefined);
-                  }}
-                />
+                {uiMode === 'advanced' ? (
+                  <BackboneControls
+                    config={config}
+                    saving={saving}
+                    demo={demo}
+                    sessionTokenSet={Boolean(sessionToken) && tokenFresh}
+                    onSave={(patch) => saveBackboneConfig(patch)}
+                    onRotateToken={() => {
+                      void rotateBackboneToken().catch(() => undefined);
+                    }}
+                  />
+                ) : (
+                  <section className="rounded-2xl border border-white/[0.06] bg-white/[0.02] px-4 py-4">
+                    <div className="flex items-start gap-3">
+                      <span className="grid h-9 w-9 shrink-0 place-items-center rounded-xl border border-sky-400/20 bg-sky-400/10 text-sky-200">
+                        <Settings2 className="h-4 w-4" aria-hidden="true" />
+                      </span>
+                      <div className="min-w-0 flex-1">
+                        <h3 className="flex items-center gap-1.5 text-sm font-semibold text-slate-100">
+                          Advanced backbone controls are hidden
+                          <HelpTip helpKey="settings.advanced.show" label="Advanced controls" />
+                        </h3>
+                        <p className="mt-1 text-2xs leading-relaxed text-slate-500">
+                          Bind address, port, max peers, allowlist and token rotation live in Advanced mode. Switching
+                          mode does not change any setting, and the panel keeps running exactly as it is.
+                        </p>
+                        <div className="mt-2 flex items-center gap-2">
+                          <Button variant="primary" size="sm" onClick={() => setUiMode('advanced')}>
+                            Show advanced backbone controls
+                          </Button>
+                          <HelpLink topic="backbone">How backbones work</HelpLink>
+                        </div>
+                      </div>
+                    </div>
+                  </section>
+                )}
               </div>
               <div className="min-w-0 space-y-4">
                 <BackboneConnection
@@ -256,6 +286,7 @@ export function BackboneScreen() {
                   maxPeers={stats.maxPeers}
                   connectionString={connectionString}
                   demo={demo}
+                  showAdvanced={uiMode === 'advanced'}
                 />
                 <BackboneInstallCard onOpenSetup={() => setSetupOpen(true)} />
                 <div className="rounded-2xl border border-white/[0.06] bg-white/[0.015] px-4 py-3.5">

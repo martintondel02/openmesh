@@ -148,6 +148,8 @@ enum Command {
     Join(JoinArgs),
     /// Write a hardened systemd unit for the bridge/backbone daemon and print enable commands.
     InstallService(InstallServiceArgs),
+    /// Run the Model Context Protocol server on stdio (Claude Desktop, Cursor, DSH, ...).
+    Mcp,
 }
 
 #[derive(Debug, Clone, clap::Args)]
@@ -294,6 +296,7 @@ fn main() -> ExitCode {
             Some(Command::InstallService(install_args)) => {
                 install_service(args, install_args).await
             }
+            Some(Command::Mcp) => openmesh_bridge::mcp::run_stdio().await,
             None => run_bridge(args).await,
         };
         match result {

@@ -72,13 +72,13 @@ export function NodesScreen() {
       <div className="border-b border-white/[0.06] px-4 py-3.5 md:px-6">
         <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
           {[
-            { label: 'Known nodes', value: stats.total, hint: 'heard in the last 24 h' },
-            { label: 'With position', value: stats.positioned, hint: 'GPS or configured' },
-            { label: 'Infrastructure', value: stats.infrastructure, hint: 'repeaters + gateways' },
-            { label: 'Contacts', value: stats.contacts, hint: 'verified identities' },
+            { label: 'Known nodes', value: stats.total, hint: 'heard in the last 24 h', helpKey: 'nodes.stat.known' },
+            { label: 'With position', value: stats.positioned, hint: 'GPS or configured', helpKey: 'nodes.stat.positioned' },
+            { label: 'Infrastructure', value: stats.infrastructure, hint: 'repeaters + gateways', helpKey: 'nodes.stat.infrastructure' },
+            { label: 'Contacts', value: stats.contacts, hint: 'verified identities', helpKey: 'nodes.stat.contacts' },
           ].map((stat) => (
             <div key={stat.label} className="rounded-xl border border-white/[0.06] bg-white/[0.02] px-3 py-2.5">
-              <Stat label={stat.label} value={stat.value} hint={stat.hint} />
+              <Stat label={stat.label} value={stat.value} hint={stat.hint} helpKey={(stat as { helpKey?: string }).helpKey} />
             </div>
           ))}
         </div>
@@ -135,6 +135,7 @@ export function NodesScreen() {
                 : 'Start the bridge or switch demo mode on in Settings to populate the mesh.'
             }
             className="py-20"
+            helpTopic="nodes-telemetry"
           />
         ) : (
           <>

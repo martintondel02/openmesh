@@ -1,10 +1,12 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import { createPortal } from 'react-dom';
-import { AlertTriangle, CheckCircle2, Info, X, XCircle } from 'lucide-react';
+import { AlertTriangle, BookOpen, CheckCircle2, Clipboard, Info, X, XCircle } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import { cn } from '../../lib/utils';
 import { Button, IconButton } from './primitives';
+import { copyText } from './signals';
+import { useAppStore } from '../../store/app';
 
 /* ------------------------------------------------------------------ */
 /* Modal                                                              */
@@ -273,6 +275,8 @@ export interface ToastItem {
   kind: 'info' | 'success' | 'error' | 'warn';
   title: string;
   message?: string;
+  helpTopic?: string;
+  diagnostics?: Record<string, unknown>;
 }
 
 const TOAST_ICONS: Record<ToastItem['kind'], LucideIcon> = {
@@ -290,6 +294,7 @@ const TOAST_TONES: Record<ToastItem['kind'], string> = {
 };
 
 export function ToastStack({ toasts, onDismiss }: { toasts: ToastItem[]; onDismiss: (id: string) => void }) {
+  const openHelp = useAppStore((state) => state.openHelp);
   if (toasts.length === 0) return null;
   return createPortal(
     <div
@@ -297,34 +302,89 @@ export function ToastStack({ toasts, onDismiss }: { toasts: ToastItem[]; onDismi
       aria-atomic="false"
       className="pointer-events-none fixed inset-x-0 bottom-20 z-[60] flex flex-col items-center gap-2 px-3 sm:bottom-5 sm:left-auto sm:right-5 sm:items-end sm:px-0"
     >
-      {toasts.map((toast) => {
-        const Icon = TOAST_ICONS[toast.kind];
-        return (
-          <div
-            key={toast.id}
-            role="status"
-            className={cn(
-              'pointer-events-auto flex w-full max-w-sm items-start gap-2.5 rounded-xl border bg-ink-850/95 px-3.5 py-3 shadow-pop backdrop-blur animate-slide-up',
-              TOAST_TONES[toast.kind],
-            )}
-          >
-            <Icon className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
-            <div className="min-w-0 flex-1">
-              <p className="text-xs font-semibold">{toast.title}</p>
-              {toast.message ? <p className="mt-0.5 text-2xs leading-relaxed text-slate-400">{toast.message}</p> : null}
-            </div>
-            <button
-              type="button"
-              aria-label="Dismiss notification"
-              onClick={() => onDismiss(toast.id)}
-              className="focus-ring -mr-1 -mt-1 grid h-6 w-6 shrink-0 place-items-center rounded-md text-slate-500 hover:bg-white/[0.06] hover:text-slate-300"
-            >
-              <X className="h-3.5 w-3.5" aria-hidden="true" />
-            </button>
-          </div>
-        );
-      })}
+      {toasts.map((toast) => (
+        <ToastCard key={toast.id} toast={toast} onDismiss={onDismiss} onHelp={openHelp} />
+      ))}
     </div>,
     document.body,
+  );
+}
+
+function ToastCard({
+  toast,
+  onDismiss,
+  onHelp,
+}: {
+  toast: ToastItem;
+  onDismiss: (id: string) => void;
+  onHelp: (topic?: string | null, anchor?: string | null) => void;
+}) {
+  const [copied, setCopied] = useState(false);
+  const Icon = TOAST_ICONS[toast.kind];
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => {
+    if (timer.current) clearTimeout(timer.current);
+  }, []);
+  const copyDiagnostics = async () => {
+    const payload = {
+      at: new Date().toISOString(),
+      kind: toast.kind,
+      title: toast.title,
+      message: toast.message ?? null,
+      url: typeof window !== 'undefined' ? window.location.href : null,
+      ...toast.diagnostics,
+    };
+    const ok = await copyText(JSON.stringify(payload, null, 2));
+    if (!ok) return;
+    setCopied(true);
+    if (timer.current) clearTimeout(timer.current);
+    timer.current = setTimeout(() => setCopied(false), 1600);
+  };
+  return (
+    <div
+      role="status"
+      className={cn(
+        'pointer-events-auto flex w-full max-w-sm items-start gap-2.5 rounded-xl border bg-ink-850/95 px-3.5 py-3 shadow-pop backdrop-blur animate-slide-up',
+        TOAST_TONES[toast.kind],
+      )}
+    >
+      <Icon className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
+      <div className="min-w-0 flex-1">
+        <p className="text-xs font-semibold">{toast.title}</p>
+        {toast.message ? <p className="mt-0.5 text-2xs leading-relaxed text-slate-400">{toast.message}</p> : null}
+        {toast.helpTopic || toast.diagnostics ? (
+          <div className="mt-1.5 flex flex-wrap items-center gap-2">
+            {toast.helpTopic ? (
+              <button
+                type="button"
+                onClick={() => onHelp(toast.helpTopic ?? null)}
+                className="focus-ring inline-flex items-center gap-1 rounded-md text-2xs font-medium text-emerald-300 hover:text-emerald-200"
+              >
+                <BookOpen className="h-3 w-3" aria-hidden="true" />
+                Get help
+              </button>
+            ) : null}
+            {toast.diagnostics ? (
+              <button
+                type="button"
+                onClick={() => void copyDiagnostics()}
+                className="focus-ring inline-flex items-center gap-1 rounded-md text-2xs font-medium text-slate-400 hover:text-slate-200"
+              >
+                <Clipboard className="h-3 w-3" aria-hidden="true" />
+                {copied ? 'Copied diagnostics' : 'Copy diagnostics'}
+              </button>
+            ) : null}
+          </div>
+        ) : null}
+      </div>
+      <button
+        type="button"
+        aria-label="Dismiss notification"
+        onClick={() => onDismiss(toast.id)}
+        className="focus-ring -mr-1 -mt-1 grid h-6 w-6 shrink-0 place-items-center rounded-md text-slate-500 hover:bg-white/[0.06] hover:text-slate-300"
+      >
+        <X className="h-3.5 w-3.5" aria-hidden="true" />
+      </button>
+    </div>
   );
 }

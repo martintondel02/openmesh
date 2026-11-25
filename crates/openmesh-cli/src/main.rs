@@ -43,7 +43,10 @@ use openmesh_sim::{MeshSim, SimConfig};
 #[command(
     name = "openmesh-cli",
     version,
-    about = "OpenMesh terminal client, diagnostics and airtime calculator"
+    about = "OpenMesh terminal client, diagnostics and airtime calculator",
+    // `help [topic]` is an explicit subcommand reading the help center from the bridge, so
+    // clap's generated help subcommand must be disabled to avoid the duplicate-name panic.
+    disable_help_subcommand = true
 )]
 struct Cli {
     /// Bridge WebSocket URL (default ws://127.0.0.1:8787/api/ws).
@@ -99,6 +102,28 @@ enum BackboneCommand {
     },
 }
 
+#[derive(Debug, Clone, Subcommand)]
+enum AgentCommand {
+    /// Print a ready-to-paste system prompt for an AI agent (beginner or advanced).
+    Prompt {
+        /// Audience tier: beginner explains jargon, advanced includes exact numbers.
+        #[arg(long, default_value = "beginner", value_name = "TIER")]
+        tier: String,
+    },
+    /// Print the MCP client config JSON for this bridge.
+    Config {
+        /// MCP client: claude, cursor, dsh or generic.
+        #[arg(long, default_value = "generic", value_name = "CLIENT")]
+        client: String,
+    },
+    /// Show recent mutating actions (source, action, result).
+    Activity {
+        /// How many entries to show (max 256).
+        #[arg(long, default_value_t = 20, value_name = "N")]
+        limit: usize,
+    },
+}
+
 #[derive(Debug, Subcommand)]
 enum Command {
     /// Send a direct message (and wait for the delivery ack).
@@ -141,6 +166,16 @@ enum Command {
         #[command(subcommand)]
         command: Option<BackboneCommand>,
     },
+    /// Agent/AI-native helpers: system prompt, MCP config, activity log.
+    Agent {
+        #[command(subcommand)]
+        command: AgentCommand,
+    },
+    /// Read the help center topics (same content as the web Help tab and MCP tools).
+    Help {
+        /// Topic slug, e.g. getting-started; omit to list all topics.
+        topic: Option<String>,
+    },
     /// Estimate LoRa airtime for a payload.
     Airtime {
         /// Radio profile: LONG_SLOW, LONG_FAST, MEDIUM_FAST, SHORT_FAST, SHORT_TURBO.
@@ -179,6 +214,8 @@ fn main() -> ExitCode {
 async fn run(cli: Cli) -> Result<u8> {
     match &cli.command {
         Command::Backbone { command } => backbone_command(&cli, command.as_ref()).await,
+        Command::Agent { command } => agent_command(&cli, command).await,
+        Command::Help { topic } => help_command(&cli, topic.as_deref()).await,
         Command::Airtime {
             profile,
             bytes,
@@ -1128,6 +1165,332 @@ fn mime_for_path(path: &std::path::Path) -> String {
         _ => "application/octet-stream",
     }
     .to_string()
+}
+
+// ---------------------------------------------------------------------------------------------
+// Agent helpers + help center (AI-NATIVE.md §3.2, ux-help-system.md §5)
+// ---------------------------------------------------------------------------------------------
+
+/// Locate the `openmesh-bridge` binary for MCP client configs.
+fn bridge_binary_path() -> String {
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(parent) = exe.parent() {
+            for name in ["openmesh-bridge", "openmesh-bridge.exe"] {
+                let candidate = parent.join(name);
+                if candidate.is_file() {
+                    return candidate.display().to_string();
+                }
+            }
+        }
+    }
+    if let Some(path) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&path) {
+            for name in ["openmesh-bridge", "openmesh-bridge.exe"] {
+                let candidate = dir.join(name);
+                if candidate.is_file() {
+                    return candidate.display().to_string();
+                }
+            }
+        }
+    }
+    "openmesh-bridge".to_string()
+}
+
+fn mcp_client_config(api: &str, token_file: &str) -> Value {
+    json!({
+        "mcpServers": {
+            "openmesh": {
+                "command": bridge_binary_path(),
+                "args": ["mcp"],
+                "env": {
+                    "OPENMESH_API": api,
+                    "OPENMESH_TOKEN_FILE": token_file,
+                    "OPENMESH_MCP_READ_ONLY": "0",
+                },
+            }
+        }
+    })
+}
+
+fn tier_is_advanced(tier: &str) -> Result<bool> {
+    match tier.trim().to_ascii_lowercase().as_str() {
+        "beginner" => Ok(false),
+        "advanced" => Ok(true),
+        other => bail!("unknown tier '{other}': use beginner or advanced"),
+    }
+}
+
+fn help_topic_list(help: &Value) -> Vec<String> {
+    help.get("topics")
+        .and_then(|v| v.as_array())
+        .map(|topics| {
+            topics
+                .iter()
+                .filter_map(|topic| {
+                    topic
+                        .get("slug")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string)
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn build_agent_prompt(
+    tier: &str,
+    api: &str,
+    config: &Value,
+    status: &Value,
+    setup: &Value,
+    help: &Value,
+    mcp_config: &Value,
+) -> Value {
+    let advanced = tier_is_advanced(tier).unwrap_or(false);
+    let node_name = setup
+        .get("node_name")
+        .and_then(|v| v.as_str())
+        .filter(|name| !name.is_empty())
+        .or_else(|| config.pointer("/node/name").and_then(|v| v.as_str()))
+        .unwrap_or("openmesh");
+    let node_id = setup
+        .get("node_id")
+        .and_then(|v| v.as_str())
+        .or_else(|| status.pointer("/node_id").and_then(|v| v.as_str()))
+        .unwrap_or("unknown");
+    let region = config
+        .pointer("/radio/region")
+        .and_then(|v| v.as_str())
+        .unwrap_or("EU868");
+    let profile = config
+        .pointer("/radio/profile")
+        .and_then(|v| v.as_str())
+        .unwrap_or("MEDIUM_FAST");
+    let help_topics = help_topic_list(help);
+    let safety = vec![
+        "Always ask the human before destructive changes: rotating the backbone token, kicking peers, changing radio region/profile, disabling auth.".to_string(),
+        "Never paste API tokens, backbone tokens, PSKs or identity seeds into chat logs. Rotate outputs are shown once; write them to a file and tell the human where.".to_string(),
+        "Prefer read-only tools for diagnosis; write tools are explicit and every mutation is attributed in the activity log (GET /api/activity).".to_string(),
+        "If you need a capability that is not in the tool list, tell the human instead of guessing.".to_string(),
+    ];
+    let mut text = String::new();
+    text.push_str(&format!(
+        "You are an OpenMesh operations assistant connected to the bridge at {api} (node \"{node_name}\", id {node_id}).\n"
+    ));
+    if advanced {
+        text.push_str(&format!(
+            "This is the ADVANCED tier: answer with exact values and protocol terms. Radio: region {region}, profile {profile}. \n"
+        ));
+    } else {
+        text.push_str(
+            "This is the BEGINNER tier: explain any jargon in plain language, keep answers short, and never blame the user. Offer a next step and a help topic for every question.\n",
+        );
+    }
+    text.push_str("\nLive state (from the bridge API):\n");
+    text.push_str(&format!(
+        "- Uptime: {}s; radio connected: {}; airtime: {:.1}%.\n",
+        status.get("uptime_s").and_then(|v| v.as_u64()).unwrap_or(0),
+        status
+            .pointer("/radio/connected")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        status
+            .pointer("/radio/airtime_used_pct")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0),
+    ));
+    text.push_str(&format!(
+        "- Setup complete: {}; channels: {}; known nodes: {}.\n",
+        setup
+            .get("setup_completed")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        setup
+            .pointer("/counts/channels")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0),
+        setup
+            .pointer("/counts/nodes")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0),
+    ));
+    if setup.get("first_run").and_then(|v| v.as_bool()) == Some(true) {
+        text.push_str("- The node is not set up yet: ask for role/country/name, then call `openmesh_setup_quick`.\n");
+    }
+    text.push_str("\nMCP client config (paste into your MCP client):\n");
+    text.push_str(&serde_json::to_string_pretty(mcp_config).unwrap_or_default());
+    text.push_str("\n\nKey tools:\n");
+    text.push_str("- Read: openmesh_health, openmesh_status, openmesh_nodes, openmesh_messages, openmesh_channels, openmesh_contacts, openmesh_backbone_status, openmesh_setup_state, openmesh_activity, openmesh_help.\n");
+    text.push_str("- Write: openmesh_send_message, openmesh_send_channel_message, openmesh_announce, openmesh_set_config, openmesh_setup_quick, openmesh_create_channel, openmesh_join_channel, openmesh_add_contact, openmesh_backbone_config.\n");
+    text.push_str("- Destructive (require confirm:true): openmesh_rotate_backbone_token, openmesh_kick_backbone_peer.\n");
+    text.push_str("\nSafety rules:\n");
+    for (index, rule) in safety.iter().enumerate() {
+        text.push_str(&format!("{}. {rule}\n", index + 1));
+    }
+    text.push_str(&format!(
+        "\nHelp topics (call openmesh_help with one slug): {}.\n",
+        help_topics.join(", ")
+    ));
+    if advanced {
+        text.push_str("\nAdvanced notes: OBB/1 control channel for backbone, HMAC-SHA256 token auth, per-peer frame/byte counters, 30 mutating MCP calls/minute, 10s API timeout. Read docs/architecture/AI-NATIVE.md for the full tool contract.\n");
+    } else {
+        text.push_str("\nIf something looks wrong, say what happened and what to try next, then offer the `troubleshooting` help topic.\n");
+    }
+    json!({
+        "tier": if advanced { "advanced" } else { "beginner" },
+        "api": api,
+        "node": { "name": node_name, "node_id": node_id, "region": region, "profile": profile },
+        "prompt": text,
+        "mcp_config": mcp_config,
+        "tools": {
+            "read": ["openmesh_health","openmesh_status","openmesh_nodes","openmesh_node","openmesh_messages","openmesh_channels","openmesh_contacts","openmesh_backbone_status","openmesh_backbone_peers","openmesh_backbone_setup","openmesh_setup_state","openmesh_activity","openmesh_help"],
+            "write": ["openmesh_send_message","openmesh_send_channel_message","openmesh_share_position","openmesh_announce","openmesh_mark_read","openmesh_retry_message","openmesh_set_config","openmesh_setup_quick","openmesh_create_channel","openmesh_join_channel","openmesh_add_contact","openmesh_backbone_config"],
+            "destructive": ["openmesh_rotate_backbone_token","openmesh_kick_backbone_peer"],
+        },
+        "safety_rules": safety,
+        "help_topics": help_topics,
+    })
+}
+
+async fn agent_command(cli: &Cli, command: &AgentCommand) -> Result<u8> {
+    let base = api_base(cli);
+    let token = resolve_token(cli)?;
+    match command {
+        AgentCommand::Prompt { tier } => {
+            tier_is_advanced(tier)?;
+            let config = http_json("GET", &base, "/api/config", &token, None).await?;
+            let status = http_json("GET", &base, "/api/status", &token, None).await?;
+            let setup = http_json("GET", &base, "/api/setup/state", &token, None).await?;
+            let help = http_json("GET", &base, "/api/help", &token, None).await?;
+            let token_file = cli
+                .token_file
+                .clone()
+                .unwrap_or_else(default_token_path)
+                .display()
+                .to_string();
+            let mcp_config = mcp_client_config(&base, &token_file);
+            let value =
+                build_agent_prompt(tier, &base, &config, &status, &setup, &help, &mcp_config);
+            if cli.json {
+                println!("{}", serde_json::to_string_pretty(&value)?);
+            } else {
+                println!("{}", value["prompt"].as_str().unwrap_or(""));
+            }
+        }
+        AgentCommand::Config { client } => {
+            let client = client.trim().to_ascii_lowercase();
+            if !matches!(client.as_str(), "claude" | "cursor" | "dsh" | "generic") {
+                bail!("unknown client '{client}': use claude, cursor, dsh or generic");
+            }
+            let token_file = cli
+                .token_file
+                .clone()
+                .unwrap_or_else(default_token_path)
+                .display()
+                .to_string();
+            let config = mcp_client_config(&base, &token_file);
+            // stdout stays valid JSON so it can be redirected straight into a client config.
+            println!("{}", serde_json::to_string_pretty(&config)?);
+            eprintln!(
+                "openmesh-cli: paste this into the {client} MCP configuration (mcpServers). \
+                 It runs `{} mcp` with OPENMESH_API={base} and reads the token from {token_file}.",
+                bridge_binary_path()
+            );
+        }
+        AgentCommand::Activity { limit } => {
+            let limit = (*limit).clamp(1, 256);
+            let value = http_json(
+                "GET",
+                &base,
+                &format!("/api/activity?limit={limit}"),
+                &token,
+                None,
+            )
+            .await?;
+            if cli.json {
+                println!("{}", serde_json::to_string_pretty(&value)?);
+            } else {
+                let entries = value
+                    .get("entries")
+                    .and_then(|v| v.as_array())
+                    .cloned()
+                    .unwrap_or_default();
+                if entries.is_empty() {
+                    println!("(no recorded actions yet)");
+                } else {
+                    for entry in entries {
+                        println!(
+                            "[{}] {:<24} {:<7} {:<28} {}",
+                            entry.get("at_ms").and_then(|v| v.as_u64()).unwrap_or(0),
+                            entry.get("source").and_then(|v| v.as_str()).unwrap_or("?"),
+                            entry.get("method").and_then(|v| v.as_str()).unwrap_or(""),
+                            entry.get("path").and_then(|v| v.as_str()).unwrap_or(""),
+                            if entry.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
+                                entry
+                                    .get("summary")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("")
+                                    .to_string()
+                            } else {
+                                format!(
+                                    "FAILED: {}",
+                                    entry
+                                        .get("error")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("error")
+                                )
+                            },
+                        );
+                    }
+                }
+            }
+        }
+    }
+    Ok(0)
+}
+
+async fn help_command(cli: &Cli, topic: Option<&str>) -> Result<u8> {
+    let base = api_base(cli);
+    let token = resolve_token(cli)?;
+    match topic {
+        Some(topic) => {
+            let value = http_json("GET", &base, &format!("/api/help/{topic}"), &token, None)
+                .await
+                .with_context(|| format!("unknown or unavailable help topic '{topic}'"))?;
+            if cli.json {
+                println!("{}", serde_json::to_string_pretty(&value)?);
+            } else {
+                let title = value.get("title").and_then(|v| v.as_str()).unwrap_or(topic);
+                let markdown = value.get("markdown").and_then(|v| v.as_str()).unwrap_or("");
+                if !markdown.trim_start().starts_with("# ") {
+                    println!("# {title}\n");
+                }
+                println!("{markdown}");
+            }
+        }
+        None => {
+            let value = http_json("GET", &base, "/api/help", &token, None).await?;
+            if cli.json {
+                println!("{}", serde_json::to_string_pretty(&value)?);
+            } else {
+                if let Some(topics) = value.get("topics").and_then(|v| v.as_array()) {
+                    println!("OpenMesh help topics (openmesh-cli help <slug>):");
+                    for topic in topics {
+                        println!(
+                            "  {:<24} {:<10} {}",
+                            topic.get("slug").and_then(|v| v.as_str()).unwrap_or("?"),
+                            topic
+                                .get("audience")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("both"),
+                            topic.get("title").and_then(|v| v.as_str()).unwrap_or(""),
+                        );
+                    }
+                }
+            }
+        }
+    }
+    Ok(0)
 }
 
 // ---------------------------------------------------------------------------------------------

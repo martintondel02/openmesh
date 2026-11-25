@@ -6,17 +6,19 @@ import type { BackboneStats } from '../../store/backbone-selectors';
 import { formatBytes, cn } from '../../lib/utils';
 import { formatCount, formatThroughput } from '../../lib/backbone';
 import { Badge } from '../../components/ui/primitives';
+import { HelpTip } from '../../components/ui/help';
 
 interface StatCardProps {
   icon: LucideIcon;
   label: string;
   value: string;
   hint?: string;
+  helpKey: string;
   tone?: 'default' | 'accent' | 'danger';
   children?: ReactNode;
 }
 
-function StatCard({ icon: Icon, label, value, hint, tone = 'default', children }: StatCardProps) {
+function StatCard({ icon: Icon, label, value, hint, helpKey, tone = 'default', children }: StatCardProps) {
   return (
     <div
       className={cn(
@@ -29,6 +31,7 @@ function StatCard({ icon: Icon, label, value, hint, tone = 'default', children }
       <div className="flex items-center gap-1.5 text-3xs uppercase tracking-[0.12em] text-slate-500">
         <Icon className="h-3 w-3" aria-hidden="true" />
         <span className="truncate">{label}</span>
+        <HelpTip helpKey={helpKey} label={label} />
       </div>
       <div className="mt-1.5 flex items-end justify-between gap-2">
         <p className={cn('truncate text-[17px] font-semibold leading-none tabular-nums', tone === 'danger' ? 'text-rose-200' : 'text-slate-100')}>
@@ -86,6 +89,7 @@ export function BackboneStats({ stats }: { stats: BackboneStats }) {
       <StatCard
         icon={Users}
         label="Peers"
+        helpKey="backbone.stat.peers"
         value={`${stats.peers}/${stats.maxPeers}`}
         hint={stats.peers > 0 ? 'authenticated TCP links' : 'waiting for gateways'}
         tone={stats.running && stats.peers > 0 ? 'accent' : 'default'}
@@ -93,12 +97,14 @@ export function BackboneStats({ stats }: { stats: BackboneStats }) {
       <StatCard
         icon={ArrowDownLeft}
         label="Frames"
+        helpKey="backbone.stat.frames"
         value={`${formatCount(stats.framesIn)} / ${formatCount(stats.framesOut)}`}
         hint="frames in / out"
       />
       <StatCard
         icon={Activity}
         label="Throughput"
+        helpKey="backbone.stat.throughput"
         value={formatThroughput(stats.throughputInBps)}
         hint={`in · out ${formatThroughput(stats.throughputOutBps)}`}
       >
@@ -112,18 +118,21 @@ export function BackboneStats({ stats }: { stats: BackboneStats }) {
       <StatCard
         icon={Database}
         label="Bytes"
+        helpKey="backbone.stat.bytes"
         value={formatBytes(stats.bytesIn + stats.bytesOut)}
         hint={`↓ ${formatBytes(stats.bytesIn)} · ↑ ${formatBytes(stats.bytesOut)}`}
       />
       <StatCard
         icon={Inbox}
         label="Store-forward"
+        helpKey="backbone.stat.storeForward"
         value={String(stats.storeForwardEnvelopes)}
         hint="envelopes held for offline nodes"
       />
       <StatCard
         icon={ShieldAlert}
         label="Auth failures"
+        helpKey="backbone.stat.authFailures"
         value={String(stats.authFailures)}
         hint={stats.authFailures > 0 ? 'rejected handshakes' : 'no rejected handshakes'}
         tone={stats.authFailures > 0 ? 'danger' : 'default'}

@@ -89,6 +89,7 @@ export function ContactsScreen() {
                 : 'Paste an openmesh://contact invite, or add a node by its 72-byte public identity.'
             }
             className="py-16"
+            helpTopic="contacts-identity"
             action={
               <Button variant="secondary" icon={Plus} onClick={() => setAddOpen(true)}>
                 Add your first contact

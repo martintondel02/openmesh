@@ -1,0 +1,5047 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "OpenMesh Bridge API",
+    "version": "0.3.0",
+    "summary": "Local REST control API for an OpenMesh bridge (v0.3.0, AI-native + beginner UX).",
+    "description": "The bridge daemon owns identity, radios, the message store and backbone mode. This document is normative for the REST surface; the WebSocket catalog (`/api/ws`) is documented in docs/architecture/WEBSOCKET-API.md and backbone protocol details in docs/architecture/BACKBONE.md.\n\nAuthentication: every route except `GET /api/health` requires `Authorization: Bearer <token>` (token file `~/.config/openmesh/bridge-token`, mode 0600). The WebSocket also accepts `?token=` because browsers cannot set headers. The API is loopback-only by default; do not bind it to a network interface.\n\nAttribution: mutating calls may send `X-OpenMesh-Agent: <name>` (MCP does this automatically) or `X-OpenMesh-Client: web|cli`; the bridge records them in `GET /api/activity`. Read calls are not logged. Errors are JSON with `error`, `code`, `message` and a `help_topic` slug.",
+    "license": {
+      "name": "AGPL-3.0-only",
+      "identifier": "AGPL-3.0-only"
+    }
+  },
+  "servers": [
+    {
+      "url": "http://127.0.0.1:8787",
+      "description": "Loopback bridge API (default)"
+    }
+  ],
+  "security": [
+    {
+      "bearerAuth": []
+    }
+  ],
+  "tags": [
+    {
+      "name": "system",
+      "description": "Health, status and the OpenAPI document itself."
+    },
+    {
+      "name": "realtime",
+      "description": "WebSocket and SSE streams."
+    },
+    {
+      "name": "configuration",
+      "description": "Bridge, radio and feature configuration."
+    },
+    {
+      "name": "nodes",
+      "description": "Mesh nodes, roles, capabilities and announce."
+    },
+    {
+      "name": "contacts",
+      "description": "Identity-verified contacts."
+    },
+    {
+      "name": "channels",
+      "description": "Group conversations and invites."
+    },
+    {
+      "name": "messages",
+      "description": "Direct/channel messages, position and delivery state."
+    },
+    {
+      "name": "attachments",
+      "description": "Image/voice/file upload and download."
+    },
+    {
+      "name": "backbone",
+      "description": "OBB/1 backbone configuration, peers and onboarding."
+    },
+    {
+      "name": "help",
+      "description": "Embedded help corpus (same as the in-app Help Center)."
+    },
+    {
+      "name": "setup",
+      "description": "First-run checklist, recommendations and the secure preset."
+    },
+    {
+      "name": "activity",
+      "description": "Transparency log of write actions and agent attribution."
+    }
+  ],
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "Bridge API token from `~/.config/openmesh/bridge-token` (mode 0600)."
+      }
+    },
+    "headers": {
+      "X-OpenMesh-Agent": {
+        "description": "Set by agents/MCP servers so mutations are attributed in the activity log.",
+        "schema": {
+          "type": "string",
+          "maxLength": 48
+        }
+      },
+      "X-OpenMesh-Client": {
+        "description": "Client identifier for activity attribution (`web`, `cli`, …).",
+        "schema": {
+          "type": "string",
+          "maxLength": 32
+        }
+      }
+    },
+    "parameters": {
+      "Limit": {
+        "name": "limit",
+        "in": "query",
+        "required": false,
+        "schema": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 500,
+          "default": 100
+        }
+      },
+      "BeforeMs": {
+        "name": "before_ms",
+        "in": "query",
+        "required": false,
+        "schema": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
+        }
+      },
+      "Peer": {
+        "name": "peer",
+        "in": "query",
+        "required": false,
+        "description": "Filter direct messages by peer node id.",
+        "schema": {
+          "type": "string"
+        }
+      },
+      "NodeIdPath": {
+        "name": "node_id",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string",
+          "pattern": "^[0-9a-fA-F]{16}$"
+        }
+      },
+      "ChannelIdPath": {
+        "name": "channel_id",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string"
+        }
+      },
+      "MessageIdPath": {
+        "name": "message_id",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "AttachmentIdPath": {
+        "name": "attachment_id",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string"
+        }
+      },
+      "SlugPath": {
+        "name": "slug",
+        "in": "path",
+        "required": true,
+        "description": "Help topic slug from GET /api/help.",
+        "schema": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{1,96}$"
+        }
+      },
+      "ActivityLimit": {
+        "name": "limit",
+        "in": "query",
+        "required": false,
+        "schema": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 256,
+          "default": 100
+        }
+      },
+      "Country": {
+        "name": "country",
+        "in": "query",
+        "required": false,
+        "schema": {
+          "type": "string"
+        },
+        "description": "ISO country code; defaults to the configured region."
+      },
+      "Role": {
+        "name": "role",
+        "in": "query",
+        "required": false,
+        "schema": {
+          "type": "string",
+          "enum": [
+            "client",
+            "tracker",
+            "repeater",
+            "gateway"
+          ]
+        },
+        "description": "Defaults to the configured role."
+      },
+      "AgentHeader": {
+        "name": "X-OpenMesh-Agent",
+        "in": "header",
+        "required": false,
+        "description": "Agent name for activity attribution. MCP sets this automatically.",
+        "schema": {
+          "type": "string",
+          "maxLength": 48
+        }
+      },
+      "ClientHeader": {
+        "name": "X-OpenMesh-Client",
+        "in": "header",
+        "required": false,
+        "description": "Client identifier for activity attribution (`web`, `cli`, …).",
+        "schema": {
+          "type": "string",
+          "maxLength": 32
+        }
+      }
+    },
+    "schemas": {
+      "Error": {
+        "type": "object",
+        "required": [
+          "error",
+          "code",
+          "message"
+        ],
+        "properties": {
+          "error": {
+            "type": "string"
+          },
+          "code": {
+            "type": "string",
+            "examples": [
+              "bad_request",
+              "unauthorized",
+              "not_found",
+              "unknown_peer",
+              "radio_busy",
+              "timeout",
+              "unavailable",
+              "confirm_required"
+            ]
+          },
+          "message": {
+            "type": "string"
+          },
+          "help_topic": {
+            "type": "string",
+            "description": "Help Center topic slug for recovery guidance."
+          }
+        },
+        "example": {
+          "error": "bad_request",
+          "code": "bad_request",
+          "message": "human-readable explanation",
+          "help_topic": "troubleshooting"
+        }
+      },
+      "Health": {
+        "type": "object",
+        "required": [
+          "ok",
+          "version"
+        ],
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          },
+          "version": {
+            "type": "string",
+            "examples": [
+              "0.3.0"
+            ]
+          }
+        },
+        "example": {
+          "ok": true,
+          "version": "0.3.0"
+        }
+      },
+      "AgentHeaderValue": {
+        "type": "string",
+        "description": "Agent name for activity attribution (`X-OpenMesh-Agent`)."
+      },
+      "RadioStatus": {
+        "type": "object",
+        "properties": {
+          "connected": {
+            "type": "boolean"
+          },
+          "tx_queue": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "airtime_used_pct": {
+            "type": "number"
+          },
+          "rssi": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "snr": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "frequency_mhz": {
+            "type": "number"
+          },
+          "tx_power_dbm": {
+            "type": "integer"
+          }
+        }
+      },
+      "MeshStatus": {
+        "type": "object",
+        "properties": {
+          "tx_frames": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "rx_frames": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "forwarded": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "dropped": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "known_nodes": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "stored_envelopes": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "duty_cycle_pct": {
+            "type": "number"
+          }
+        }
+      },
+      "StorageStatus": {
+        "type": "object",
+        "properties": {
+          "used_bytes": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "db_path": {
+            "type": "string"
+          }
+        }
+      },
+      "Status": {
+        "type": "object",
+        "required": [
+          "uptime_s",
+          "radio",
+          "mesh",
+          "storage"
+        ],
+        "properties": {
+          "uptime_s": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "radio": {
+            "$ref": "#/components/schemas/RadioStatus"
+          },
+          "mesh": {
+            "$ref": "#/components/schemas/MeshStatus"
+          },
+          "storage": {
+            "$ref": "#/components/schemas/StorageStatus"
+          }
+        },
+        "example": {
+          "uptime_s": 3600,
+          "radio": {
+            "connected": true,
+            "tx_queue": 0,
+            "airtime_used_pct": 0.4,
+            "rssi": -88,
+            "snr": 6.5,
+            "frequency_mhz": 869.525,
+            "tx_power_dbm": 14
+          },
+          "mesh": {
+            "tx_frames": 42,
+            "rx_frames": 55,
+            "forwarded": 12,
+            "dropped": 2,
+            "known_nodes": 3,
+            "stored_envelopes": 0,
+            "duty_cycle_pct": 0.4
+          },
+          "storage": {
+            "used_bytes": 40960,
+            "db_path": "/home/you/.local/share/openmesh/openmesh.redb"
+          }
+        }
+      },
+      "Position": {
+        "type": "object",
+        "required": [
+          "lat",
+          "lon",
+          "timestamp_ms"
+        ],
+        "properties": {
+          "lat": {
+            "type": "number",
+            "minimum": -90,
+            "maximum": 90
+          },
+          "lon": {
+            "type": "number",
+            "minimum": -180,
+            "maximum": 180
+          },
+          "alt_m": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "accuracy_m": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "speed_cm_s": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "heading_deg": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0,
+            "maximum": 359
+          },
+          "timestamp_ms": {
+            "type": "integer",
+            "format": "int64"
+          }
+        },
+        "example": {
+          "lat": 59.9127,
+          "lon": 10.7461,
+          "accuracy_m": 12,
+          "timestamp_ms": 1760000000000
+        }
+      },
+      "Attachment": {
+        "type": "object",
+        "required": [
+          "id",
+          "mime",
+          "size",
+          "progress"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "examples": [
+              "att_0123456789ab"
+            ]
+          },
+          "mime": {
+            "type": "string"
+          },
+          "size": {
+            "type": "integer"
+          },
+          "sha256": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "duration_ms": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "progress": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          }
+        }
+      },
+      "AttachmentUpload": {
+        "type": "object",
+        "required": [
+          "id",
+          "size",
+          "sha256"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "size": {
+            "type": "integer"
+          },
+          "sha256": {
+            "type": "string"
+          }
+        },
+        "example": {
+          "id": "att_0123456789ab",
+          "size": 5120,
+          "sha256": "9f2c…"
+        }
+      },
+      "Node": {
+        "type": "object",
+        "required": [
+          "node_id",
+          "name",
+          "class",
+          "caps"
+        ],
+        "properties": {
+          "node_id": {
+            "type": "string",
+            "pattern": "^[0-9a-fA-F]{16}$"
+          },
+          "name": {
+            "type": "string"
+          },
+          "class": {
+            "type": "string",
+            "enum": [
+              "client",
+              "repeater",
+              "gateway",
+              "room_server",
+              "tracker"
+            ]
+          },
+          "caps": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "relay",
+                "store",
+                "gps",
+                "wifi",
+                "ethernet",
+                "ble",
+                "usb",
+                "screen",
+                "audio_out",
+                "solar"
+              ]
+            }
+          },
+          "hops": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "last_seen_ms": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "rssi": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "snr": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "position": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Position"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "battery_pct": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0,
+            "maximum": 100
+          },
+          "is_contact": {
+            "type": "boolean"
+          },
+          "public_key": {
+            "type": "string",
+            "description": "Base64 72-byte public identity."
+          }
+        },
+        "example": {
+          "node_id": "6b1f4a02c9de8810",
+          "name": "martin-phone",
+          "class": "client",
+          "caps": [
+            "relay",
+            "gps"
+          ],
+          "hops": 1,
+          "last_seen_ms": 1760000000000,
+          "rssi": -87,
+          "snr": 7.5,
+          "position": {
+            "lat": 59.9127,
+            "lon": 10.7461,
+            "accuracy_m": 12,
+            "timestamp_ms": 1760000000000
+          },
+          "battery_pct": 82,
+          "is_contact": true,
+          "public_key": "…base64 72-byte identity…"
+        }
+      },
+      "Nodes": {
+        "type": "object",
+        "required": [
+          "nodes"
+        ],
+        "properties": {
+          "nodes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Node"
+            }
+          }
+        },
+        "example": {
+          "nodes": [
+            {
+              "node_id": "6b1f4a02c9de8810",
+              "name": "martin-phone",
+              "class": "client",
+              "caps": [
+                "relay",
+                "gps"
+              ],
+              "hops": 1,
+              "last_seen_ms": 1760000000000,
+              "rssi": -87,
+              "snr": 7.5,
+              "position": {
+                "lat": 59.9127,
+                "lon": 10.7461,
+                "accuracy_m": 12,
+                "timestamp_ms": 1760000000000
+              },
+              "battery_pct": 82,
+              "is_contact": true,
+              "public_key": "…base64 72-byte identity…"
+            }
+          ]
+        }
+      },
+      "Contact": {
+        "type": "object",
+        "required": [
+          "node_id",
+          "identity"
+        ],
+        "properties": {
+          "node_id": {
+            "type": "string"
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "identity": {
+            "type": "string",
+            "description": "Base64 72-byte public identity."
+          },
+          "last_seen_ms": {
+            "type": "integer",
+            "format": "int64"
+          }
+        },
+        "example": {
+          "node_id": "6b1f4a02c9de8810",
+          "name": "martin",
+          "identity": "…base64…",
+          "last_seen_ms": 1760000000000
+        }
+      },
+      "Contacts": {
+        "type": "object",
+        "required": [
+          "contacts"
+        ],
+        "properties": {
+          "contacts": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Contact"
+            }
+          }
+        },
+        "example": {
+          "contacts": [
+            {
+              "node_id": "6b1f4a02c9de8810",
+              "name": "martin",
+              "identity": "…base64…",
+              "last_seen_ms": 1760000000000
+            }
+          ]
+        }
+      },
+      "Channel": {
+        "type": "object",
+        "required": [
+          "channel_id",
+          "name",
+          "psk_set"
+        ],
+        "properties": {
+          "channel_id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "psk_set": {
+            "type": "boolean"
+          }
+        },
+        "example": {
+          "channel_id": "11223344aabbccdd",
+          "name": "family",
+          "psk_set": true
+        }
+      },
+      "Channels": {
+        "type": "object",
+        "required": [
+          "channels"
+        ],
+        "properties": {
+          "channels": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Channel"
+            }
+          }
+        },
+        "example": {
+          "channels": [
+            {
+              "channel_id": "11223344aabbccdd",
+              "name": "family",
+              "psk_set": true
+            }
+          ]
+        }
+      },
+      "ChannelCreated": {
+        "type": "object",
+        "required": [
+          "channel_id",
+          "name",
+          "psk_once",
+          "invite_url",
+          "shown_once"
+        ],
+        "properties": {
+          "channel_id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "psk_once": {
+            "type": "string",
+            "description": "Base64 32-byte channel key — returned exactly once."
+          },
+          "invite_url": {
+            "type": "string",
+            "description": "openmesh://channel invite URL including the PSK."
+          },
+          "shown_once": {
+            "type": "boolean"
+          }
+        },
+        "example": {
+          "channel_id": "11223344aabbccdd",
+          "name": "family",
+          "psk_once": "…",
+          "invite_url": "openmesh://channel?name=family&id=…&psk=…",
+          "shown_once": true
+        }
+      },
+      "Message": {
+        "type": "object",
+        "required": [
+          "msg_id",
+          "peer",
+          "from",
+          "to",
+          "kind",
+          "sent_at_ms",
+          "outgoing",
+          "delivered",
+          "read"
+        ],
+        "properties": {
+          "msg_id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "peer": {
+            "type": "string"
+          },
+          "from": {
+            "type": "string"
+          },
+          "to": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "text",
+              "position",
+              "image",
+              "voice",
+              "file"
+            ]
+          },
+          "text": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "sent_at_ms": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "received_at_ms": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "outgoing": {
+            "type": "boolean"
+          },
+          "delivered": {
+            "type": "boolean"
+          },
+          "read": {
+            "type": "boolean"
+          },
+          "reply_to": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "thread": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "attachment": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Attachment"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "position": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Position"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "example": {
+          "msg_id": 42,
+          "peer": "6b1f4a02c9de8810",
+          "from": "6b1f4a02c9de8810",
+          "to": "aabbccdd00112233",
+          "kind": "text",
+          "text": "hello mesh",
+          "sent_at_ms": 1760000000000,
+          "received_at_ms": 1760000001200,
+          "outgoing": true,
+          "delivered": true,
+          "read": false,
+          "reply_to": null,
+          "thread": null,
+          "attachment": null,
+          "position": null
+        }
+      },
+      "GroupMessage": {
+        "type": "object",
+        "required": [
+          "msg_id",
+          "channel_id",
+          "channel_name",
+          "from",
+          "kind",
+          "sent_at_ms",
+          "outgoing",
+          "signature_valid"
+        ],
+        "properties": {
+          "msg_id": {
+            "type": "integer"
+          },
+          "channel_id": {
+            "type": "string"
+          },
+          "channel_name": {
+            "type": "string"
+          },
+          "from": {
+            "type": "string"
+          },
+          "from_name": {
+            "type": "string"
+          },
+          "sender_key": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "text": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "sent_at_ms": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "outgoing": {
+            "type": "boolean"
+          },
+          "signature_valid": {
+            "type": "boolean"
+          },
+          "attachment": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Attachment"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "position": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Position"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "example": {
+          "msg_id": 43,
+          "channel_id": "11223344aabbccdd",
+          "channel_name": "family",
+          "from": "6b1f4a02c9de8810",
+          "from_name": "martin",
+          "sender_key": "…",
+          "kind": "text",
+          "text": "hello family",
+          "sent_at_ms": 1760000000000,
+          "outgoing": false,
+          "signature_valid": true,
+          "attachment": null,
+          "position": null
+        }
+      },
+      "Messages": {
+        "type": "object",
+        "required": [
+          "messages"
+        ],
+        "properties": {
+          "messages": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Message"
+            }
+          }
+        },
+        "example": {
+          "messages": [
+            {
+              "msg_id": 42,
+              "peer": "6b1f4a02c9de8810",
+              "from": "6b1f4a02c9de8810",
+              "to": "aabbccdd00112233",
+              "kind": "text",
+              "text": "hello mesh",
+              "sent_at_ms": 1760000000000,
+              "received_at_ms": 1760000001200,
+              "outgoing": true,
+              "delivered": true,
+              "read": false,
+              "reply_to": null,
+              "thread": null,
+              "attachment": null,
+              "position": null
+            }
+          ]
+        }
+      },
+      "GroupMessages": {
+        "type": "object",
+        "required": [
+          "messages"
+        ],
+        "properties": {
+          "messages": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/GroupMessage"
+            }
+          }
+        },
+        "example": {
+          "messages": [
+            {
+              "msg_id": 43,
+              "channel_id": "11223344aabbccdd",
+              "channel_name": "family",
+              "from": "6b1f4a02c9de8810",
+              "from_name": "martin",
+              "sender_key": "…",
+              "kind": "text",
+              "text": "hello family",
+              "sent_at_ms": 1760000000000,
+              "outgoing": false,
+              "signature_valid": true,
+              "attachment": null,
+              "position": null
+            }
+          ]
+        }
+      },
+      "ConfigNode": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "maxLength": 32
+          },
+          "class": {
+            "type": "string",
+            "enum": [
+              "client",
+              "repeater",
+              "gateway",
+              "room_server",
+              "tracker"
+            ]
+          },
+          "announce_interval_s": {
+            "type": "integer",
+            "minimum": 60
+          }
+        }
+      },
+      "ConfigRadio": {
+        "type": "object",
+        "properties": {
+          "profile": {
+            "type": "string",
+            "enum": [
+              "LONG_SLOW",
+              "LONG_FAST",
+              "MEDIUM_FAST",
+              "SHORT_FAST",
+              "SHORT_TURBO"
+            ]
+          },
+          "region": {
+            "type": "string",
+            "enum": [
+              "EU868",
+              "US915",
+              "AU915",
+              "IN865",
+              "KR920",
+              "AS923"
+            ]
+          },
+          "tx_power_dbm": {
+            "type": "integer"
+          },
+          "frequency_mhz": {
+            "type": "number"
+          },
+          "interface": {
+            "type": "string"
+          }
+        }
+      },
+      "ConfigFeatures": {
+        "type": "object",
+        "properties": {
+          "auto_announce": {
+            "type": "boolean"
+          },
+          "store_forward": {
+            "type": "boolean"
+          },
+          "position_sharing": {
+            "type": "boolean"
+          }
+        }
+      },
+      "Config": {
+        "type": "object",
+        "required": [
+          "node",
+          "radio",
+          "features"
+        ],
+        "properties": {
+          "node": {
+            "$ref": "#/components/schemas/ConfigNode"
+          },
+          "radio": {
+            "$ref": "#/components/schemas/ConfigRadio"
+          },
+          "features": {
+            "$ref": "#/components/schemas/ConfigFeatures"
+          },
+          "channels": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Channel"
+            }
+          }
+        },
+        "example": {
+          "node": {
+            "name": "martin-phone",
+            "class": "client",
+            "announce_interval_s": 1800
+          },
+          "radio": {
+            "profile": "MEDIUM_FAST",
+            "region": "EU868",
+            "tx_power_dbm": 14,
+            "frequency_mhz": 869.525,
+            "interface": "sim0"
+          },
+          "features": {
+            "auto_announce": true,
+            "store_forward": false,
+            "position_sharing": false
+          },
+          "channels": [
+            {
+              "channel_id": "11223344aabbccdd",
+              "name": "family",
+              "psk_set": true
+            }
+          ]
+        }
+      },
+      "ConfigPatch": {
+        "type": "object",
+        "description": "Deep partial of Config: only supplied fields change; unknown fields are rejected or ignored per bridge validation.",
+        "properties": {
+          "node": {
+            "$ref": "#/components/schemas/ConfigNode"
+          },
+          "radio": {
+            "$ref": "#/components/schemas/ConfigRadio"
+          },
+          "features": {
+            "$ref": "#/components/schemas/ConfigFeatures"
+          }
+        },
+        "additionalProperties": false
+      },
+      "SendMessageRequest": {
+        "type": "object",
+        "required": [
+          "to"
+        ],
+        "properties": {
+          "to": {
+            "type": "string",
+            "description": "Recipient node id (hex)."
+          },
+          "text": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "reply_to": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "attachment_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "example": {
+          "to": "aabbccdd00112233",
+          "text": "hello"
+        }
+      },
+      "SendChannelMessageRequest": {
+        "type": "object",
+        "required": [
+          "text"
+        ],
+        "properties": {
+          "text": {
+            "type": "string"
+          },
+          "attachment_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "example": {
+          "text": "hello family"
+        }
+      },
+      "SendPositionRequest": {
+        "type": "object",
+        "properties": {
+          "to": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "channel_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "position": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Position"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "description": "Exactly one of `to` or `channel_id`; omit `position` to use the bridge's current position."
+      },
+      "SendResult": {
+        "type": "object",
+        "required": [
+          "msg_id",
+          "est_airtime_ms",
+          "queued"
+        ],
+        "properties": {
+          "msg_id": {
+            "type": "integer"
+          },
+          "est_airtime_ms": {
+            "type": "integer"
+          },
+          "queued": {
+            "type": "boolean"
+          }
+        },
+        "example": {
+          "msg_id": 42,
+          "est_airtime_ms": 611,
+          "queued": false
+        }
+      },
+      "ActionOk": {
+        "type": "object",
+        "required": [
+          "ok"
+        ],
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          },
+          "msg_id": {
+            "type": "integer"
+          },
+          "queued": {
+            "type": "boolean"
+          },
+          "retried": {
+            "type": "boolean"
+          },
+          "detail": {
+            "type": "string"
+          }
+        },
+        "example": {
+          "ok": true,
+          "queued": false
+        }
+      },
+      "ContactCreateRequest": {
+        "type": "object",
+        "description": "Either an invite URL or an explicit identity; `verify_key` is forced on by the HTTP layer.",
+        "properties": {
+          "invite_url": {
+            "type": "string",
+            "examples": [
+              "openmesh://contact?node=…&name=…&identity=…"
+            ]
+          },
+          "node_id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "identity": {
+            "type": "string",
+            "description": "Base64 72-byte public identity."
+          }
+        }
+      },
+      "ChannelCreateRequest": {
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "psk": {
+            "type": "string",
+            "description": "Optional base64 32-byte key; generated when absent."
+          }
+        }
+      },
+      "ChannelJoinRequest": {
+        "type": "object",
+        "description": "Either a channel invite URL or `name` + base64 `psk`.",
+        "properties": {
+          "url": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "psk": {
+            "type": "string"
+          }
+        }
+      },
+      "BackboneConfig": {
+        "type": "object",
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
+          "bind": {
+            "type": "string"
+          },
+          "port": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 65535
+          },
+          "auth": {
+            "type": "string",
+            "enum": [
+              "token",
+              "open"
+            ]
+          },
+          "max_peers": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 256
+          },
+          "allowlist": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "store_forward": {
+            "type": "boolean"
+          },
+          "name": {
+            "type": "string",
+            "maxLength": 32
+          },
+          "public_host": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "ping_interval_s": {
+            "type": "integer"
+          },
+          "stats_push_s": {
+            "type": "integer"
+          }
+        },
+        "example": {
+          "enabled": true,
+          "bind": "0.0.0.0",
+          "port": 9443,
+          "max_peers": 32
+        }
+      },
+      "BackboneView": {
+        "type": "object",
+        "required": [
+          "enabled"
+        ],
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
+          "running": {
+            "type": "boolean"
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "server",
+              "client",
+              "disabled"
+            ]
+          },
+          "bind": {
+            "type": "string"
+          },
+          "port": {
+            "type": "integer"
+          },
+          "auth": {
+            "type": "string",
+            "enum": [
+              "token",
+              "open"
+            ]
+          },
+          "token_set": {
+            "type": "boolean"
+          },
+          "max_peers": {
+            "type": "integer"
+          },
+          "allowlist": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "store_forward": {
+            "type": "boolean"
+          },
+          "name": {
+            "type": "string"
+          },
+          "public_host": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "ping_interval_s": {
+            "type": "integer"
+          },
+          "stats_push_s": {
+            "type": "integer"
+          },
+          "peers": {
+            "type": "integer"
+          },
+          "totals": {
+            "$ref": "#/components/schemas/BackboneTotals"
+          },
+          "restarted": {
+            "type": "boolean"
+          }
+        },
+        "example": {
+          "enabled": true,
+          "running": true,
+          "mode": "server",
+          "bind": "0.0.0.0",
+          "port": 9443,
+          "auth": "token",
+          "token_set": true,
+          "max_peers": 32,
+          "allowlist": [],
+          "store_forward": true,
+          "name": "oslo-backbone",
+          "public_host": "mesh.example.org",
+          "ping_interval_s": 30,
+          "stats_push_s": 30,
+          "peers": 1,
+          "totals": {
+            "frames_in": 100,
+            "frames_out": 90,
+            "bytes_in": 24000,
+            "bytes_out": 22000,
+            "auth_failures": 0,
+            "uptime_s": 3600,
+            "peers": 1
+          }
+        }
+      },
+      "BackboneTotals": {
+        "type": "object",
+        "properties": {
+          "frames_in": {
+            "type": "integer"
+          },
+          "frames_out": {
+            "type": "integer"
+          },
+          "bytes_in": {
+            "type": "integer"
+          },
+          "bytes_out": {
+            "type": "integer"
+          },
+          "auth_failures": {
+            "type": "integer"
+          },
+          "uptime_s": {
+            "type": "integer"
+          },
+          "peers": {
+            "type": "integer"
+          }
+        }
+      },
+      "BackbonePeer": {
+        "type": "object",
+        "properties": {
+          "node_id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "direction": {
+            "type": "string",
+            "enum": [
+              "inbound",
+              "outbound"
+            ]
+          },
+          "remote_addr": {
+            "type": "string"
+          },
+          "connected_at_ms": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "last_seen_ms": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "frames_in": {
+            "type": "integer"
+          },
+          "frames_out": {
+            "type": "integer"
+          },
+          "bytes_in": {
+            "type": "integer"
+          },
+          "bytes_out": {
+            "type": "integer"
+          },
+          "rtt_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "null until the first ping/pong (30 s default)."
+          },
+          "app_version": {
+            "type": "string"
+          },
+          "auth": {
+            "type": "string",
+            "enum": [
+              "token",
+              "open"
+            ]
+          }
+        },
+        "example": {
+          "node_id": "6b1f4a02c9de8810",
+          "name": "gateway-a",
+          "direction": "inbound",
+          "remote_addr": "203.0.113.7:51000",
+          "connected_at_ms": 1760000000000,
+          "last_seen_ms": 1760000060000,
+          "frames_in": 100,
+          "frames_out": 90,
+          "bytes_in": 24000,
+          "bytes_out": 22000,
+          "rtt_ms": 41,
+          "app_version": "openmesh-bridge/0.3.0",
+          "auth": "token"
+        }
+      },
+      "BackbonePeers": {
+        "type": "array",
+        "items": {
+          "$ref": "#/components/schemas/BackbonePeer"
+        },
+        "example": [
+          {
+            "node_id": "6b1f4a02c9de8810",
+            "name": "gateway-a",
+            "direction": "inbound",
+            "remote_addr": "203.0.113.7:51000",
+            "connected_at_ms": 1760000000000,
+            "last_seen_ms": 1760000060000,
+            "frames_in": 100,
+            "frames_out": 90,
+            "bytes_in": 24000,
+            "bytes_out": 22000,
+            "rtt_ms": 41,
+            "app_version": "openmesh-bridge/0.3.0",
+            "auth": "token"
+          }
+        ]
+      },
+      "BackboneSetup": {
+        "type": "object",
+        "required": [
+          "enabled"
+        ],
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
+          "listen": {
+            "type": "string",
+            "description": "OBB/1 listener (`bind:port`), not the API address."
+          },
+          "public_host": {
+            "type": "string"
+          },
+          "connection_string": {
+            "type": "string",
+            "description": "openmesh://backbone URL containing the OBB token."
+          },
+          "token_set": {
+            "type": "boolean"
+          },
+          "auth": {
+            "type": "string"
+          },
+          "steps": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "title": {
+                  "type": "string"
+                },
+                "commands": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "note": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "systemd_unit": {
+            "type": "string"
+          },
+          "firewall": {
+            "type": "object",
+            "properties": {
+              "firewalld": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "ufw": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "notes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "panel_url": {
+            "type": "string"
+          }
+        },
+        "example": {
+          "enabled": true,
+          "listen": "0.0.0.0:9443",
+          "public_host": "mesh.example.org",
+          "connection_string": "openmesh://backbone?host=mesh.example.org&port=9443&token=…&v=1",
+          "token_set": true,
+          "auth": "token",
+          "steps": [
+            {
+              "title": "Install OpenMesh",
+              "commands": [
+                "curl -fsSL https://github.com/martintondel02/openmesh/releases/latest/download/install.sh | sh"
+              ],
+              "note": "Installs the daemon and web panel."
+            }
+          ],
+          "systemd_unit": "[Unit]\nDescription=OpenMesh backbone bridge\n…",
+          "firewall": {
+            "firewalld": [
+              "sudo firewall-cmd --add-port=9443/tcp --permanent",
+              "sudo firewall-cmd --reload"
+            ],
+            "ufw": [
+              "sudo ufw allow 9443/tcp",
+              "sudo ufw reload"
+            ]
+          },
+          "notes": [
+            "OpenMesh payloads are end-to-end encrypted; the backbone relays ciphertext only."
+          ],
+          "panel_url": "http://127.0.0.1:8787/backbone"
+        }
+      },
+      "RotateResult": {
+        "type": "object",
+        "properties": {
+          "token": {
+            "type": "string",
+            "description": "New OBB token — shown exactly once."
+          },
+          "enabled": {
+            "type": "boolean"
+          }
+        },
+        "example": {
+          "token": "…base64url 32 bytes…"
+        }
+      },
+      "HelpIndex": {
+        "type": "object",
+        "required": [
+          "topics"
+        ],
+        "properties": {
+          "version": {
+            "type": "integer"
+          },
+          "generated_by": {
+            "type": "string"
+          },
+          "topics": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "slug",
+                "title",
+                "summary",
+                "audience",
+                "minutes",
+                "related"
+              ],
+              "properties": {
+                "slug": {
+                  "type": "string"
+                },
+                "title": {
+                  "type": "string"
+                },
+                "summary": {
+                  "type": "string"
+                },
+                "audience": {
+                  "type": "string",
+                  "enum": [
+                    "beginner",
+                    "advanced",
+                    "both"
+                  ]
+                },
+                "minutes": {
+                  "type": "integer"
+                },
+                "related": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "example": {
+          "version": 1,
+          "generated_by": "openmesh help index",
+          "topics": [
+            {
+              "slug": "getting-started",
+              "title": "Your first mesh in 10 minutes",
+              "summary": "Install, name your node, pick a region…",
+              "audience": "beginner",
+              "minutes": 8,
+              "related": [
+                "install",
+                "first-mesh",
+                "security"
+              ]
+            }
+          ]
+        }
+      },
+      "HelpTopic": {
+        "type": "object",
+        "required": [
+          "slug",
+          "title",
+          "markdown"
+        ],
+        "properties": {
+          "slug": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "summary": {
+            "type": "string"
+          },
+          "audience": {
+            "type": "string"
+          },
+          "minutes": {
+            "type": "integer"
+          },
+          "related": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "markdown": {
+            "type": "string",
+            "description": "Raw markdown body; first H1 is the title."
+          }
+        },
+        "example": {
+          "slug": "getting-started",
+          "title": "Your first mesh in 10 minutes",
+          "summary": "…",
+          "audience": "beginner",
+          "minutes": 8,
+          "related": [
+            "install"
+          ],
+          "markdown": "# Your first mesh in 10 minutes\n\n…"
+        }
+      },
+      "SetupCheck": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          },
+          "detail": {
+            "type": "string"
+          },
+          "count": {
+            "type": "integer"
+          },
+          "mode": {
+            "type": "string"
+          },
+          "last_action_ms": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        }
+      },
+      "SetupState": {
+        "type": "object",
+        "required": [
+          "first_run",
+          "checks",
+          "recommended",
+          "counts"
+        ],
+        "properties": {
+          "first_run": {
+            "type": "boolean"
+          },
+          "setup_completed": {
+            "type": "boolean"
+          },
+          "checks": {
+            "type": "object",
+            "properties": {
+              "identity": {
+                "$ref": "#/components/schemas/SetupCheck"
+              },
+              "radio": {
+                "$ref": "#/components/schemas/SetupCheck"
+              },
+              "api_token": {
+                "$ref": "#/components/schemas/SetupCheck"
+              },
+              "channel": {
+                "$ref": "#/components/schemas/SetupCheck"
+              },
+              "backbone": {
+                "$ref": "#/components/schemas/SetupCheck"
+              },
+              "agent": {
+                "$ref": "#/components/schemas/SetupCheck"
+              }
+            }
+          },
+          "recommended": {
+            "type": "object",
+            "properties": {
+              "region": {
+                "type": "string"
+              },
+              "profile": {
+                "type": "string"
+              },
+              "role": {
+                "type": "string"
+              }
+            }
+          },
+          "counts": {
+            "type": "object",
+            "properties": {
+              "nodes": {
+                "type": "integer"
+              },
+              "messages": {
+                "type": "integer"
+              },
+              "contacts": {
+                "type": "integer"
+              },
+              "channels": {
+                "type": "integer"
+              },
+              "radios": {
+                "type": "integer"
+              },
+              "backbone_peers": {
+                "type": "integer"
+              }
+            }
+          }
+        },
+        "example": {
+          "first_run": true,
+          "setup_completed": false,
+          "checks": {
+            "identity": {
+              "ok": true,
+              "detail": "node id 6b1f…"
+            },
+            "radio": {
+              "ok": true,
+              "detail": "1 transport(s) configured"
+            },
+            "api_token": {
+              "ok": true,
+              "detail": "the API requires a bearer token"
+            },
+            "channel": {
+              "ok": false,
+              "count": 0,
+              "detail": "create a channel to invite someone"
+            },
+            "backbone": {
+              "ok": false,
+              "mode": "disabled",
+              "detail": "run a backbone or connect a gateway"
+            },
+            "agent": {
+              "ok": false,
+              "last_action_ms": null,
+              "detail": "connect an AI agent with the MCP server"
+            }
+          },
+          "recommended": {
+            "region": "EU868",
+            "profile": "MEDIUM_FAST",
+            "role": "client"
+          },
+          "counts": {
+            "nodes": 0,
+            "messages": 0,
+            "contacts": 0,
+            "channels": 0,
+            "radios": 1,
+            "backbone_peers": 0
+          }
+        }
+      },
+      "SetupRecommendation": {
+        "type": "object",
+        "properties": {
+          "country": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "role": {
+            "type": "string"
+          },
+          "region": {
+            "type": "string"
+          },
+          "profile": {
+            "type": "string"
+          },
+          "store_forward": {
+            "type": "boolean"
+          },
+          "position_sharing": {
+            "type": "boolean"
+          },
+          "announce_interval_s": {
+            "type": "integer"
+          },
+          "duty_cycle_pct": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "frequency_mhz": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "notes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "warning": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "example": {
+          "country": "NO",
+          "role": "client",
+          "region": "EU868",
+          "profile": "MEDIUM_FAST",
+          "store_forward": false,
+          "position_sharing": false,
+          "announce_interval_s": 1800,
+          "duty_cycle_pct": 1.0,
+          "frequency_mhz": 869.525,
+          "notes": [
+            "EU868 uses a 1% duty cycle; keep media small."
+          ],
+          "warning": null
+        }
+      },
+      "SetupQuickRequest": {
+        "type": "object",
+        "required": [
+          "role"
+        ],
+        "properties": {
+          "role": {
+            "type": "string",
+            "enum": [
+              "client",
+              "tracker",
+              "repeater",
+              "gateway"
+            ]
+          },
+          "country": {
+            "type": "string",
+            "description": "ISO country code; drives the region."
+          },
+          "node_name": {
+            "type": "string"
+          },
+          "privacy": {
+            "type": "string",
+            "enum": [
+              "private",
+              "shared"
+            ]
+          },
+          "create_channel": {
+            "type": "boolean"
+          }
+        },
+        "example": {
+          "role": "client",
+          "country": "NO",
+          "node_name": "martin-phone",
+          "privacy": "private",
+          "create_channel": true
+        }
+      },
+      "SetupQuickResult": {
+        "type": "object",
+        "required": [
+          "applied",
+          "checklist",
+          "next_steps",
+          "setup_completed"
+        ],
+        "properties": {
+          "applied": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "channel": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "additionalProperties": true
+          },
+          "checklist": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "label": {
+                  "type": "string"
+                },
+                "ok": {
+                  "type": "boolean"
+                }
+              }
+            }
+          },
+          "next_steps": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "title": {
+                  "type": "string"
+                },
+                "detail": {
+                  "type": "string"
+                },
+                "help_topic": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "recommended": {
+            "$ref": "#/components/schemas/SetupRecommendation"
+          },
+          "first_run": {
+            "type": "boolean"
+          },
+          "setup_completed": {
+            "type": "boolean"
+          }
+        },
+        "example": {
+          "applied": {
+            "role": "client",
+            "region": "EU868",
+            "profile": "MEDIUM_FAST",
+            "store_forward": false,
+            "position_sharing": false,
+            "announce_interval_s": 1800,
+            "channel_created": true
+          },
+          "channel": {
+            "channel_id": "11223344aabbccdd",
+            "name": "family",
+            "invite_url": "openmesh://channel?name=family&id=…&psk=…",
+            "psk_once": "…"
+          },
+          "checklist": [
+            {
+              "id": "identity",
+              "label": "Identity created",
+              "ok": true
+            },
+            {
+              "id": "secure",
+              "label": "Secure defaults applied",
+              "ok": true
+            }
+          ],
+          "next_steps": [
+            {
+              "title": "Send your first message",
+              "detail": "Open Chats and write to a channel.",
+              "help_topic": "messaging"
+            }
+          ],
+          "recommended": {
+            "country": "NO",
+            "role": "client",
+            "region": "EU868",
+            "profile": "MEDIUM_FAST",
+            "store_forward": false,
+            "position_sharing": false,
+            "announce_interval_s": 1800,
+            "duty_cycle_pct": 1.0,
+            "frequency_mhz": 869.525,
+            "notes": [
+              "EU868 uses a 1% duty cycle; keep media small."
+            ],
+            "warning": null
+          },
+          "first_run": false,
+          "setup_completed": true
+        }
+      },
+      "ActivityEntry": {
+        "type": "object",
+        "required": [
+          "id",
+          "at_ms",
+          "source",
+          "method",
+          "path",
+          "summary",
+          "ok"
+        ],
+        "properties": {
+          "id": {
+            "type": "integer"
+          },
+          "at_ms": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "source": {
+            "type": "string",
+            "description": "`user`, `cli`, `web` or `agent:<name>`."
+          },
+          "method": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "summary": {
+            "type": "string",
+            "description": "No bodies or secrets."
+          },
+          "ok": {
+            "type": "boolean"
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "ActivityList": {
+        "type": "object",
+        "required": [
+          "entries"
+        ],
+        "properties": {
+          "entries": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ActivityEntry"
+            }
+          },
+          "capacity": {
+            "type": "integer"
+          },
+          "agent_connected": {
+            "type": "boolean"
+          },
+          "last_agent_at_ms": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "sources": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "example": {
+          "entries": [
+            {
+              "id": 12,
+              "at_ms": 1760000000000,
+              "source": "agent:claude",
+              "method": "POST",
+              "path": "/api/messages",
+              "summary": "send direct message to 6b1f… (14 bytes)",
+              "ok": true,
+              "error": null
+            }
+          ],
+          "capacity": 256,
+          "agent_connected": true,
+          "last_agent_at_ms": 1760000000000,
+          "sources": [
+            "user",
+            "cli",
+            "web",
+            "agent:*"
+          ]
+        }
+      },
+      "OpenApiDocument": {
+        "type": "object",
+        "description": "This OpenAPI 3.1 document.",
+        "additionalProperties": true
+      }
+    }
+  },
+  "paths": {
+    "/api/health": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "summary": "Public liveness probe",
+        "description": "No authentication required. Use for uptime checks and container healthchecks.",
+        "responses": {
+          "200": {
+            "description": "Bridge is alive",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Health"
+                },
+                "example": {
+                  "ok": true,
+                  "version": "0.3.0"
+                }
+              }
+            }
+          }
+        },
+        "security": []
+      }
+    },
+    "/api/status": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "summary": "Bridge, radio and mesh status",
+        "responses": {
+          "200": {
+            "description": "Status snapshot",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Status"
+                },
+                "example": {
+                  "uptime_s": 3600,
+                  "radio": {
+                    "connected": true,
+                    "tx_queue": 0,
+                    "airtime_used_pct": 0.4,
+                    "rssi": -88,
+                    "snr": 6.5,
+                    "frequency_mhz": 869.525,
+                    "tx_power_dbm": 14
+                  },
+                  "mesh": {
+                    "tx_frames": 42,
+                    "rx_frames": 55,
+                    "forwarded": 12,
+                    "dropped": 2,
+                    "known_nodes": 3,
+                    "stored_envelopes": 0,
+                    "duty_cycle_pct": 0.4
+                  },
+                  "storage": {
+                    "used_bytes": 40960,
+                    "db_path": "/home/you/.local/share/openmesh/openmesh.redb"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "error": "bad_request",
+                  "code": "bad_request",
+                  "message": "…",
+                  "help_topic": "getting-started"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing/invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "error": "unauthorized",
+                  "code": "unauthorized",
+                  "message": "…",
+                  "help_topic": "getting-started"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/config": {
+      "get": {
+        "tags": [
+          "configuration"
+        ],
+        "summary": "Current bridge configuration",
+        "responses": {
+          "200": {
+            "description": "Configuration",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Config"
+                },
+                "example": {
+                  "node": {
+                    "name": "martin-phone",
+                    "class": "client",
+                    "announce_interval_s": 1800
+                  },
+                  "radio": {
+                    "profile": "MEDIUM_FAST",
+                    "region": "EU868",
+                    "tx_power_dbm": 14,
+                    "frequency_mhz": 869.525,
+                    "interface": "sim0"
+                  },
+                  "features": {
+                    "auto_announce": true,
+                    "store_forward": false,
+                    "position_sharing": false
+                  },
+                  "channels": [
+                    {
+                      "channel_id": "11223344aabbccdd",
+                      "name": "family",
+                      "psk_set": true
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "error": "bad_request",
+                  "code": "bad_request",
+                  "message": "…",
+                  "help_topic": "getting-started"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing/invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "error": "unauthorized",
+                  "code": "unauthorized",
+                  "message": "…",
+                  "help_topic": "getting-started"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "configuration"
+        ],
+        "summary": "Partially update configuration (live)",
+        "description": "Same semantics as the WebSocket `set_config` command; applies to the running bridge without a restart where possible. Attributed in the activity log.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConfigPatch"
+              },
+              "example": {
+                "radio": {
+                  "profile": "LONG_FAST"
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Updated configuration",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Config"
+                },
+                "example": {
+                  "node": {
+                    "name": "martin-phone",
+                    "class": "client",
+                    "announce_interval_s": 1800
+                  },
+                  "radio": {
+                    "profile": "MEDIUM_FAST",
+                    "region": "EU868",
+                    "tx_power_dbm": 14,
+                    "frequency_mhz": 869.525,
+                    "interface": "sim0"
+                  },
+                  "features": {
+                    "auto_announce": true,
+                    "store_forward": false,
+                    "position_sharing": false
+                  },
+                  "channels": [
+                    {
+                      "channel_id": "11223344aabbccdd",
+                      "name": "family",
+                      "psk_set": true
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "error": "bad_request",
+                  "code": "bad_request",
+                  "message": "…",
+                  "help_topic": "getting-started"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing/invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "error": "unauthorized",
+                  "code": "unauthorized",
+                  "message": "…",
+                  "help_topic": "getting-started"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "configuration"
+        ],
+        "summary": "Partially update configuration (live; POST alias)",
+        "description": "Alias of PATCH /api/config for clients that cannot send PATCH.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConfigPatch"
+              },
+              "example": {
+                "features": {
+                  "store_forward": true
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Updated configuration",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Config"
+                },
+                "example": {
+                  "node": {
+                    "name": "martin-phone",
+                    "class": "client",
+                    "announce_interval_s": 1800
+                  },
+                  "radio": {
+                    "profile": "MEDIUM_FAST",
+                    "region": "EU868",
+                    "tx_power_dbm": 14,
+                    "frequency_mhz": 869.525,
+                    "interface": "sim0"
+                  },
+                  "features": {
+                    "auto_announce": true,
+                    "store_forward": false,
+                    "position_sharing": false
+                  },
+                  "channels": [
+                    {
+                      "channel_id": "11223344aabbccdd",
+                      "name": "family",
+                      "psk_set": true
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "error": "bad_request",
+                  "code": "bad_request",
+                  "message": "…",
+                  "help_topic": "getting-started"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing/invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "error": "unauthorized",
+                  "code": "unauthorized",
+                  "message": "…",
+                  "help_topic": "getting-started"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/ws": {
+      "get": {
+        "tags": [
+          "realtime"
+        ],
+        "summary": "WebSocket API (JSON events/commands)",
+        "description": "Upgrade to a WebSocket. Authenticate with `?token=<bridge-token>` (browsers cannot set headers) or a bearer header. Envelope: `{v:1,type,id?,data}`. See docs/architecture/WEBSOCKET-API.md for the event and command catalog.",
+        "responses": {
+          "101": {
+            "description": "Switching protocols (WebSocket established)"
+          },
+          "401": {
+            "description": "Missing/invalid token"
+          }
+        }
+      }
+    },
+    "/api/events": {
+      "get": {
+        "tags": [
+          "realtime"
+        ],
+        "summary": "Server-sent events stream",
+        "description": "Authenticated SSE stream of bridge events (same payloads as WebSocket server events).",
+        "responses": {
+          "200": {
+            "description": "text/event-stream",
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing/invalid token"
+          }
+        }
+      }
+    },
+    "/api/nodes": {
+      "get": {
+        "tags": [
+          "nodes"
+        ],
+        "summary": "List known mesh nodes",
+        "responses": {
+          "200": {
+            "description": "Node list",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Nodes"
+                },
+                "example": {
+                  "nodes": [
+                    {
+                      "node_id": "6b1f4a02c9de8810",
+                      "name": "martin-phone",
+                      "class": "client",
+                      "caps": [
+                        "relay",
+                        "gps"
+                      ],
+                      "hops": 1,
+                      "last_seen_ms": 1760000000000,
+                      "rssi": -87,
+                      "snr": 7.5,
+                      "position": {
+                        "lat": 59.9127,
+                        "lon": 10.7461,
+                        "accuracy_m": 12,
+                        "timestamp_ms": 1760000000000
+                      },
+                      "battery_pct": 82,
+                      "is_contact": true,
+                      "public_key": "…base64 72-byte identity…"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "error": "bad_request",
+                  "code": "bad_request",
+                  "message": "…",
+                  "help_topic": "getting-started"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing/invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "error": "unauthorized",
+                  "code": "unauthorized",
+                  "message": "…",
+                  "help_topic": "getting-started"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/nodes/{node_id}": {
+      "get": {
+        "tags": [
+          "nodes"
+        ],
+        "summary": "One node by id",
+        "responses": {
+          "200": {
+            "description": "Node",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Node"
+                },
+                "example": {
+                  "node_id": "6b1f4a02c9de8810",
+                  "name": "martin-phone",
+                  "class": "client",
+                  "caps": [
+                    "relay",
+                    "gps"
+                  ],
+                  "hops": 1,
+                  "last_seen_ms": 1760000000000,
+                  "rssi": -87,
+                  "snr": 7.5,
+                  "position": {
+                    "lat": 59.9127,
+                    "lon": 10.7461,
+                    "accuracy_m": 12,
+                    "timestamp_ms": 1760000000000
+                  },
+                  "battery_pct": 82,
+                  "is_contact": true,
+                  "public_key": "…base64 72-byte identity…"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing/invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "error": "unauthorized",
+                  "code": "unauthorized",
+                  "message": "…",
+                  "help_topic": "getting-started"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown node",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "error": "not_found",
+                  "code": "not_found",
+                  "message": "…",
+                  "help_topic": "getting-started"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/contacts": {
+      "get": {
+        "tags": [
+          "contacts"
+        ],
+        "summary": "List contacts",
+        "responses": {
+          "200": {
+            "description": "Contact list",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Contacts"
+                },
+                "example": {
+                  "contacts": [
+                    {
+                      "node_id": "6b1f4a02c9de8810",
+                      "name": "martin",
+                      "identity": "…base64…",
+                      "last_seen_ms": 1760000000000
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "error": "bad_request",
+                  "code": "bad_request",
+                  "message": "…",
+                  "help_topic": "getting-started"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing/invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "error": "unauthorized",
+                  "code": "unauthorized",
+                  "message": "…",
+                  "help_topic": "getting-started"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "contacts"
+        ],
+        "summary": "Add a contact from an invite or identity",
+        "description": "Accepts either `invite_url` or `node_id`/`name`/`identity`. Keys are verified against the node id.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ContactCreateRequest"
+              },
+              "example": {
+                "invite_url": "openmesh://contact?node=…&name=martin&identity=…"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Contact stored",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Contact"
+                },
+                "example": {
+                  "node_id": "6b1f4a02c9de8810",
+                  "name": "martin",
+                  "identity": "…base64…",
+                  "last_seen_ms": 1760000000000
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "error": "bad_request",
+                  "code": "bad_request",
+                  "message": "…",
+                  "help_topic": "getting-started"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing/invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "error": "unauthorized",
+                  "code": "unauthorized",
+                  "message": "…",
+                  "help_topic": "getting-started"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/channels": {
+      "get": {
+        "tags": [
+          "channels"
+        ],
+        "summary": "List joined channels (PSKs never returned)",
+        "responses": {
+          "200": {
+            "description": "Channel list",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Channels"
+                },
+                "example": {
+                  "channels": [
+                    {
+                      "channel_id": "11223344aabbccdd",
+                      "name": "family",
+                      "psk_set": true
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "error": "bad_request",
+                  "code": "bad_request",
+                  "message": "…",
+                  "help_topic": "getting-started"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing/invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "error": "unauthorized",
+                  "code": "unauthorized",
+                  "message": "…",
+                  "help_topic": "getting-started"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "channels"
+        ],
+        "summary": "Create a channel",
+        "description": "Returns the channel key and invite URL exactly once (`psk_once`, `shown_once: true`).",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ChannelCreateRequest"
+              },
+              "example": {
+                "name": "family"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Channel created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChannelCreated"
+                },
+                "example": {
+                  "channel_id": "11223344aabbccdd",
+                  "name": "family",
+                  "psk_once": "…",
+                  "invite_url": "openmesh://channel?name=family&id=…&psk=…",
+                  "shown_once": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "error": "bad_request",
+                  "code": "bad_request",
+                  "message": "…",
+                  "help_topic": "getting-started"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing/invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "error": "unauthorized",
+                  "code": "unauthorized",
+                  "message": "…",
+                  "help_topic": "getting-started"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/channels/join": {
+      "post": {
+        "tags": [
+          "channels"
+        ],
+        "summary": "Join a channel from an invite or PSK",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ChannelJoinRequest"
+              },
+              "example": {
+                "url": "openmesh://channel?name=family&id=…&psk=…"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Joined channel",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Channel"
+                },
+                "example": {
+                  "channel_id": "11223344aabbccdd",
+                  "name": "family",
+                  "psk_set": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "error": "bad_request",
+                  "code": "bad_request",
+                  "message": "…",
+                  "help_topic": "getting-started"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing/invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "error": "unauthorized",
+                  "code": "unauthorized",
+                  "message": "…",
+                  "help_topic": "getting-started"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/channels/{channel_id}/messages": {
+      "post": {
+        "tags": [
+          "messages"
+        ],
+        "summary": "Send a group message",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SendChannelMessageRequest"
+              },
+              "example": {
+                "text": "hello family"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Message accepted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SendResult"
+                },
+                "example": {
+                  "msg_id": 43,
+                  "est_airtime_ms": 611,
+                  "queued": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "error": "bad_request",
+                  "code": "bad_request",
+                  "message": "…",
+                  "help_topic": "getting-started"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing/invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "error": "unauthorized",
+                  "code": "unauthorized",
+                  "message": "…",
+                  "help_topic": "getting-started"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/messages": {
+      "get": {
+        "tags": [
+          "messages"
+        ],
+        "summary": "Direct message history",
+        "description": "Filter by `peer`; newest first, paginated with `before_ms`/`limit`.",
+        "responses": {
+          "200": {
+            "description": "Direct messages",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Messages"
+                },
+                "example": {
+                  "messages": [
+                    {
+                      "msg_id": 42,
+                      "peer": "6b1f4a02c9de8810",
+                      "from": "6b1f4a02c9de8810",
+                      "to": "aabbccdd00112233",
+                      "kind": "text",
+                      "text": "hello mesh",
+                      "sent_at_ms": 1760000000000,
+                      "received_at_ms": 1760000001200,
+                      "outgoing": true,
+                      "delivered": true,
+                      "read": false,
+                      "reply_to": null,
+                      "thread": null,
+                      "attachment": null,
+                      "position": null
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "error": "bad_request",
+                  "code": "bad_request",
+                  "message": "…",
+                  "help_topic": "getting-started"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing/invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "error": "unauthorized",
+                  "code": "unauthorized",
+                  "message": "…",
+                  "help_topic": "getting-started"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "messages"
+        ],
+        "summary": "Send a direct message",
+        "description": "Sealed to the recipient's public key. Returns a queued/immediate result with an estimated airtime.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SendMessageRequest"
+              },
+              "example": {
+                "to": "aabbccdd00112233",
+                "text": "hello"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Message accepted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SendResult"
+                },
+                "example": {
+                  "msg_id": 42,
+                  "est_airtime_ms": 611,
+                  "queued": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "error": "bad_request",
+                  "code": "bad_request",
+                  "message": "…",
+                  "help_topic": "getting-started"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing/invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "error": "unauthorized",
+                  "code": "unauthorized",
+                  "message": "…",
+                  "help_topic": "getting-started"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/messages/channel/{channel_id}": {
+      "get": {
+        "tags": [
+          "messages"
+        ],
+        "summary": "Channel message history",
+        "responses": {
+          "200": {
+            "description": "Channel messages",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GroupMessages"
+                },
+                "example": {
+                  "messages": [
+                    {
+                      "msg_id": 43,
+                      "channel_id": "11223344aabbccdd",
+                      "channel_name": "family",
+                      "from": "6b1f4a02c9de8810",
+                      "from_name": "martin",
+                      "sender_key": "…",
+                      "kind": "text",
+                      "text": "hello family",
+                      "sent_at_ms": 1760000000000,
+                      "outgoing": false,
+                      "signature_valid": true,
+                      "attachment": null,
+                      "position": null
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "error": "bad_request",
+                  "code": "bad_request",
+                  "message": "…",
+                  "help_topic": "getting-started"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing/invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "error": "unauthorized",
+                  "code": "unauthorized",
+                  "message": "…",
+                  "help_topic": "getting-started"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/messages/{message_id}/read": {
+      "post": {
+        "tags": [
+          "messages"
+        ],
+        "summary": "Mark a message read",
+        "description": "Sends a read receipt when the message is inbound and unread; emits `message_update`.",
+        "responses": {
+          "200": {
+            "description": "Marked read",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ActionOk"
+                },
+                "example": {
+                  "ok": true,
+                  "msg_id": 42
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "error": "bad_request",
+                  "code": "bad_request",
+                  "message": "…",
+                  "help_topic": "getting-started"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing/invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "error": "unauthorized",
+                  "code": "unauthorized",
+                  "message": "…",
+                  "help_topic": "getting-started"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/messages/{message_id}/retry": {
+      "post": {
+        "tags": [
+          "messages"
+        ],
+        "summary": "Retry delivery of an outgoing message",
+        "responses": {
+          "200": {
+            "description": "Retry queued",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ActionOk"
+                },
+                "example": {
+                  "ok": true,
+                  "retried": true,
+                  "msg_id": 42
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "error": "bad_request",
+                  "code": "bad_request",
+                  "message": "…",
+                  "help_topic": "getting-started"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing/invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "error": "unauthorized",
+                  "code": "unauthorized",
+                  "message": "…",
+                  "help_topic": "getting-started"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/position": {
+      "post": {
+        "tags": [
+          "messages"
+        ],
+        "summary": "Share the current position once",
+        "description": "Send to a contact (`to`) or a channel (`channel_id`); exactly one target is required. Omit `position` to use the bridge's current fix.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SendPositionRequest"
+              },
+              "example": {
+                "channel_id": "11223344aabbccdd"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Position accepted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SendResult"
+                },
+                "example": {
+                  "msg_id": 44,
+                  "est_airtime_ms": 611,
+                  "queued": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "error": "bad_request",
+                  "code": "bad_request",
+                  "message": "…",
+                  "help_topic": "getting-started"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing/invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "error": "unauthorized",
+                  "code": "unauthorized",
+                  "message": "…",
+                  "help_topic": "getting-started"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/announce": {
+      "post": {
+        "tags": [
+          "nodes"
+        ],
+        "summary": "Force an announce",
+        "responses": {
+          "200": {
+            "description": "Announce queued",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ActionOk"
+                },
+                "example": {
+                  "ok": true,
+                  "queued": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "error": "bad_request",
+                  "code": "bad_request",
+                  "message": "…",
+                  "help_topic": "getting-started"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing/invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "error": "unauthorized",
+                  "code": "unauthorized",
+                  "message": "…",
+                  "help_topic": "getting-started"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/attachments": {
+      "post": {
+        "tags": [
+          "attachments"
+        ],
+        "summary": "Upload raw attachment bytes",
+        "description": "Send raw bytes with `Content-Type`; supports images/voice/files. Max size depends on the bridge limit; reference the returned id in a send call.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "image/jpeg": {
+              "schema": {
+                "type": "string",
+                "format": "binary"
+              }
+            },
+            "audio/ogg": {
+              "schema": {
+                "type": "string",
+                "format": "binary"
+              }
+            },
+            "application/octet-stream": {
+              "schema": {
+                "type": "string",
+                "format": "binary"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Stored attachment",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AttachmentUpload"
+                },
+                "example": {
+                  "id": "att_0123456789ab",
+                  "size": 5120,
+                  "sha256": "9f2c…"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing Content-Type or invalid body",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "error": "bad_request",
+                  "code": "bad_request",
+                  "message": "…",
+                  "help_topic": "getting-started"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing/invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "error": "unauthorized",
+                  "code": "unauthorized",
+                  "message": "…",
+                  "help_topic": "getting-started"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Attachment too large",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "error": "too_large",
+                  "code": "too_large",
+                  "message": "…",
+                  "help_topic": "getting-started"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/attachments/{attachment_id}": {
+      "get": {
+        "tags": [
+          "attachments"
+        ],
+        "summary": "Download stored attachment bytes",
+        "responses": {
+          "200": {
+            "description": "Attachment bytes",
+            "content": {
+              "application/octet-stream": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              },
+              "image/jpeg": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              },
+              "audio/ogg": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing/invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "error": "unauthorized",
+                  "code": "unauthorized",
+                  "message": "…",
+                  "help_topic": "getting-started"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown attachment",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "error": "not_found",
+                  "code": "not_found",
+                  "message": "…",
+                  "help_topic": "getting-started"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/backbone": {
+      "get": {
+        "tags": [
+          "backbone"
+        ],
+        "summary": "Backbone configuration and live totals",
+        "description": "`{enabled:false}` on a bridge without backbone mode. The OBB token is never returned; `token_set` indicates whether one exists.",
+        "responses": {
+          "200": {
+            "description": "Backbone view",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BackboneView"
+                },
+                "example": {
+                  "enabled": true,
+                  "running": true,
+                  "mode": "server",
+                  "bind": "0.0.0.0",
+                  "port": 9443,
+                  "auth": "token",
+                  "token_set": true,
+                  "max_peers": 32,
+                  "allowlist": [],
+                  "store_forward": true,
+                  "name": "oslo-backbone",
+                  "public_host": "mesh.example.org",
+                  "ping_interval_s": 30,
+                  "stats_push_s": 30,
+                  "peers": 1,
+                  "totals": {
+                    "frames_in": 100,
+                    "frames_out": 90,
+                    "bytes_in": 24000,
+                    "bytes_out": 22000,
+                    "auth_failures": 0,
+                    "uptime_s": 3600,
+                    "peers": 1
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "error": "bad_request",
+                  "code": "bad_request",
+                  "message": "…",
+                  "help_topic": "getting-started"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing/invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "error": "unauthorized",
+                  "code": "unauthorized",
+                  "message": "…",
+                  "help_topic": "getting-started"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/backbone/peers": {
+      "get": {
+        "tags": [
+          "backbone"
+        ],
+        "summary": "Connected backbone peers",
+        "description": "A JSON array of peers (empty when not configured); `rtt_ms` is null until the first ping/pong.",
+        "responses": {
+          "200": {
+            "description": "Peer list",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BackbonePeers"
+                },
+                "example": [
+                  {
+                    "node_id": "6b1f4a02c9de8810",
+                    "name": "gateway-a",
+                    "direction": "inbound",
+                    "remote_addr": "203.0.113.7:51000",
+                    "connected_at_ms": 1760000000000,
+                    "last_seen_ms": 1760000060000,
+                    "frames_in": 100,
+                    "frames_out": 90,
+                    "bytes_in": 24000,
+                    "bytes_out": 22000,
+                    "rtt_ms": 41,
+                    "app_version": "openmesh-bridge/0.3.0",
+                    "auth": "token"
+                  }
+                ]
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "error": "bad_request",
+                  "code": "bad_request",
+                  "message": "…",
+                  "help_topic": "getting-started"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing/invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "error": "unauthorized",
+                  "code": "unauthorized",
+                  "message": "…",
+                  "help_topic": "getting-started"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/backbone/config": {
+      "post": {
+        "tags": [
+          "backbone"
+        ],
+        "summary": "Update backbone configuration (live)",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BackboneConfig"
+              },
+              "example": {
+                "enabled": true,
+                "max_peers": 64
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Updated view (includes `restarted`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BackboneView"
+                },
+                "example": {
+                  "enabled": true,
+                  "running": true,
+                  "mode": "server",
+                  "bind": "0.0.0.0",
+                  "port": 9443,
+                  "auth": "token",
+                  "token_set": true,
+                  "max_peers": 32,
+                  "allowlist": [],
+                  "store_forward": true,
+                  "name": "oslo-backbone",
+                  "public_host": "mesh.example.org",
+                  "ping_interval_s": 30,
+                  "stats_push_s": 30,
+                  "peers": 1,
+                  "totals": {
+                    "frames_in": 100,
+                    "frames_out": 90,
+                    "bytes_in": 24000,
+                    "bytes_out": 22000,
+                    "auth_failures": 0,
+                    "uptime_s": 3600,
+                    "peers": 1
+                  },
+                  "restarted": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "error": "bad_request",
+                  "code": "bad_request",
+                  "message": "…",
+                  "help_topic": "getting-started"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing/invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "error": "unauthorized",
+                  "code": "unauthorized",
+                  "message": "…",
+                  "help_topic": "getting-started"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/backbone/token/rotate": {
+      "post": {
+        "tags": [
+          "backbone"
+        ],
+        "summary": "Rotate the OBB/1 token",
+        "description": "The new token is returned exactly once; stale peers are disconnected. Requires confirmation in MCP callers.",
+        "responses": {
+          "200": {
+            "description": "New token (shown once)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RotateResult"
+                },
+                "example": {
+                  "token": "…base64url 32 bytes…"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "error": "bad_request",
+                  "code": "bad_request",
+                  "message": "…",
+                  "help_topic": "getting-started"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing/invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "error": "unauthorized",
+                  "code": "unauthorized",
+                  "message": "…",
+                  "help_topic": "getting-started"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/backbone/setup": {
+      "get": {
+        "tags": [
+          "backbone"
+        ],
+        "summary": "Onboarding payload for the panel and MCP",
+        "description": "Connection string, firewall commands, systemd unit, panel URL. Treat it as secret: the connection string contains the OBB token.",
+        "responses": {
+          "200": {
+            "description": "Setup payload",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BackboneSetup"
+                },
+                "example": {
+                  "enabled": true,
+                  "listen": "0.0.0.0:9443",
+                  "public_host": "mesh.example.org",
+                  "connection_string": "openmesh://backbone?host=mesh.example.org&port=9443&token=…&v=1",
+                  "token_set": true,
+                  "auth": "token",
+                  "steps": [
+                    {
+                      "title": "Install OpenMesh",
+                      "commands": [
+                        "curl -fsSL https://github.com/martintondel02/openmesh/releases/latest/download/install.sh | sh"
+                      ],
+                      "note": "Installs the daemon and web panel."
+                    }
+                  ],
+                  "systemd_unit": "[Unit]\nDescription=OpenMesh backbone bridge\n…",
+                  "firewall": {
+                    "firewalld": [
+                      "sudo firewall-cmd --add-port=9443/tcp --permanent",
+                      "sudo firewall-cmd --reload"
+                    ],
+                    "ufw": [
+                      "sudo ufw allow 9443/tcp",
+                      "sudo ufw reload"
+                    ]
+                  },
+                  "notes": [
+                    "OpenMesh payloads are end-to-end encrypted; the backbone relays ciphertext only."
+                  ],
+                  "panel_url": "http://127.0.0.1:8787/backbone"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "error": "bad_request",
+                  "code": "bad_request",
+                  "message": "…",
+                  "help_topic": "getting-started"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing/invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "error": "unauthorized",
+                  "code": "unauthorized",
+                  "message": "…",
+                  "help_topic": "getting-started"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/backbone/qr.svg": {
+      "get": {
+        "tags": [
+          "backbone"
+        ],
+        "summary": "QR code (SVG) of the connection string",
+        "responses": {
+          "200": {
+            "description": "SVG image",
+            "content": {
+              "image/svg+xml": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing/invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "error": "unauthorized",
+                  "code": "unauthorized",
+                  "message": "…",
+                  "help_topic": "getting-started"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/backbone/peers/{node_id}": {
+      "delete": {
+        "tags": [
+          "backbone"
+        ],
+        "summary": "Disconnect one backbone peer",
+        "responses": {
+          "200": {
+            "description": "Peer disconnected",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ActionOk"
+                },
+                "example": {
+                  "disconnected": true
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing/invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "error": "unauthorized",
+                  "code": "unauthorized",
+                  "message": "…",
+                  "help_topic": "getting-started"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Peer not connected",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "error": "not_found",
+                  "code": "not_found",
+                  "message": "…",
+                  "help_topic": "getting-started"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/help": {
+      "get": {
+        "tags": [
+          "help"
+        ],
+        "summary": "Help topic index",
+        "description": "Searchable index of the embedded help corpus (same content as the web Help Center).",
+        "responses": {
+          "200": {
+            "description": "Topic index",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HelpIndex"
+                },
+                "example": {
+                  "version": 1,
+                  "generated_by": "openmesh help index",
+                  "topics": [
+                    {
+                      "slug": "getting-started",
+                      "title": "Your first mesh in 10 minutes",
+                      "summary": "Install, name your node, pick a region…",
+                      "audience": "beginner",
+                      "minutes": 8,
+                      "related": [
+                        "install",
+                        "first-mesh",
+                        "security"
+                      ]
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "error": "bad_request",
+                  "code": "bad_request",
+                  "message": "…",
+                  "help_topic": "getting-started"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing/invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "error": "unauthorized",
+                  "code": "unauthorized",
+                  "message": "…",
+                  "help_topic": "getting-started"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/help/{slug}": {
+      "get": {
+        "tags": [
+          "help"
+        ],
+        "summary": "One help topic as markdown + metadata",
+        "responses": {
+          "200": {
+            "description": "Topic",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HelpTopic"
+                },
+                "example": {
+                  "slug": "getting-started",
+                  "title": "Your first mesh in 10 minutes",
+                  "summary": "…",
+                  "audience": "beginner",
+                  "minutes": 8,
+                  "related": [
+                    "install"
+                  ],
+                  "markdown": "# Your first mesh in 10 minutes\n\n…"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing/invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "error": "unauthorized",
+                  "code": "unauthorized",
+                  "message": "…",
+                  "help_topic": "getting-started"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown topic",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "error": "not_found",
+                  "code": "not_found",
+                  "message": "…",
+                  "help_topic": "getting-started"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/setup/state": {
+      "get": {
+        "tags": [
+          "setup"
+        ],
+        "summary": "First-run and checklist state",
+        "responses": {
+          "200": {
+            "description": "Setup state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SetupState"
+                },
+                "example": {
+                  "first_run": true,
+                  "setup_completed": false,
+                  "checks": {
+                    "identity": {
+                      "ok": true,
+                      "detail": "node id 6b1f…"
+                    },
+                    "radio": {
+                      "ok": true,
+                      "detail": "1 transport(s) configured"
+                    },
+                    "api_token": {
+                      "ok": true,
+                      "detail": "the API requires a bearer token"
+                    },
+                    "channel": {
+                      "ok": false,
+                      "count": 0,
+                      "detail": "create a channel to invite someone"
+                    },
+                    "backbone": {
+                      "ok": false,
+                      "mode": "disabled",
+                      "detail": "run a backbone or connect a gateway"
+                    },
+                    "agent": {
+                      "ok": false,
+                      "last_action_ms": null,
+                      "detail": "connect an AI agent with the MCP server"
+                    }
+                  },
+                  "recommended": {
+                    "region": "EU868",
+                    "profile": "MEDIUM_FAST",
+                    "role": "client"
+                  },
+                  "counts": {
+                    "nodes": 0,
+                    "messages": 0,
+                    "contacts": 0,
+                    "channels": 0,
+                    "radios": 1,
+                    "backbone_peers": 0
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "error": "bad_request",
+                  "code": "bad_request",
+                  "message": "…",
+                  "help_topic": "getting-started"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing/invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "error": "unauthorized",
+                  "code": "unauthorized",
+                  "message": "…",
+                  "help_topic": "getting-started"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/setup/recommend": {
+      "get": {
+        "tags": [
+          "setup"
+        ],
+        "summary": "Region/profile/role recommendation for the wizard",
+        "responses": {
+          "200": {
+            "description": "Recommendation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SetupRecommendation"
+                },
+                "example": {
+                  "country": "NO",
+                  "role": "client",
+                  "region": "EU868",
+                  "profile": "MEDIUM_FAST",
+                  "store_forward": false,
+                  "position_sharing": false,
+                  "announce_interval_s": 1800,
+                  "duty_cycle_pct": 1.0,
+                  "frequency_mhz": 869.525,
+                  "notes": [
+                    "EU868 uses a 1% duty cycle; keep media small."
+                  ],
+                  "warning": null
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "error": "bad_request",
+                  "code": "bad_request",
+                  "message": "…",
+                  "help_topic": "getting-started"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing/invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "error": "unauthorized",
+                  "code": "unauthorized",
+                  "message": "…",
+                  "help_topic": "getting-started"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/setup/quick": {
+      "post": {
+        "tags": [
+          "setup"
+        ],
+        "summary": "Apply the secure beginner preset",
+        "description": "Idempotent server-owned preset: role, country/region, profile, privacy, optional private channel. Returns what changed, a checklist and next steps.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetupQuickRequest"
+              },
+              "example": {
+                "role": "client",
+                "country": "NO",
+                "create_channel": true
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Preset applied",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SetupQuickResult"
+                },
+                "example": {
+                  "applied": {
+                    "role": "client",
+                    "region": "EU868",
+                    "profile": "MEDIUM_FAST",
+                    "store_forward": false,
+                    "position_sharing": false,
+                    "announce_interval_s": 1800,
+                    "channel_created": true
+                  },
+                  "channel": {
+                    "channel_id": "11223344aabbccdd",
+                    "name": "family",
+                    "invite_url": "openmesh://channel?name=family&id=…&psk=…",
+                    "psk_once": "…"
+                  },
+                  "checklist": [
+                    {
+                      "id": "identity",
+                      "label": "Identity created",
+                      "ok": true
+                    },
+                    {
+                      "id": "secure",
+                      "label": "Secure defaults applied",
+                      "ok": true
+                    }
+                  ],
+                  "next_steps": [
+                    {
+                      "title": "Send your first message",
+                      "detail": "Open Chats and write to a channel.",
+                      "help_topic": "messaging"
+                    }
+                  ],
+                  "recommended": {
+                    "country": "NO",
+                    "role": "client",
+                    "region": "EU868",
+                    "profile": "MEDIUM_FAST",
+                    "store_forward": false,
+                    "position_sharing": false,
+                    "announce_interval_s": 1800,
+                    "duty_cycle_pct": 1.0,
+                    "frequency_mhz": 869.525,
+                    "notes": [
+                      "EU868 uses a 1% duty cycle; keep media small."
+                    ],
+                    "warning": null
+                  },
+                  "first_run": false,
+                  "setup_completed": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "error": "bad_request",
+                  "code": "bad_request",
+                  "message": "…",
+                  "help_topic": "getting-started"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing/invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "error": "unauthorized",
+                  "code": "unauthorized",
+                  "message": "…",
+                  "help_topic": "getting-started"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/activity": {
+      "get": {
+        "tags": [
+          "activity"
+        ],
+        "summary": "Recent write actions for transparency",
+        "description": "Bounded ring (256 entries), newest first. Read calls are not logged; entries never contain bodies, tokens or PSKs.",
+        "responses": {
+          "200": {
+            "description": "Activity entries",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ActivityList"
+                },
+                "example": {
+                  "entries": [
+                    {
+                      "id": 12,
+                      "at_ms": 1760000000000,
+                      "source": "agent:claude",
+                      "method": "POST",
+                      "path": "/api/messages",
+                      "summary": "send direct message to 6b1f… (14 bytes)",
+                      "ok": true,
+                      "error": null
+                    }
+                  ],
+                  "capacity": 256,
+                  "agent_connected": true,
+                  "last_agent_at_ms": 1760000000000,
+                  "sources": [
+                    "user",
+                    "cli",
+                    "web",
+                    "agent:*"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "error": "bad_request",
+                  "code": "bad_request",
+                  "message": "…",
+                  "help_topic": "getting-started"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing/invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "error": "unauthorized",
+                  "code": "unauthorized",
+                  "message": "…",
+                  "help_topic": "getting-started"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/openapi.json": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "summary": "This OpenAPI document",
+        "description": "The machine-readable REST contract embedded in the bridge; also shipped at docs/api/openapi.json.",
+        "responses": {
+          "200": {
+            "description": "OpenAPI 3.1 JSON",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OpenApiDocument"
+                },
+                "example": {
+                  "openapi": "3.1.0",
+                  "info": {
+                    "title": "OpenMesh Bridge API",
+                    "version": "0.3.0"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "error": "bad_request",
+                  "code": "bad_request",
+                  "message": "…",
+                  "help_topic": "getting-started"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing/invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "error": "unauthorized",
+                  "code": "unauthorized",
+                  "message": "…",
+                  "help_topic": "getting-started"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

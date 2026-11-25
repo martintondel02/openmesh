@@ -5,6 +5,42 @@ All notable changes to this project are documented here. The format follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Protocol changes are called out
 explicitly.
 
+## [0.3.0] - 2026-11-25
+
+### Added — beginner-friendly UX and an AI-native control plane
+
+**Beginner / advanced UX** (`docs/design/ux-help-system.md`)
+- First-run 3-screen onboarding that applies a **secure preset** (region from country, radio
+  profile, private channel + invite QR, position sharing off, token auth on) via
+  `GET /api/setup/state`, `GET /api/setup/recommend`, `POST /api/setup/quick`; resumable
+  "Get started" checklist.
+- Beginner/Advanced mode switch (persisted, synced with the bridge): beginner shows only the
+  choices that matter in plain language; advanced exposes every documented field, airtime math and
+  secrets management.
+- **Help Center** (`/help/:slug`, search, beginner/advanced filter, deep links, ToC) built from a
+  single help corpus (`content/help/`, 16 topics + glossary) that is also embedded in the bridge
+  (`GET /api/help*`) and served to AI agents; `HelpTip` on every control, ~35-term glossary
+  popovers, guided empty states, actionable error toasts, insecurity/no-radio banners.
+- **Agents page**: MCP configuration snippets (Claude/Cursor/DSH/generic), copyable beginner and
+  advanced system prompts, read-only explainer, attributed activity log, token-revocation guidance.
+
+**AI-native control plane** (`docs/architecture/AI-NATIVE.md`)
+- `openmesh-bridge mcp`: Model Context Protocol server over stdio with **27 typed tools**
+  (13 read, 14 write), resources (help topics, status, nodes, config), 5 prompts, read-only mode,
+  `confirm: true` for destructive actions, 30 writes/min cap and `X-OpenMesh-Agent` attribution.
+- Activity log: bounded 256-entry write log with source attribution (`user`, `web`, `cli`,
+  `agent:<name>`), no bodies or secrets; `GET /api/activity`, MCP `openmesh_activity`, web table.
+- `openmesh-cli agent prompt --tier beginner|advanced`, `agent config --client …`,
+  `agent activity`, `help [topic]`.
+- Machine-readable contracts: complete OpenAPI 3.1 (`docs/api/openapi.json`, served at
+  `GET /api/openapi.json`, enforced by `scripts/check_openapi.py`), root `AGENTS.md`, `llms.txt`.
+- Docs: `docs/QUICKSTART.md`, advanced cookbook, troubleshooting playbook, FAQ, long-form glossary,
+  MCP reference + 7-prompt pack, ADR 0010.
+
+### Fixed
+- `openmesh-cli` no longer panics on startup from a clap `help` subcommand collision
+  (`disable_help_subcommand`); `--help` and `help [topic]` both work.
+
 ## [0.2.0] - 2026-11-25
 
 ### Added — Backbone mode

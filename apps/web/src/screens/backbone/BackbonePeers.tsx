@@ -14,6 +14,7 @@ import { formatAuthMode, formatPeerDirection, formatRtt, rttTone } from '../../l
 import { Avatar, Badge, Button, EmptyState, IconButton } from '../../components/ui/primitives';
 import { CopyButton } from '../../components/ui/signals';
 import { ConfirmDialog } from '../../components/ui/overlay';
+import { HelpTip } from '../../components/ui/help';
 
 /** Connected-peer table (desktop) / cards (mobile) with kick confirmation. */
 export function BackbonePeers({
@@ -22,12 +23,14 @@ export function BackbonePeers({
   onKick,
   onOpenSetup,
   demo = false,
+  canKick = true,
 }: {
   peers: BackbonePeer[];
   maxPeers: number;
   onKick: (nodeId: string) => void;
   onOpenSetup: () => void;
   demo?: boolean;
+  canKick?: boolean;
 }) {
   const [kickTarget, setKickTarget] = useState<BackbonePeer | null>(null);
 
@@ -38,9 +41,10 @@ export function BackbonePeers({
           <RadioTower className="h-4 w-4" aria-hidden="true" />
         </div>
         <div className="min-w-0 flex-1">
-          <h3 className="text-sm font-semibold text-slate-100">
+          <h3 className="flex items-center gap-1.5 text-sm font-semibold text-slate-100">
             Connected peers
-            <span className="ml-2 font-mono text-2xs font-normal text-slate-500">
+            <HelpTip helpKey="backbone.stat.peers" label="Connected peers" />
+            <span className="ml-1 font-mono text-2xs font-normal text-slate-500">
               {peers.length}/{maxPeers}
             </span>
           </h3>
@@ -120,13 +124,15 @@ export function BackbonePeers({
                     </td>
                     <td className="whitespace-nowrap px-3 py-2.5 text-3xs text-slate-500">{formatLastSeen(peer.last_seen_ms)}</td>
                     <td className="px-3 py-2.5 text-right">
-                      <IconButton
-                        icon={UserX}
-                        label={`Kick ${peer.name || peer.node_id}`}
-                        size="sm"
-                        className="opacity-0 transition-opacity hover:text-rose-300 group-hover:opacity-100 group-focus-within:opacity-100"
-                        onClick={() => setKickTarget(peer)}
-                      />
+                      {canKick ? (
+                        <IconButton
+                          icon={UserX}
+                          label={`Kick ${peer.name || peer.node_id}`}
+                          size="sm"
+                          className="opacity-0 transition-opacity hover:text-rose-300 group-hover:opacity-100 group-focus-within:opacity-100"
+                          onClick={() => setKickTarget(peer)}
+                        />
+                      ) : null}
                     </td>
                   </tr>
                 ))}
@@ -163,13 +169,15 @@ export function BackbonePeers({
                     </div>
                     <div className="mt-1.5 flex items-center justify-between gap-2">
                       <TrafficCell peer={peer} />
-                      <IconButton
-                        icon={UserX}
-                        label={`Kick ${peer.name || peer.node_id}`}
-                        size="sm"
-                        className="text-slate-500 hover:text-rose-300"
-                        onClick={() => setKickTarget(peer)}
-                      />
+                      {canKick ? (
+                        <IconButton
+                          icon={UserX}
+                          label={`Kick ${peer.name || peer.node_id}`}
+                          size="sm"
+                          className="text-slate-500 hover:text-rose-300"
+                          onClick={() => setKickTarget(peer)}
+                        />
+                      ) : null}
                     </div>
                   </div>
                 </div>

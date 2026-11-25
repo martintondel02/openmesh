@@ -2,8 +2,12 @@ import { defineConfig } from 'vitest/config';
 import react from '@vitejs/plugin-react';
 
 // https://vite.dev/config/
+// The web/PWA build uses absolute asset URLs so deep links such as /help/security
+// and /backbone load correctly. Tauri builds keep relative URLs for its custom protocol.
+const isTauriBuild = Boolean(process.env.TAURI_ENV_PLATFORM || process.env.TAURI_ENV_ARCH);
+
 export default defineConfig({
-  base: './',
+  base: isTauriBuild ? './' : '/',
   plugins: [react()],
   server: {
     port: 5173,

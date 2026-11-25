@@ -7,6 +7,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -172,6 +173,87 @@ pub enum EngineInput {
     /// Toggle store-and-forward (engine relay role) — backbone `store_forward` setting.
     SetStoreForward(bool),
     Tick,
+}
+
+/// Error returned by a command forwarded to the engine task (REST/MCP friendly).
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct CommandError {
+    pub code: String,
+    pub message: String,
+}
+
+impl CommandError {
+    pub fn new(code: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            code: code.into(),
+            message: message.into(),
+        }
+    }
+}
+
+/// Forward one mutating command to the engine task and wait for its JSON reply (10 s).
+///
+/// The reply envelope is `{v,type,id?,data}`; success returns `data`, engine errors become
+/// [`CommandError`] with the documented code and plain-language message.
+pub async fn run_command(
+    shared: &Shared,
+    kind: CommandKind,
+) -> Result<serde_json::Value, CommandError> {
+    let (reply_tx, mut reply_rx) = mpsc::unbounded_channel::<Arc<str>>();
+    let command = ClientCommand { id: None, kind };
+    shared
+        .commands
+        .send(EngineInput::Command {
+            cmd: command,
+            reply: reply_tx,
+        })
+        .await
+        .map_err(|_| CommandError::new("unavailable", "bridge engine is not available"))?;
+    let reply = match tokio::time::timeout(Duration::from_secs(10), reply_rx.recv()).await {
+        Ok(Some(reply)) => reply,
+        Ok(None) => {
+            return Err(CommandError::new(
+                "unavailable",
+                "bridge engine closed before answering",
+            ));
+        }
+        Err(_) => {
+            return Err(CommandError::new(
+                "timeout",
+                "the bridge did not answer within 10 seconds",
+            ));
+        }
+    };
+    let value: serde_json::Value = serde_json::from_str(&reply)
+        .map_err(|e| CommandError::new("internal", format!("invalid engine reply: {e}")))?;
+    if value.get("type").and_then(|v| v.as_str()) == Some("error") {
+        let data = value
+            .get("data")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        return Err(CommandError::new(
+            data.get("code")
+                .and_then(|v| v.as_str())
+                .unwrap_or("internal"),
+            data.get("message")
+                .and_then(|v| v.as_str())
+                .unwrap_or("command failed"),
+        ));
+    }
+    Ok(value.get("data").cloned().unwrap_or(serde_json::json!({})))
+}
+
+/// Queue a command without waiting for a reply (announce/mark-read style operations).
+pub async fn queue_command(shared: &Shared, kind: CommandKind) -> Result<(), CommandError> {
+    let (reply_tx, _reply_rx) = mpsc::unbounded_channel::<Arc<str>>();
+    shared
+        .commands
+        .send(EngineInput::Command {
+            cmd: ClientCommand { id: None, kind },
+            reply: reply_tx,
+        })
+        .await
+        .map_err(|_| CommandError::new("unavailable", "bridge engine is not available"))
 }
 
 /// Everything the API layer and transports share with the engine task.
@@ -1849,6 +1931,92 @@ pub fn channel_url(channel: NodeId, name: &str, psk: &[u8; 32]) -> String {
         channel.to_hex(),
         base64_url(psk)
     )
+}
+
+/// Parse the query string of an `openmesh://...` URL into decoded key/value pairs.
+pub fn parse_url_query(url: &str, scheme_prefix: &str) -> Option<HashMap<String, String>> {
+    let rest = url.strip_prefix(scheme_prefix)?;
+    let query = rest.split_once('?')?.1;
+    let mut out = HashMap::new();
+    for pair in query.split('&') {
+        let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+        out.insert(url_decode(key), url_decode(value));
+    }
+    Some(out)
+}
+
+fn url_decode(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'%' if index + 2 < bytes.len() => {
+                let hex = std::str::from_utf8(&bytes[index + 1..index + 3]).ok();
+                if let Some(byte) = hex.and_then(|h| u8::from_str_radix(h, 16).ok()) {
+                    out.push(byte);
+                    index += 3;
+                    continue;
+                }
+                out.push(b'%');
+                index += 1;
+            }
+            b'+' => {
+                out.push(b' ');
+                index += 1;
+            }
+            byte => {
+                out.push(byte);
+                index += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).to_string()
+}
+
+/// Decode base64 in any of the alphabets the bridge/QR links may use (standard or URL-safe,
+/// padded or unpadded). Invite URLs use URL-safe no-pad while the WS API uses standard.
+pub fn b64_decode_any(encoded: &str) -> Option<Vec<u8>> {
+    use base64::Engine as _;
+    let encoded = encoded.trim();
+    for engine in [
+        base64::engine::general_purpose::URL_SAFE_NO_PAD,
+        base64::engine::general_purpose::URL_SAFE,
+        base64::engine::general_purpose::STANDARD_NO_PAD,
+        base64::engine::general_purpose::STANDARD,
+    ] {
+        if let Ok(bytes) = engine.decode(encoded) {
+            return Some(bytes);
+        }
+    }
+    None
+}
+
+/// Parse `openmesh://channel?name=...&psk=...` (id is optional and ignored on join).
+pub fn parse_channel_url(url: &str) -> Option<(String, [u8; 32])> {
+    let params = parse_url_query(url, "openmesh://channel")?;
+    let name = params.get("name")?.trim().to_string();
+    if name.is_empty() {
+        return None;
+    }
+    let psk: [u8; 32] = b64_decode_any(params.get("psk")?)?.try_into().ok()?;
+    Some((name, psk))
+}
+
+/// Parse `openmesh://contact?node=...&identity=...&name=...`.
+pub fn parse_contact_url(url: &str) -> Option<(NodeId, Option<String>, PublicIdentity)> {
+    let params = parse_url_query(url, "openmesh://contact")?;
+    let node = parse_node_id(params.get("node")?)?;
+    let identity = PublicIdentity::from_bytes(&b64_decode_any(params.get("identity")?)?).ok()?;
+    if identity.node_id != node {
+        return None;
+    }
+    let name = params
+        .get("name")
+        .map(|name| name.trim().to_string())
+        .filter(|name| !name.is_empty())
+        .map(|name| name.chars().take(64).collect());
+    Some((node, name, identity))
 }
 
 fn base64_url(bytes: &[u8]) -> String {

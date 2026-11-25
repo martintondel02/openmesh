@@ -32,3 +32,5 @@ __pycache__/
 # Build artifacts
 build/
 artifacts/
+# generated help bundle for the web client demo/offline mode
+apps/web/public/help/

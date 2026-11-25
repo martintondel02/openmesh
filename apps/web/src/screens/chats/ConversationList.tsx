@@ -5,6 +5,7 @@ import { selectConversations } from '../../store/selectors';
 import { formatRelativeTime } from '../../lib/utils';
 import { Avatar, EmptyState, IconButton, SectionTitle, SegmentedControl } from '../../components/ui/primitives';
 import { DeliveryTicks } from '../../components/ui/signals';
+import { GetStartedCard } from './GetStartedCard';
 
 type Filter = 'all' | 'group' | 'direct';
 
@@ -130,6 +131,7 @@ export function ConversationList({ onNewChat }: { onNewChat: () => void }) {
       </div>
 
       <div className="min-h-0 flex-1 overflow-y-auto px-2 py-2">
+        <GetStartedCard />
         {visibleChannels.length > 0 ? (
           <div>
             <div className="flex items-center gap-1.5 px-2 pb-1 pt-1.5">
@@ -175,6 +177,7 @@ export function ConversationList({ onNewChat }: { onNewChat: () => void }) {
                 : 'Start a direct message with a node your radio has heard, or create a channel for your group.'
             }
             className="py-10"
+            helpTopic="messaging"
             action={
               <button
                 type="button"

@@ -1,4 +1,4 @@
-import { useId } from 'react';
+import { forwardRef, useId } from 'react';
 import type { ComponentType, InputHTMLAttributes, ReactNode, SelectHTMLAttributes, TextareaHTMLAttributes } from 'react';
 import { AlertCircle, Check } from 'lucide-react';
 import { cn } from '../../lib/utils';
@@ -56,9 +56,11 @@ export function Field({ label, hint, error, success, required, children, classNa
   );
 }
 
-export function TextInput({ className, ...rest }: InputHTMLAttributes<HTMLInputElement>) {
-  return <input className={cn('field-shell h-9 py-0', className)} {...rest} />;
-}
+export const TextInput = forwardRef<HTMLInputElement, InputHTMLAttributes<HTMLInputElement>>(
+  function TextInput({ className, ...rest }, ref) {
+    return <input ref={ref} className={cn('field-shell h-9 py-0', className)} {...rest} />;
+  },
+);
 
 export function TextArea({ className, ...rest }: TextareaHTMLAttributes<HTMLTextAreaElement>) {
   return <textarea className={cn('field-shell min-h-[76px] resize-y leading-relaxed', className)} {...rest} />;
@@ -95,16 +97,20 @@ export interface SliderProps {
   markers?: { value: number; label: string }[];
   disabled?: boolean;
   id?: string;
+  labelAccessory?: ReactNode;
 }
 
-export function Slider({ value, min, max, step = 1, onChange, label, formatValue, markers, disabled, id }: SliderProps) {
+export function Slider({ value, min, max, step = 1, onChange, label, formatValue, markers, disabled, id, labelAccessory }: SliderProps) {
   const progress = max > min ? ((value - min) / (max - min)) * 100 : 0;
   return (
     <div className="space-y-2">
       <div className="flex items-center justify-between text-xs">
-        <label htmlFor={id} className="font-medium text-slate-300">
-          {label}
-        </label>
+        <span className="inline-flex items-center gap-1.5">
+          <label htmlFor={id} className="font-medium text-slate-300">
+            {label}
+          </label>
+          {labelAccessory}
+        </span>
         <span className="font-mono text-2xs text-emerald-300">{formatValue ? formatValue(value) : value}</span>
       </div>
       <input

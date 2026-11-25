@@ -133,6 +133,7 @@ The full records live in [`docs/adr/`](../adr/) (MADR format). Summary:
 | 7 | [Opus for voice, Codec2 optional](../adr/0007-media-pipeline.md) | Opus is universally decodable in browsers/phones and ~7 kbps for voice is acceptable on a 1–5 kbps mesh with chunking; Codec2 700C is available for the smallest presets. |
 | 8 | [AGPL-3.0](../adr/0008-agpl-3-0-licensing.md) | Network copyleft keeps the mesh and every client fork open; compatible with the GPL-3.0 references we studied. |
 | 9 | [Backbone mode](../adr/0009-backbone-mode.md) | Always-on authenticated TCP relay plus a loopback control panel: the deployment story beyond one radio's range. Token auth with end-to-end payload encryption; TLS/VPN termination documented for hostile networks. |
+| 10 | [AI-native + beginner UX](../adr/0010-ai-native-and-beginner-ux.md) | Beginner/advanced progressive disclosure with server-owned secure presets; one help corpus feeds web/API/MCP; the local stdio MCP client is a thin, attributable REST client; OpenAPI + an activity log keep every surface honest. |
 
 ---
 

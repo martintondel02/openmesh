@@ -13,9 +13,10 @@ No accounts. No cell towers. No cloud. Just radios, repeaters and your people.
 
 ![OpenMesh web client — encrypted group chat over LoRa](docs/assets/screenshots/chats.jpg)
 
-**Docs:** [Architecture](docs/architecture/ARCHITECTURE.md) ·
+**Docs:** [Quick start](docs/QUICKSTART.md) ·
+[Architecture](docs/architecture/ARCHITECTURE.md) ·
 [Protocol spec](docs/architecture/PROTOCOL.md) ·
-[Bridge API](docs/architecture/WEBSOCKET-API.md) ·
+[Agent (MCP)](docs/agents/mcp.md) ·
 [Hardware](docs/hardware/boards.md) ·
 [Roadmap](docs/ROADMAP.md)
 
@@ -83,7 +84,7 @@ envelopes) and reject what makes life hard on a 240-byte MTU: global routing sta
 per message, and client stacks nobody wants to use. Details and trade-offs:
 [ADR-0001](docs/adr/0001-own-protocol-vs-reticulum.md), [research notes](docs/research/).
 
-## Feature status (v0.1.0-alpha)
+## Feature status (v0.3.0)
 
 | Area | Status |
 | --- | --- |
@@ -94,6 +95,8 @@ per message, and client stacks nobody wants to use. Details and trade-offs:
 | Repeater store-and-forward | ✅ protocol + firmware |
 | Bridge daemon (WS/REST, redb persistence, attachments) | ✅ |
 | **Backbone mode** (authenticated TCP relay + live control panel + installer) | ✅ v0.2 |
+| **Beginner UX** (guided secure setup, beginner/advanced modes, Help Center, glossary) | ✅ v0.3 |
+| **AI-native** (MCP server, 27 agent tools, activity log, OpenAPI 3.1, prompt pack) | ✅ v0.3 |
 | Web / PWA client (chat, groups, map, voice, images, demo mode) | ✅ |
 | Desktop packaging (Tauri 2, Linux/macOS/Windows) | ✅ config; build needs system webkit2gtk/WebView deps |
 | Firmware: 4 reference boards + golden-vector conformance | ✅ code complete, build matrix in CI |
@@ -158,6 +161,53 @@ tools/flash/openmesh-flash --list
 tools/flash/openmesh-flash --board t1000e --uf2 build/t1000e.uf2
 tools/flash/openmesh-flash --board heltec_tracker --port /dev/ttyACM0
 ```
+
+## Beginner-friendly, and AI-native (v0.3)
+
+Mesh software is usually built for people who already understand radios, keys and airtime. OpenMesh
+v0.3 ships **two front doors and one source of truth**:
+
+- **A 3-minute secure setup.** A guided wizard asks three questions (what is this box, where are
+  you, keep my location private?) and applies a **secure preset**: region from your country,
+  sensible radio profile, private channel with a generated key, invite QR, position sharing off,
+  token auth on. A resumable "Get started" checklist follows you until the node is set up.
+- **Beginner / Advanced modes.** Beginner shows only the choices that matter, explained in plain
+  language with a `?` on every control. Advanced reveals everything — airtime math, TTLs, raw
+  identities, allowlists, token rotation — with the exact numbers and no hidden settings.
+- **One help corpus, everywhere.** The same 16 help topics + glossary power the in-app **Help
+  Center** (search, beginner/advanced filter, deep links from every tooltip), the bridge
+  `GET /api/help` API, and the AI agent's `openmesh_help` tool. Docs, UI and agents cannot disagree.
+- **An AI-native control plane.** `openmesh-bridge mcp` exposes **27 tools** over the Model Context
+  Protocol — status, nodes, messages, channels, contacts, config, backbone, setup, help, activity —
+  so Claude Code, Cursor, DSH or any MCP client can manage a node with typed tools, read-only mode,
+  `confirm: true` on destructive actions, and an **activity log** attributing every write to
+  `user`, `web`, `cli` or `agent:<name>`.
+- **Copy-paste agent prompts.** `openmesh-cli agent prompt --tier beginner|advanced` prints a ready
+  system prompt with live mesh state; `docs/agents/prompts.md` has seven scenarios (troubleshoot,
+  family setup, VPS backbone, developer integration…), and [`AGENTS.md`](AGENTS.md) +
+  [`llms.txt`](llms.txt) tell coding agents how to work on the project itself.
+- **Machine-readable everything.** Complete [OpenAPI 3.1](docs/api/openapi.json) for the REST API,
+  checked in CI against the actual router.
+
+```bash
+openmesh-bridge mcp                              # MCP server on stdio (Claude Desktop/Code, Cursor, DSH)
+openmesh-cli agent config --client claude       # copy-paste client config
+openmesh-cli agent prompt --tier beginner       # ready system prompt, live state included
+openmesh-cli agent activity                     # what did my agent actually do?
+```
+
+| Guided secure setup | Help Center |
+| --- | --- |
+| ![Onboarding wizard — what is this box?](docs/assets/screenshots/onboarding.jpg) | ![Help Center — same content as the app and the agent](docs/assets/screenshots/help-center.jpg) |
+
+| Agents — MCP config, prompts and attributed activity | Beginner settings — secure defaults explained |
+| --- | --- |
+| ![Agents page with activity log](docs/assets/screenshots/agents.jpg) | ![Beginner settings with help tooltips](docs/assets/screenshots/settings-beginner.jpg) |
+
+Read: [Quick start (10 minutes)](docs/QUICKSTART.md) ·
+[Help topics](content/help/) ·
+[MCP + prompts](docs/agents/mcp.md) ·
+[API](docs/api/openapi.json) · [ADR 0010](docs/adr/0010-ai-native-and-beginner-ux.md)
 
 ## Run a backbone (v0.2)
 
@@ -240,6 +290,9 @@ docs/                    Architecture, protocol, ADRs, research, hardware
 * [Backbone mode (OBB/1) — relay + control panel](docs/architecture/BACKBONE.md) · [ADR 0009](docs/adr/0009-backbone-mode.md)
 * [Install guide](docs/INSTALL.md) · [Backbone deployment & operations](docs/operations/backbone-deployment.md)
 * [Hardware support and flashing](docs/hardware/boards.md)
+* [Quick start (beginner)](docs/QUICKSTART.md) · [Advanced cookbook](docs/guides/advanced-cookbook.md) · [Troubleshooting](docs/guides/troubleshooting.md) · [FAQ](docs/guides/faq.md) · [Glossary](docs/glossary.md)
+* [AI-native control plane (MCP + prompts)](docs/agents/mcp.md) · [OpenAPI 3.1](docs/api/openapi.json)
+* [AGENTS.md](AGENTS.md) · [llms.txt](llms.txt) — for coding agents working on the repo
 * [ADRs](docs/adr/) · [Research](docs/research/) · [Roadmap](docs/ROADMAP.md)
 
 ## Security

@@ -25,6 +25,7 @@ import {
 } from '../../lib/backbone';
 import { Badge, Button, IconButton, Toggle } from '../../components/ui/primitives';
 import { CopyButton } from '../../components/ui/signals';
+import { HelpTip } from '../../components/ui/help';
 import { ConfirmDialog, Modal } from '../../components/ui/overlay';
 import { Callout } from '../../components/ui/forms';
 import { QRCode } from '../../components/common/QRCode';
@@ -39,19 +40,21 @@ export function BackboneConnection({
   maxPeers,
   connectionString,
   demo,
+  showAdvanced = true,
 }: {
   config: BackboneConfig;
   peersConnected: number;
   maxPeers: number;
   connectionString: string | null;
   demo: boolean;
+  showAdvanced?: boolean;
 }) {
   const rotateBackboneToken = useAppStore((state) => state.rotateBackboneToken);
   const kickAllBackbonePeers = useAppStore((state) => state.kickAllBackbonePeers);
   const pushToast = useAppStore((state) => state.pushToast);
   const bridgeUrl = useAppStore((state) => state.settings.bridgeUrl);
 
-  const [revealed, setRevealed] = useState(demo);
+  const [revealed, setRevealed] = useState(demo && showAdvanced);
   const [rotateOpen, setRotateOpen] = useState(false);
   const [rotating, setRotating] = useState(false);
   const [newToken, setNewToken] = useState<string | null>(null);
@@ -126,17 +129,20 @@ export function BackboneConnection({
             <p className="flex items-center gap-1 text-3xs uppercase tracking-[0.12em] text-slate-500">
               Connection string
               {config.auth === 'open' ? <Badge tone="rose">open</Badge> : null}
+              <HelpTip helpKey="backbone.connection" label="Connection string" />
             </p>
             <div className="flex items-center gap-1">
               {connectionString ? (
                 <>
                   <CopyButton value={connectionString} label="Copy" size="md" variant="surface" />
-                  <IconButton
-                    icon={revealed ? EyeOff : Eye}
-                    label={revealed ? 'Hide token' : 'Reveal token'}
-                    size="sm"
-                    onClick={() => setRevealed((value) => !value)}
-                  />
+                  {showAdvanced ? (
+                    <IconButton
+                      icon={revealed ? EyeOff : Eye}
+                      label={revealed ? 'Hide token' : 'Reveal token'}
+                      size="sm"
+                      onClick={() => setRevealed((value) => !value)}
+                    />
+                  ) : null}
                 </>
               ) : null}
             </div>
@@ -164,20 +170,27 @@ export function BackboneConnection({
               <span className="grid h-12 w-12 place-items-center rounded-xl border border-white/[0.07] bg-white/[0.03] text-slate-500">
                 <QrCode className="h-5 w-5" aria-hidden="true" />
               </span>
-              <Button
-                variant="secondary"
-                size="sm"
-                icon={Eye}
-                onClick={() => setRevealed(true)}
-                disabled={!connectionString}
-              >
-                Reveal to show QR
-              </Button>
-              <p className="text-3xs text-slate-600">The QR embeds the bearer token — reveal only when nobody is watching.</p>
+              {showAdvanced ? (
+                <>
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    icon={Eye}
+                    onClick={() => setRevealed(true)}
+                    disabled={!connectionString}
+                  >
+                    Reveal to show QR
+                  </Button>
+                  <p className="text-3xs text-slate-600">The QR embeds the bearer token — reveal only when nobody is watching.</p>
+                </>
+              ) : (
+                <p className="text-3xs text-slate-600">Switch to Advanced to reveal the token and QR.</p>
+              )}
             </div>
           )}
         </div>
 
+        {showAdvanced ? (
         <div className="rounded-xl border border-white/[0.06] bg-white/[0.015] p-3">
           <div className="flex items-center justify-between gap-2">
             <div className="flex items-center gap-2">
@@ -202,6 +215,8 @@ export function BackboneConnection({
           </p>
         </div>
 
+        ) : null}
+
         <div className="flex items-center justify-between gap-2 border-t border-white/[0.05] pt-3 text-3xs">
           <span className="min-w-0 truncate text-slate-500">
             {peersConnected}/{maxPeers} peers · panel at{' '}
@@ -211,6 +226,7 @@ export function BackboneConnection({
         </div>
       </div>
 
+      {showAdvanced ? (
       <ConfirmDialog
         open={rotateOpen}
         onClose={() => setRotateOpen(false)}
@@ -230,7 +246,9 @@ export function BackboneConnection({
           Copy the new token before closing the next dialog.
         </Callout>
       </ConfirmDialog>
+      ) : null}
 
+      {showAdvanced ? (
       <Modal
         open={Boolean(newToken)}
         onClose={() => void finishRotation()}
@@ -279,6 +297,7 @@ export function BackboneConnection({
           ) : null}
         </div>
       </Modal>
+      ) : null}
     </section>
   );
 }

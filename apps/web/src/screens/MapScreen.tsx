@@ -29,6 +29,7 @@ import { formatLastSeen, formatRole, cn, roleColor, shortenNodeId } from '../lib
 import { Avatar, Badge, Button, IconButton, Tooltip } from '../components/ui/primitives';
 import { BatteryIndicator, CapsIcons, RoleBadge, SignalBars } from '../components/ui/signals';
 import { Modal } from '../components/ui/overlay';
+import { HelpLink } from '../components/ui/help';
 
 const ROLE_ORDER: RoleClass[] = ['gateway', 'repeater', 'room_server', 'client', 'tracker'];
 const ROLE_LABELS: Record<string, string> = {
@@ -430,6 +431,32 @@ export function MapScreen() {
   return (
     <div className="relative min-h-0 flex-1 overflow-hidden">
       <div ref={containerRef} className="h-full w-full overflow-hidden" role="application" aria-label="Mesh map of known nodes" />
+
+      {nodesWithPosition.length === 0 ? (
+        <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center p-4">
+          <div className="glass pointer-events-auto max-w-sm rounded-2xl border border-white/[0.08] p-5 text-center shadow-panel">
+            <span className="mx-auto grid h-12 w-12 place-items-center rounded-2xl border border-white/[0.07] bg-white/[0.03]">
+              <MapPin className="h-5 w-5 text-slate-500" aria-hidden="true" />
+            </span>
+            <p className="mt-3 text-sm font-medium text-slate-200">No positions on the map yet</p>
+            <p className="mt-1 text-2xs leading-relaxed text-slate-500">
+              Nodes appear here when they share a position. That is private by default, so an empty map can mean a
+              healthy, privacy-first mesh.
+            </p>
+            <div className="mt-3 flex flex-wrap items-center justify-center gap-2">
+              <button
+                type="button"
+                onClick={() => setScreen('nodes')}
+                className="focus-ring inline-flex items-center gap-1 rounded-lg border border-white/10 bg-white/[0.05] px-2.5 py-1.5 text-2xs font-medium text-slate-200 hover:bg-white/[0.08]"
+              >
+                <Radio className="h-3.5 w-3.5" aria-hidden="true" />
+                Browse nodes
+              </button>
+              <HelpLink topic="map-and-position">How sharing works</HelpLink>
+            </div>
+          </div>
+        </div>
+      ) : null}
 
       {/* top-left status card */}
       <div className="pointer-events-none absolute left-3 top-3 z-10 flex max-w-[calc(100%-1.5rem)] flex-col gap-2 md:left-5 md:top-4">

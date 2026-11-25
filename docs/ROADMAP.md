@@ -32,6 +32,7 @@ Related: [Architecture](architecture/ARCHITECTURE.md) ·
 | --- | --- | --- | --- |
 | **M0** | v0.1.0: spec, core, bridge, web, firmware, simulator, flashers, docs, Android scaffold | 0 (delivered as this milestone) | repository/CI |
 | **v0.2** | Backbone mode: OBB/1 authenticated TCP relay, live control panel, installer + ops docs (ships alongside M1) | weeks 1–2 | infrastructure |
+| **v0.3** | Beginner-friendly + AI-native: guided setup, one help corpus, local MCP agent server, OpenAPI, QUICKSTART/guides | weeks 3–4 | product + developer experience |
 | **M1** | Field-ready text mesh: hardware bring-up, store-forward tuning, OTA, invites, airtime caps | weeks 1–8 | hardware + tuning |
 | **M2** | Android GA + companion polish + background sync + media UX | weeks 9–20 | mobile product |
 | **M3** | OMP/2: ratchets, optional directed routing, voice calls (gated) | weeks 21–34 | protocol |
@@ -104,6 +105,50 @@ See [INSTALL.md](INSTALL.md), [operations/backbone-deployment.md](operations/bac
 
 **Still open from this theme:** native TLS in OBB/2, per-peer identity instead of a shared token,
 panel session hardening, multi-backbone auto-peering/federation (currently manual `join` links).
+
+---
+
+## 3c. v0.3 — Beginner-friendly + AI-native (shipped)
+
+**Goal:** let a non-technical person go from install to a secure, working mesh without reading a
+manual, and let AI agents operate the node safely, without splitting the project into two products
+or adding a cloud service.
+
+**Delivered:**
+
+* **Beginner/advanced modes** with server-owned secure presets (`GET /api/setup/state`,
+  `POST /api/setup/quick`, `GET /api/setup/recommend`): role, country→region, profile, privacy,
+  store-forward, announce interval, optional private channel invite. The UI, CLI and agents share
+  the same presets, so "secure my node" cannot mean different things in different clients.
+* **One help corpus**: 16 self-contained topics in `content/help/` (+ `index.json` metadata),
+  embedded in the bridge at build time, served by `GET /api/help` + `/api/help/:slug`, rendered in
+  the web Help Center and demo mode, exposed to agents as `openmesh_help` / MCP resources, and
+  checked for consistency by `scripts/check_help.py`.
+* **Local MCP server** (`openmesh-bridge mcp`): stdio JSON-RPC 2.0, 27 tools (13 read + 14 write),
+  resources (`openmesh://help/*`, `status`, `nodes`, `config`), 5 prompts, read-only mode,
+  `confirm: true` for destructive tools, 30 writes/min, 10 s timeouts; a thin client of the bridge
+  REST API that never touches identity keys.
+* **Transparency**: bounded activity log of write calls with source attribution
+  (`X-OpenMesh-Agent` / `X-OpenMesh-Client`), shown in `/api/activity` and the web Agents page;
+  read calls are not logged.
+* **Machine-readable REST contract**: complete OpenAPI 3.1 (`docs/api/openapi.json`, 33 paths /
+  38 operations), served at `/api/openapi.json`, plus `scripts/check_openapi.py` which fails CI if
+  a literal `/api/...` route in the HTTP module is undocumented.
+* **Documentation entry points**: `docs/QUICKSTART.md` (zero→secure mesh in 10 min), `docs/guides/`
+  (advanced cookbook, troubleshooting, FAQ), `docs/glossary.md`, `docs/agents/mcp.md` +
+  `prompts.md`, root `AGENTS.md` and `llms.txt`; ADR 0010 records the design rationale.
+* Wire protocol unchanged (**OMP/1**); this is a UX + developer-experience release, not a wire
+  change. Firmware behaviour is unaffected.
+
+**Exit criteria (met in the v0.3.0 tree):** `scripts/check_docs.py`, `check_help.py` and
+`check_openapi.py` green; `cargo fmt/clippy -D warnings/test --workspace --all-targets` green; web
+build/tests green; a beginner can complete setup in demo mode and on real radios following
+QUICKSTART; MCP `initialize`/`tools/list`/read+write+confirm+read-only paths covered by tests.
+
+**Still open / next:** field-test the beginner funnel with non-technical users before calling the
+onboarding "validated"; per-tool agent permission scopes; external review of the MCP/agent surface;
+multi-client MCP compatibility matrix; native TLS in OBB/2. See
+[ADR 0010](adr/0010-ai-native-and-beginner-ux.md).
 
 ## 4. M1 — Field-ready text mesh (weeks 1–8)
 
@@ -360,6 +405,8 @@ part-time work after M1 is stable.
 | Weeks | Milestone | Key output |
 | --- | --- | --- |
 | 0 | M0 | v0.1.0 repository (this milestone) |
+| 1–2 | v0.2 | backbone mode shipped alongside M1 |
+| 3–4 | v0.3 | beginner-friendly UX, help corpus, MCP/agent surface, OpenAPI, guides |
 | 1–8 | M1 | field-tested text mesh, store-forward, OTA, invites, airtime caps |
 | 9–20 | M2 | Android GA, companion polish, background sync, media UX |
 | 21–34 | M3 | OMP/2 ratchets, directed routing, conditional calls |
@@ -394,7 +441,9 @@ by 2–3 weeks.
 
 * **v0.1.x** — M0 fixes only (docs, tests, bug fixes; no wire changes).
 * **v0.2** — end of M1: field-tested firmware 1.0, bridge 0.2, web 0.2; wire still OMP/1.
-* **v0.3** — M2: Android GA, companion pairing, media UX; wire still OMP/1.
+* **v0.3** — beginner-friendly + AI-native: guided setup and server-owned presets, one help corpus,
+  local MCP agent server, activity log, OpenAPI 3.1, QUICKSTART/guides; wire still OMP/1.
+* **M2 / next minor** — Android GA, companion pairing, media UX; wire still OMP/1.
 * **v1.0** — after M3: OMP/2 with ratchets; migration completed; external security review; this
   is the first "recommended for real use" release.
 * **v1.1** — M4: bridge. **v1.2** — M5 features.

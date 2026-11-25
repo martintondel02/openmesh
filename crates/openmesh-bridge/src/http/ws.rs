@@ -14,6 +14,7 @@ use tokio_tungstenite::tungstenite::{Message, handshake::derive_accept_key};
 
 use openmesh_core::NodeId;
 
+use crate::activity;
 use crate::http::{HttpRequest, HttpState, authorized};
 use crate::json::*;
 use crate::runtime::{self, ClientCommand, CommandKind, EngineInput, broadcast_event};
@@ -60,7 +61,8 @@ pub async fn upgrade(
     let ws = WebSocketStream::from_raw_socket(stream, Role::Server, Some(config)).await;
 
     let token_ok = authorized(&request, &state.token);
-    session(ws, state, token_ok).await
+    let source = activity::source_from_headers(&request.headers);
+    session(ws, state, token_ok, source).await
 }
 
 /// One WebSocket session. Sends `hello` immediately, then handles commands until close.
@@ -68,6 +70,7 @@ async fn session<S>(
     mut ws: WebSocketStream<S>,
     state: Arc<HttpState>,
     token_ok: bool,
+    source: String,
 ) -> std::io::Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -122,7 +125,7 @@ where
             },
             incoming = ws.next() => match incoming {
                 Some(Ok(Message::Text(text))) => {
-                    let messages = dispatch(&text, &state, &reply_tx).await;
+                    let messages = dispatch(&text, &state, &reply_tx, &source).await;
                     for json in messages {
                         if ws.send(Message::Text(json)).await.is_err() { return Ok(()); }
                     }
@@ -146,12 +149,18 @@ async fn dispatch(
     text: &str,
     state: &Arc<HttpState>,
     reply_tx: &mpsc::UnboundedSender<Arc<str>>,
+    source: &str,
 ) -> Vec<String> {
     let msg: ClientMsg = match serde_json::from_str(text) {
         Ok(msg) => msg,
         Err(_) => return vec![error_json(None, "bad_request", "invalid JSON envelope")],
     };
     let id = msg.id.as_deref();
+    if let Some(summary) = ws_write_summary(&msg) {
+        state
+            .activity
+            .record(source, "WS", "/api/ws", summary, true, None);
+    }
 
     // Read-only commands are answered from the snapshot/store without touching the engine task.
     match msg.typ.as_str() {
@@ -440,6 +449,35 @@ async fn dispatch(
     // Unknown event/command types are ignored so newer clients can talk to older bridges (§7).
     tracing::debug!(typ = %msg.typ, "ignoring unknown client message type");
     Vec::new()
+}
+
+/// Summarise a mutating WebSocket command for the activity log (never message bodies or keys).
+fn ws_write_summary(msg: &ClientMsg) -> Option<String> {
+    let data = &msg.data;
+    let text_len = data
+        .get("text")
+        .and_then(|v| v.as_str())
+        .map(str::len)
+        .unwrap_or(0);
+    Some(match msg.typ.as_str() {
+        "send_message" => format!("ws send_message ({text_len} bytes)"),
+        "send_group_message" => format!("ws send_group_message ({text_len} bytes)"),
+        "send_position" => "ws send_position".to_string(),
+        "mark_read" => "ws mark_read".to_string(),
+        "retry" => "ws retry".to_string(),
+        "add_contact" => "ws add_contact".to_string(),
+        "remove_contact" => "ws remove_contact".to_string(),
+        "create_channel" => "ws create_channel".to_string(),
+        "join_channel" => "ws join_channel".to_string(),
+        "leave_channel" => "ws leave_channel".to_string(),
+        "set_config" => "ws set_config".to_string(),
+        "announce" => "ws announce".to_string(),
+        "delete_message" => "ws delete_message".to_string(),
+        "set_backbone_config" => "ws set_backbone_config".to_string(),
+        "backbone_kick" => "ws backbone_kick".to_string(),
+        "backbone_rotate_token" => "ws backbone_rotate_token".to_string(),
+        _ => return None,
+    })
 }
 
 fn parse_data<T: serde::de::DeserializeOwned>(msg: &ClientMsg) -> Result<T, String> {

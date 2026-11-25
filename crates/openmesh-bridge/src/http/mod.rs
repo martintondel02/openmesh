@@ -16,11 +16,14 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::watch;
 
+use crate::activity::{self, ActivityLog};
 use crate::attachments::MAX_ATTACHMENT_BYTES;
 use crate::json::{b64, error_json, event_json, parse_node_id};
-use crate::runtime::{self, Shared};
+use crate::runtime::{self, CommandError, CommandKind, Shared};
 use crate::store::Store;
 use crate::transport::backbone::BackboneManager;
+
+use serde_json::Value;
 
 /// Maximum HTTP header block we accept.
 const MAX_HEADER_BYTES: usize = 64 * 1024;
@@ -32,6 +35,8 @@ pub struct HttpState {
     pub token: Arc<String>,
     pub shared: Arc<Shared>,
     pub backbone: Arc<BackboneManager>,
+    /// Bounded transparency log for mutating API calls (AI-NATIVE.md §2).
+    pub activity: Arc<ActivityLog>,
     pub web_root: Option<PathBuf>,
     pub shutdown: watch::Receiver<bool>,
 }
@@ -193,6 +198,7 @@ async fn handle_connection(
     }
 
     let response = route(&request, &state).await;
+    record_activity(&request, &response, &state);
     write_response(&mut stream, response).await
 }
 
@@ -238,11 +244,12 @@ async fn route(request: &HttpRequest, state: &Arc<HttpState>) -> HttpResponse {
             extra_headers: vec![
                 (
                     "Access-Control-Allow-Methods".into(),
-                    "GET, POST, OPTIONS".into(),
+                    "GET, POST, PATCH, DELETE, OPTIONS".into(),
                 ),
                 (
                     "Access-Control-Allow-Headers".into(),
-                    "Authorization, Content-Type, X-OpenMesh-Filename, X-OpenMesh-Duration-Ms"
+                    "Authorization, Content-Type, X-OpenMesh-Filename, X-OpenMesh-Duration-Ms, \
+                     X-OpenMesh-Agent, X-OpenMesh-Client"
                         .into(),
                 ),
                 ("Access-Control-Max-Age".into(), "86400".into()),
@@ -397,10 +404,416 @@ async fn route(request: &HttpRequest, state: &Arc<HttpState>) -> HttpResponse {
                 None => HttpResponse::json(200, serde_json::json!({ "enabled": false })),
             }
         }
+        // --- v0.3.0: AI-native + help surface (AI-NATIVE.md, ux-help-system.md §5) ---------
+        ("GET", "/api/help") => HttpResponse::json(200, crate::help::index_value()),
+        ("GET", _) if path.starts_with("/api/help/") => {
+            let slug = &path["/api/help/".len()..];
+            match crate::help::topic_value(slug) {
+                Some(topic) => HttpResponse::json(200, topic),
+                None => HttpResponse::json(
+                    404,
+                    serde_json::json!({
+                        "error": "not_found",
+                        "code": "not_found",
+                        "message": format!("unknown help topic '{slug}'"),
+                        "help_topic": "getting-started",
+                        "hint": "GET /api/help lists every topic; MCP resources openmesh://help/{slug}",
+                    }),
+                ),
+            }
+        }
+        ("GET", "/api/setup/state") => {
+            let state_json = crate::setup::state(
+                &state.shared,
+                &state.backbone,
+                &state.activity,
+                !state.token.is_empty(),
+            )
+            .await;
+            HttpResponse::json(200, state_json)
+        }
+        ("GET", "/api/setup/recommend") => {
+            let country = request.query_param("country");
+            let role = request.query_param("role");
+            let snapshot = state.shared.snapshot.read().await;
+            let value = crate::setup::recommend(country, role, &snapshot.config);
+            HttpResponse::json(200, value)
+        }
+        ("POST", "/api/setup/quick") => {
+            let body = match parse_json_body(request) {
+                Ok(value) => value,
+                Err(response) => return response,
+            };
+            match crate::setup::quick(&state.shared, &body).await {
+                Ok(value) => HttpResponse::json(200, value),
+                Err(e) => command_error_response(e),
+            }
+        }
+        ("GET", "/api/activity") => {
+            let limit = request
+                .query_param("limit")
+                .and_then(|v| v.parse::<usize>().ok())
+                .unwrap_or(100);
+            HttpResponse::json(200, state.activity.payload(limit))
+        }
+        ("GET", "/api/openapi.json") => HttpResponse::bytes(
+            200,
+            "application/json",
+            crate::help::openapi_json().as_bytes().to_vec(),
+        ),
+        // Write endpoints used by the MCP server and CLI/agent clients.
+        ("POST", "/api/messages") => {
+            let body = match parse_json_body(request) {
+                Ok(value) => value,
+                Err(response) => return response,
+            };
+            let data: crate::json::SendMessageData = match serde_json::from_value(body) {
+                Ok(data) => data,
+                Err(e) => return bad_request(&e.to_string()),
+            };
+            command_response(state, CommandKind::SendMessage(data)).await
+        }
+        ("POST", _) if path.starts_with("/api/channels/") && path.ends_with("/messages") => {
+            let channel_id =
+                path["/api/channels/".len()..path.len() - "/messages".len()].to_string();
+            let body = match parse_json_body(request) {
+                Ok(value) => value,
+                Err(response) => return response,
+            };
+            let data = crate::json::SendGroupMessageData {
+                channel_id,
+                text: body
+                    .get("text")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string),
+                attachment_id: body
+                    .get("attachment_id")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string),
+            };
+            command_response(state, CommandKind::SendGroupMessage(data)).await
+        }
+        ("POST", "/api/position") => {
+            let body = match parse_json_body(request) {
+                Ok(value) => value,
+                Err(response) => return response,
+            };
+            let data: crate::json::SendPositionData = match serde_json::from_value(body) {
+                Ok(data) => data,
+                Err(e) => return bad_request(&e.to_string()),
+            };
+            command_response(state, CommandKind::SendPosition(data)).await
+        }
+        ("POST", "/api/announce") => {
+            match runtime::queue_command(&state.shared, CommandKind::Announce).await {
+                Ok(()) => {
+                    HttpResponse::json(200, serde_json::json!({ "ok": true, "queued": true }))
+                }
+                Err(e) => command_error_response(e),
+            }
+        }
+        ("PATCH", "/api/config") | ("POST", "/api/config") => {
+            let body = match parse_json_body(request) {
+                Ok(value) => value,
+                Err(response) => return response,
+            };
+            command_response(state, CommandKind::SetConfig(body)).await
+        }
+        ("POST", "/api/channels") => {
+            let body = match parse_json_body(request) {
+                Ok(value) => value,
+                Err(response) => return response,
+            };
+            let data: crate::json::ChannelCreateData = match serde_json::from_value(body) {
+                Ok(data) => data,
+                Err(e) => return bad_request(&e.to_string()),
+            };
+            match runtime::run_command(&state.shared, CommandKind::CreateChannel(data)).await {
+                Ok(created) => {
+                    let invite_url = created
+                        .get("channel_id")
+                        .and_then(|v| v.as_str())
+                        .and_then(crate::json::parse_node_id)
+                        .zip(
+                            created
+                                .get("psk")
+                                .and_then(|v| v.as_str())
+                                .and_then(crate::json::b64_decode)
+                                .and_then(|raw| <[u8; 32]>::try_from(raw).ok()),
+                        )
+                        .map(|(id, psk)| {
+                            runtime::channel_url(
+                                id,
+                                created
+                                    .get("name")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("channel"),
+                                &psk,
+                            )
+                        });
+                    HttpResponse::json(
+                        200,
+                        serde_json::json!({
+                            "channel_id": created.get("channel_id"),
+                            "name": created.get("name"),
+                            "psk_once": created.get("psk"),
+                            "invite_url": invite_url,
+                            "shown_once": true,
+                        }),
+                    )
+                }
+                Err(e) => command_error_response(e),
+            }
+        }
+        ("POST", "/api/channels/join") => {
+            let body = match parse_json_body(request) {
+                Ok(value) => value,
+                Err(response) => return response,
+            };
+            let (name, psk) = if let Some(url) = body.get("url").and_then(|v| v.as_str()) {
+                match runtime::parse_channel_url(url) {
+                    Some((name, psk)) => (name, psk),
+                    None => return bad_request("invalid channel invite URL"),
+                }
+            } else {
+                let Some(name) = body.get("name").and_then(|v| v.as_str()) else {
+                    return bad_request("url or name+psk required");
+                };
+                let Some(psk) = body
+                    .get("psk")
+                    .and_then(|v| v.as_str())
+                    .and_then(crate::json::b64_decode)
+                    .and_then(|raw| <[u8; 32]>::try_from(raw).ok())
+                else {
+                    return bad_request("psk must be base64 of 32 bytes");
+                };
+                (name.to_string(), psk)
+            };
+            let data = crate::json::ChannelCreateData {
+                name,
+                psk: Some(crate::json::b64(&psk)),
+            };
+            command_response(state, CommandKind::JoinChannel(data)).await
+        }
+        ("POST", "/api/contacts") => {
+            let body = match parse_json_body(request) {
+                Ok(value) => value,
+                Err(response) => return response,
+            };
+            let data = if let Some(url) = body.get("invite_url").and_then(|v| v.as_str()) {
+                match runtime::parse_contact_url(url) {
+                    Some((node, name, identity)) => crate::json::AddContactData {
+                        node_id: node.to_hex(),
+                        name,
+                        identity: Some(crate::json::identity_to_b64(&identity)),
+                        verify_key: true,
+                    },
+                    None => return bad_request("invalid contact invite URL"),
+                }
+            } else {
+                match serde_json::from_value::<crate::json::AddContactData>(body) {
+                    Ok(mut data) => {
+                        data.verify_key = true;
+                        data
+                    }
+                    Err(e) => return bad_request(&e.to_string()),
+                }
+            };
+            command_response(state, CommandKind::AddContact(data)).await
+        }
+        ("POST", _) if path.starts_with("/api/messages/") && path.ends_with("/read") => {
+            let id = &path["/api/messages/".len()..path.len() - "/read".len()];
+            let Some(msg_id) = id.parse::<u32>().ok() else {
+                return bad_request("invalid message id");
+            };
+            match runtime::queue_command(
+                &state.shared,
+                CommandKind::MarkRead(crate::json::MsgIdData { msg_id }),
+            )
+            .await
+            {
+                Ok(()) => {
+                    HttpResponse::json(200, serde_json::json!({ "ok": true, "msg_id": msg_id }))
+                }
+                Err(e) => command_error_response(e),
+            }
+        }
+        ("POST", _) if path.starts_with("/api/messages/") && path.ends_with("/retry") => {
+            let id = &path["/api/messages/".len()..path.len() - "/retry".len()];
+            let Some(msg_id) = id.parse::<u32>().ok() else {
+                return bad_request("invalid message id");
+            };
+            command_response(state, CommandKind::Retry(crate::json::MsgIdData { msg_id })).await
+        }
         ("GET", _) if path.starts_with("/api/") => HttpResponse::error(404, "not_found"),
         ("GET", _) | ("HEAD", _) => serve_static(request, state).await,
         _ if path.starts_with("/api/") => HttpResponse::error(405, "method_not_allowed"),
         _ => HttpResponse::error(404, "not_found"),
+    }
+}
+
+fn parse_json_body(request: &HttpRequest) -> Result<Value, HttpResponse> {
+    serde_json::from_slice(&request.body).map_err(|e| {
+        HttpResponse::json(
+            400,
+            serde_json::json!({
+                "error": "bad_request",
+                "code": "bad_request",
+                "message": e.to_string(),
+                "help_topic": "getting-started",
+            }),
+        )
+    })
+}
+
+fn bad_request(message: &str) -> HttpResponse {
+    HttpResponse::json(
+        400,
+        serde_json::json!({
+            "error": "bad_request",
+            "code": "bad_request",
+            "message": message,
+            "help_topic": "getting-started",
+        }),
+    )
+}
+
+/// Map an engine command error to an HTTP response with the MCP-style code/help_topic fields.
+fn command_error_response(error: CommandError) -> HttpResponse {
+    let status = match error.code.as_str() {
+        "bad_request" => 400,
+        "not_found" | "unknown_peer" => 404,
+        "radio_busy" => 409,
+        "unavailable" | "timeout" => 503,
+        _ => 400,
+    };
+    HttpResponse::json(
+        status,
+        serde_json::json!({
+            "error": error.code,
+            "code": error.code,
+            "message": error.message,
+            "help_topic": help_topic_for_code(&error.code),
+        }),
+    )
+}
+
+fn help_topic_for_code(code: &str) -> &'static str {
+    match code {
+        "unknown_peer" | "not_contact" => "contacts-identity",
+        "not_found" => "troubleshooting",
+        "radio_busy" | "radio_unavailable" => "radio-and-region",
+        "timeout" | "unavailable" | "internal" => "troubleshooting",
+        "confirm_required" => "agents",
+        _ => "getting-started",
+    }
+}
+
+async fn command_response(state: &Arc<HttpState>, kind: CommandKind) -> HttpResponse {
+    match runtime::run_command(&state.shared, kind).await {
+        Ok(value) => HttpResponse::json(200, value),
+        Err(e) => command_error_response(e),
+    }
+}
+
+/// Record one mutating REST call in the bounded activity log (never bodies or secrets).
+fn record_activity(request: &HttpRequest, response: &HttpResponse, state: &HttpState) {
+    if !activity::is_write_method(&request.method) {
+        return;
+    }
+    if !request.path.starts_with("/api/") || request.path == "/api/health" {
+        return;
+    }
+    // Only authenticated mutations are logged; failed auth attempts are not actions.
+    if !authorized(request, &state.token) {
+        return;
+    }
+    let source = activity::source_from_headers(&request.headers);
+    let ok = (200..300).contains(&response.status);
+    let error = if ok {
+        None
+    } else {
+        let value: Option<Value> = serde_json::from_slice(&response.body).ok();
+        value
+            .as_ref()
+            .and_then(|value| value.get("message").and_then(|v| v.as_str()))
+            .map(|message| message.chars().take(200).collect())
+    };
+    let summary = summarize_activity(request);
+    state
+        .activity
+        .record(&source, &request.method, &request.path, summary, ok, error);
+}
+
+fn summarize_activity(request: &HttpRequest) -> String {
+    let path = request.path.as_str();
+    let body: Option<Value> = if request.body.len() <= MAX_JSON_BODY {
+        serde_json::from_slice(&request.body).ok()
+    } else {
+        None
+    };
+    let text = |key: &str| {
+        body.as_ref()
+            .and_then(|body| body.get(key))
+            .and_then(|value| value.as_str())
+    };
+    match (request.method.as_str(), path) {
+        ("POST", "/api/messages") => format!(
+            "send direct message to {} ({} bytes)",
+            text("to").unwrap_or("?"),
+            text("text").map(str::len).unwrap_or(0)
+        ),
+        ("POST", _) if path.starts_with("/api/channels/") && path.ends_with("/messages") => {
+            format!(
+                "send channel message ({} bytes)",
+                text("text").map(str::len).unwrap_or(0)
+            )
+        }
+        ("POST", "/api/attachments") => format!(
+            "upload attachment ({} bytes, {})",
+            request.body.len(),
+            request.header("content-type").unwrap_or("unknown")
+        ),
+        ("POST", "/api/position") => "share position".to_string(),
+        ("POST", "/api/announce") => "announce".to_string(),
+        ("PATCH", "/api/config") | ("POST", "/api/config") => "update config".to_string(),
+        ("POST", "/api/channels") => {
+            format!("create channel {}", text("name").unwrap_or("?"))
+        }
+        ("POST", "/api/channels/join") => "join channel".to_string(),
+        ("POST", "/api/contacts") => format!(
+            "add contact {}",
+            text("node_id")
+                .or_else(|| text("invite_url"))
+                .map(|v| { v.chars().take(40).collect::<String>() })
+                .unwrap_or_else(|| "via invite".to_string())
+        ),
+        ("POST", "/api/backbone/config") => "update backbone config".to_string(),
+        ("POST", "/api/backbone/token/rotate") => {
+            "rotate backbone token (returned once)".to_string()
+        }
+        ("DELETE", _) if path.starts_with("/api/backbone/peers/") => format!(
+            "kick backbone peer {}",
+            &path["/api/backbone/peers/".len()..]
+        ),
+        ("POST", "/api/setup/quick") => format!(
+            "quick setup (role={}, country={})",
+            text("role").unwrap_or("client"),
+            text("country").unwrap_or("?")
+        ),
+        ("POST", _) if path.starts_with("/api/messages/") && path.ends_with("/read") => {
+            format!(
+                "mark message {} read",
+                &path["/api/messages/".len()..path.len() - "/read".len()]
+            )
+        }
+        ("POST", _) if path.starts_with("/api/messages/") && path.ends_with("/retry") => {
+            format!(
+                "retry message {}",
+                &path["/api/messages/".len()..path.len() - "/retry".len()]
+            )
+        }
+        (method, path) => format!("{method} {path}"),
     }
 }
 

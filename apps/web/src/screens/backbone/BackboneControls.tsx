@@ -27,6 +27,7 @@ import { normalizeHex, cn } from '../../lib/utils';
 import { Badge, Button, SegmentedControl, Toggle } from '../../components/ui/primitives';
 import { Callout, Field, Slider, TextInput } from '../../components/ui/forms';
 import { ConfirmDialog } from '../../components/ui/overlay';
+import { HelpTip } from '../../components/ui/help';
 
 function cloneConfig(config: BackboneConfig): BackboneConfig {
   return { ...config, allowlist: [...config.allowlist] };
@@ -106,7 +107,7 @@ export function BackboneControls({
         {/* Listener */}
         <FormSection icon={Globe} title="Public listener" description="Where remote gateways dial in. Applies live without dropping the process.">
           <div className="grid gap-3.5 sm:grid-cols-2">
-            <Field label="Bind address" hint="0.0.0.0 listens on every interface; 127.0.0.1 keeps it loopback-only.">
+            <Field label="Bind address" hint="0.0.0.0 listens on every interface; 127.0.0.1 keeps it loopback-only." labelAccessory={<HelpTip helpKey="backbone.bind" label="Bind address" />}>
               {({ id }) => (
                 <div className="space-y-1.5">
                   <TextInput
@@ -137,7 +138,7 @@ export function BackboneControls({
               )}
             </Field>
             <div className="grid grid-cols-2 gap-3">
-              <Field label="TCP port" hint="1–65535">
+              <Field label="TCP port" hint="1–65535" labelAccessory={<HelpTip helpKey="backbone.port" label="TCP port" />}>
                 {({ id }) => (
                   <TextInput
                     id={id}
@@ -160,6 +161,7 @@ export function BackboneControls({
                   max={256}
                   step={1}
                   label="Max peers"
+                  labelAccessory={<HelpTip helpKey="backbone.maxPeers" label="Max peers" />}
                   formatValue={(value) => String(value)}
                   onChange={(value) => patchField('max_peers', value)}
                   markers={[
@@ -175,6 +177,7 @@ export function BackboneControls({
             <Toggle
               id="backbone-enabled"
               label="Enable backbone listener"
+              labelAccessory={<HelpTip helpKey="backbone.enabled" label="Enable backbone listener" />}
               description="Turn off to close the public port without losing configuration."
               checked={draft.enabled}
               onChange={(checked) => patchField('enabled', checked)}
@@ -182,6 +185,7 @@ export function BackboneControls({
             <Toggle
               id="backbone-store-forward"
               label="Store-and-forward relay"
+              labelAccessory={<HelpTip helpKey="backbone.storeForward" label="Store-and-forward relay" />}
               description="Hold encrypted envelopes for absent unicast destinations and offer them when the addressee appears."
               checked={draft.store_forward}
               onChange={(checked) => patchField('store_forward', checked)}
@@ -194,7 +198,7 @@ export function BackboneControls({
         {/* Identity */}
         <FormSection icon={RadioTower} title="Identity & sharing" description="How this backbone presents itself in connection strings and peer tables.">
           <div className="grid gap-3.5 sm:grid-cols-2">
-            <Field label="Backbone name" hint="Max 32 characters, shown to peers.">
+            <Field label="Backbone name" hint="Max 32 characters, shown to peers." labelAccessory={<HelpTip helpKey="backbone.name" label="Backbone name" />}>
               {({ id }) => (
                 <TextInput
                   id={id}
@@ -205,7 +209,7 @@ export function BackboneControls({
                 />
               )}
             </Field>
-            <Field label="Public host" hint="Used to build the shareable connection string; blank falls back to the detected address.">
+            <Field label="Public host" hint="Used to build the shareable connection string; blank falls back to the detected address." labelAccessory={<HelpTip helpKey="backbone.publicHost" label="Public host" />}>
               {({ id }) => (
                 <TextInput
                   id={id}
@@ -223,6 +227,7 @@ export function BackboneControls({
             max={300}
             step={5}
             label="Peer ping interval"
+            labelAccessory={<HelpTip helpKey="backbone.ping" label="Peer ping interval" />}
             formatValue={(value) => `${value} s`}
             onChange={(value) => patchField('ping_interval_s', value)}
             markers={[

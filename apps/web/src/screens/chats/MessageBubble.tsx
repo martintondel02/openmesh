@@ -18,6 +18,7 @@ import { speechWaveform } from '../../lib/audio';
 import { Avatar, IconButton } from '../../components/ui/primitives';
 import { DeliveryTicks, SignalBars } from '../../components/ui/signals';
 import { Modal } from '../../components/ui/overlay';
+import { HelpLink } from '../../components/ui/help';
 
 export type AnyChatMessage = ChatMessage | ChatGroupMessage;
 
@@ -512,6 +513,7 @@ export function EmptyThreadState() {
           Messages hop node to node over LoRa. Nothing leaves the mesh, and every send shows its airtime cost before you press it.
         </p>
       </div>
+      <HelpLink topic="getting-started">How does OpenMesh work?</HelpLink>
       <div className="flex items-center gap-3 rounded-xl border border-white/[0.05] bg-white/[0.02] px-3 py-2 text-3xs text-slate-500">
         <span className="flex items-center gap-1">
           <kbd className="kbd">Enter</kbd> send

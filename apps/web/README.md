@@ -1,8 +1,9 @@
 # OpenMesh web client
 
-The reference client for OpenMesh: a dense, dark, mobile-responsive React app for chatting,
+The reference client for OpenMesh (v0.3.0): a dense, dark, mobile-responsive React app for chatting,
 sharing images and sending voice notes over a LoRa mesh — plus a map of the mesh, node
-diagnostics, contact verification and radio settings.
+diagnostics, contact verification, radio settings, a beginner/advanced guided experience, an
+offline-capable Help Center and an AI-agent (MCP) page.
 
 It speaks the normative bridge API in
 [`docs/architecture/WEBSOCKET-API.md`](../../docs/architecture/WEBSOCKET-API.md) when a bridge is
@@ -22,7 +23,13 @@ JS · Vitest. Packaged for desktop with Tauri 2 (`src-tauri/`).
 [Mobile thread](docs/screenshots/mobile-thread.png) ·
 [**Backbone panel**](docs/screenshots/backbone.png) ·
 [Backbone setup wizard](docs/screenshots/backbone-wizard.png) ·
-[Backbone on mobile](docs/screenshots/backbone-mobile.png)
+[Backbone on mobile](docs/screenshots/backbone-mobile.png) ·
+[**Onboarding**](docs/screenshots/onboarding.png) ·
+[Secure setup result](docs/screenshots/onboarding-success.png) ·
+[**Help Center**](docs/screenshots/help-center.png) ·
+[**Agents**](docs/screenshots/agents.png) ·
+[Beginner settings](docs/screenshots/settings-beginner.png) ·
+[Help on mobile](docs/screenshots/mobile-help.png)
 
 ---
 
@@ -40,7 +47,11 @@ open "http://127.0.0.1:5173/?demo=1"
 open "http://127.0.0.1:5173/?demo=1&screen=map"
 open "http://127.0.0.1:5173/?demo=1&thread=anne"          # or ?thread=familien
 open "http://127.0.0.1:5173/?demo=1&screen=backbone"      # or the /backbone route
-open "http://127.0.0.1:5173/backbone?demo=1" 
+open "http://127.0.0.1:5173/backbone?demo=1"
+open "http://127.0.0.1:5173/?demo=1&onboarding=1"         # guided setup wizard
+open "http://127.0.0.1:5173/?demo=1&screen=agents&mode=advanced"
+open "http://127.0.0.1:5173/?demo=1&screen=settings&mode=beginner"
+open "http://127.0.0.1:5173/help/getting-started?demo=1"  # Help Center deep link
 
 pnpm --dir apps/web test         # vitest (119 unit tests)
 pnpm --dir apps/web build        # tsc -b && vite build
@@ -59,6 +70,13 @@ enters demo mode and says so in the header. The connection pill (top right) show
 
 The WebSocket handshake uses `?token=<token>` (browsers cannot set headers); REST attachment
 uploads use `Authorization: Bearer <token>`.
+
+### Help corpus in the web build
+
+`pnpm dev` and `pnpm build` run `scripts/copy-help.mjs` first, which copies `../../content/help`
+(16 topics + index) into the gitignored `apps/web/public/help/`. Demo/offline mode fetches that
+bundle; a connected bridge serves the same content from `GET /api/help` (with a bundled fallback).
+Never edit `public/help/` by hand — edit `content/help/` and let the build copy.
 
 ### Demo mode
 
@@ -98,6 +116,45 @@ In demo mode every control works locally: toggling the listener, editing the con
 kicking peers, rotating the token and the enable/disable states are simulated by the mock transport
 (`src/lib/mock/transport.ts`) so the whole flow can be reviewed offline.
 
+### Beginner mode, onboarding, Help Center and agents (v0.3)
+
+The release adds a beginner layer on top of the same screens:
+
+* **Beginner / Advanced mode** — top-bar toggle plus Settings; persisted as
+  `localStorage.openmesh.mode` and synced to `features.ui_mode` when a bridge is connected.
+  Beginner keeps plain language, safe defaults and a guided Settings screen; Backbone and Agents
+  appear only when configured. Advanced reveals every radio/identity/backbone/agent control. The
+  `?mode=beginner|advanced` query parameter wins for screenshots without overwriting the preference.
+* **Three-screen onboarding** — `?demo=1&onboarding=1` (or first run on a live bridge) shows
+  role → country/name/privacy → "Secure my node". The success screen has the ✅ checklist, channel
+  invite with copy + QR ("shown once") and next-step cards. `GET/POST /api/setup/state|quick|recommend`
+  are used when connected; demo mode uses the same shapes locally. The Get-started card on Chats
+  resumes it and is dismissible for the session; Advanced gets an operator checklist instead.
+* **Help Center at `/help`** — search, Beginner/Advanced audience filter, reading time, related
+  topics, sticky "On this page", previous/next, local-only usefulness feedback and deep links
+  (`/help/:slug#anchor`, `?help=slug`). The corpus is bundled for demo/offline via a predev/prebuild
+  copy of `content/help/` into `public/help/` (gitignored) and fetched from `GET /api/help` when a
+  bridge is connected. A `HelpTip` `?` lives on fields, stat cards and non-obvious actions; a
+  35-term glossary powers dotted-underline `Term` popovers.
+* **Agents page** (Advanced, or whenever an agent is configured in demo) — MCP config snippets for
+  Claude/Cursor/DSH/generic with copy, beginner/advanced system prompt with copy, read-only
+  explainer, activity table from `GET /api/activity` with source badges and failed actions, and
+  honest revocation guidance (the panel cannot rotate the bridge token through the v0.3 API).
+* **Polish** — guided empty states and "How does this work?" links on every screen, actionable
+  error toasts with a help link and copy-diagnostics, insecurity/no-radio banners, composer drafts
+  preserved across Help navigation, 390×844 layouts and visible focus states.
+
+Screenshot flow (all demo, no backend):
+
+1. `/?demo=1&onboarding=1` → Continue twice → **Secure my node** → success screen
+   (`docs/screenshots/onboarding.png`, `onboarding-success.png`).
+2. `/help/getting-started?demo=1` → search, audience filter, click a related topic, copy a deep
+   link; the left list, reader and sticky ToC (`docs/screenshots/help-center.png`).
+3. `/?demo=1&screen=agents&mode=advanced` → activity table, config snippet tabs, prompt tiers
+   (`docs/screenshots/agents.png`).
+4. `/?demo=1&screen=settings&mode=beginner` → guided settings + Secure-my-node checklist
+   (`docs/screenshots/settings-beginner.png`); 390×844 at `mobile-help.png`.
+
 ---
 
 ## What is implemented
@@ -110,6 +167,8 @@ kicking peers, rotating the token and the enable/disable states are simulated by
 | **Groups** | Create channel (generated 256-bit PSK shown once with copy + `openmesh://channel` invite link + QR), join via pasted link or name+PSK, channel invite modal (QR + share sheet), per-message Ed25519 signature badge, leave channel with confirmation. |
 | **Images** | File picker / drag-drop / paste → canvas downscale + WebP (JPEG fallback) encode loop until the target size fits the profile cap; slider from 1 KiB to the profile cap with Fastest/Balanced/Max presets; chunks, airtime, transfer time and % of the region duty-cycle budget shown before sending; progress overlay for incoming resources. |
 | **Voice** | `MediaRecorder` with `audio/ogg;codecs=opus` preferred (WebM fallback), live timer + waveform from a WebAudio analyser, auto-stop at the profile voice cap, review with playback, then bubble with waveform bars, seek, playback progress and duration. |
+| **Beginner/Advanced + help (v0.3)** | Mode toggle (persisted + synced to `features.ui_mode`), nav/field gating with plain-language copy, 3-screen secure onboarding wire-compatible with `/api/setup/*`, resumable Get-started checklist, Help Center with search/audience/ToC/related/deep links, central `HelpTip` + 35-term glossary, guided empty states, actionable error toasts, insecurity/no-radio banners, composer draft preservation. |
+| **Agents (v0.3)** | MCP snippets (Claude/Cursor/DSH/generic), beginner/advanced system prompt copy, read-only explainer, activity table with source badges and failures, bridge-token revocation guidance, security notes; demo seeds one connected agent plus eight real-looking write actions. |
 | **Backbone (v0.2)** | Control panel for an always-on OBB/1 relay: live stats cards (peers, frames, throughput sparkline, bytes, store-forward envelopes, auth failures), peer table with direction/remote/RTT/traffic and kick, live config form (enable, bind, port, max peers, auth token/open with red typed confirmation, allowlist editor, store-forward, name/public host/ping), connection string + QR with token reveal/copy, token rotation flow (new token shown once + kick-all), setup wizard from `GET /api/backbone/setup` (numbered copy-button steps, firewalld/ufw tabs, systemd unit, gateway join command, verify step), install section (Linux/macOS/Windows), panel URL hint, graceful disabled/one-click-enable state. Data over `backbone_status`/`backbone_peer` WS events + the 7 REST endpoints. |
 | **Map** | MapLibre GL with a **bundled offline schematic basemap** of the Oslo area (fjord, lakes, Nordmarka, roads — no tile requests, no glyph server). Node markers coloured by role (DOM markers, hover labels), own-position pulse + accuracy circle, position-history polyline, mesh link lines, role filters, selected-node popover, fit-to-nodes, geolocation locate/share, optional online OSM raster with automatic "tiles unavailable" fallback. |
 | **Nodes** | Table (desktop) / cards (mobile) with role, caps icons, hops, RSSI bars + dBm, SNR, battery, last heard; filters + search; detail drawer with 72-byte identity, contact QR, raw identity copy, position, link metrics, contact add/remove, message action. |
@@ -143,15 +202,19 @@ caps documented in `src/lib/airtime.ts`.
 pnpm --dir apps/web test
 ```
 
-169 Vitest tests cover: LoRa airtime + chunk/transfer math and protocol worked examples, image
+228 Vitest tests cover: LoRa airtime + chunk/transfer math and protocol worked examples, image
 compression planning (dimensions, quality, slider mapping, Opus sizes), formatting/Unicode/focus
 helpers, `openmesh://` link parsing + identity validation, WebSocket envelope parsing + reconnect
 transport (fake socket), store reducers (optimistic send, acks, merge semantics, conversations),
 seeded demo-dataset invariants (including the seeded backbone), geo helpers, the offline map style,
-plus the v0.2 backbone surface: connection-string build/redact/QR helpers, REST client for all seven
-backbone endpoints (with a fake fetch), config normalize/merge/diff, allowlist validation, peer
-event reducers, status pills, setup-payload normalization/fallback rendering, install options and
-panel selectors.
+plus the v0.2 backbone surface (connection-string build/redact/QR helpers, REST client for all seven
+backbone endpoints, config normalize/merge/diff, allowlist validation, peer reducers, status pills,
+setup-payload fallback, install options, panel selectors) and the v0.3 UX/AI surface: mode
+persistence/nav gating/copy rules, glossary resolution, help search/audience/ToC/markdown/XSS/
+deep-link helpers, 100 % of `content/help` topics rendering, help-tip + control-registry
+completeness (no missing `helpKey` or broken topic link), setup presets/normalizers/checklist/
+onboarding state machine, setup REST client, MCP snippets, prompt tiers, activity normalisation
+and the Agents REST client.
 
 **Integration smoke check** (headless Firefox via WebDriver BiDi, production build served by
 `vite preview`): opens all five demo conversations and all five tabs, opens the new-conversation
@@ -174,6 +237,15 @@ apps/web/
 │   │   ├── ws.ts               envelope parser + reconnecting LiveTransport
 │   │   ├── backbone.ts         OBB/1 connection strings, config/peer/setup helpers
 │   │   ├── backbone-api.ts     REST client for the 7 backbone endpoints
+│   │   ├── mode.ts             beginner/advanced mode + copy rules
+│   │   ├── setup.ts            setup presets, normalisers, onboarding state machine
+│   │   ├── setup-api.ts        REST client for /api/setup/*
+│   │   ├── help.ts             help index/search/markdown/ToC/deep links/loaders
+│   │   ├── help-tips.ts        central HelpTip content map
+│   │   ├── control-registry.ts every settings/backbone/agents control → helpKey
+│   │   ├── glossary.ts         35 one-line terms
+│   │   ├── agents.ts           MCP snippets, prompts, activity rendering
+│   │   ├── agents-api.ts       /api/activity client
 │   │   ├── transport.ts        transport abstraction (live + demo)
 │   │   ├── mock/               seeded Oslo dataset + MockTransport
 │   │   ├── airtime.ts          LoRa airtime, chunks, caps, duty cycle
@@ -187,7 +259,9 @@ apps/web/
 │   ├── store/                  zustand store, reducers, selectors (+ tests)
 │   ├── components/             hand-rolled UI primitives, shell, QR
 │   ├── store/backbone-selectors.ts  panel view models (stats, pills, setup)
-│   └── screens/                chats/, backbone/, map, nodes, contacts, settings
+│   ├── components/onboarding/  3-screen wizard
+│   ├── components/ui/help.tsx  HelpTip, Term, HelpLink
+│   └── screens/                chats/, backbone/, settings/, HelpCenter, Agents, map, nodes, contacts
 └── src-tauri/                  Tauri 2 desktop shell (see its README)
 ```
 
@@ -234,6 +308,33 @@ Implemented exactly against the doc; these gaps are worth resolving in the spec:
 16. **`GET /api/backbone/qr.svg`** is implemented and tested in the REST client, but the panel draws
    its own QR from the connection string so invites work without a second round-trip and in demo
    mode (no bridge).
+17. **`GET /api/setup/state` checks are `{ok, detail}` objects** in the live bridge rather than the
+   booleans the UX summary implies. The client normalises both shapes, uses `first_run` /
+   `setup_completed` for resume, and reads the extra `counts.radios` / `counts.backbone_peers`.
+18. **`GET /api/setup/recommend` names privacy `position_sharing` (boolean)** while the wizard
+   speaks in `privacy: private|shared`. The client maps between them, renders the `warning` banner
+   for unknown countries, and shows the exact frequency only in Advanced mode.
+19. **`POST /api/setup/quick` returns more than the summary lists** (`recommended`, `first_run`,
+   `setup_completed`; checklist entries use `id`). The client accepts `id`/`key`, optional
+   recommended/completion fields and only-changed `applied` keys. `psk_once` is treated as
+   shown-once: displayed with a copy button and a warning, never persisted.
+20. **`GET /api/activity` is a wrapper object** (`{entries, capacity, agent_connected,
+   last_agent_at_ms, sources}`) while demo/older fixtures may send a bare array. The client accepts
+   both and drives the connected-agent badge from the metadata. All bridge REST calls send
+   `X-OpenMesh-Client: web` so mutations are attributed correctly.
+21. **WebSocket attribution limitation:** browsers cannot set `X-OpenMesh-Client` on the WS upgrade,
+   so WS-originated writes may appear as `user` instead of `web`. REST mutations are attributed.
+   A bridge-side query parameter or origin-based attribution would close this.
+22. **No bridge-token rotation API in v0.3.0.** AI-NATIVE.md says “one click revokes (rotate token)”,
+   but only the *backbone* OBB token has `POST /api/backbone/token/rotate`. The Agents page
+   deliberately shows the bridge-host steps (stop, regenerate token file, restart, re-paste) instead
+   of inventing a route; the copy is checked by tests.
+23. **Help API 404 bodies:** `GET /api/help/:slug` returns `{error, code, message, help_topic}` for an
+   unknown slug. The loader falls back to the bundled copy; if both fail the reader shows a generic
+   recoverable error with a retry/copy-link action, not the bridge `message`. Worth surfacing.
+24. **SPA deep links need absolute asset URLs:** the web build uses `base: '/'` so
+   `/help/getting-started` and `/backbone` load their JS/CSS; Tauri builds keep `base: './'`.
+   Previously the relative base made nested routes request `/help/assets/...` and fail.
 
 ---
 
@@ -280,6 +381,10 @@ firefox --headless --window-size=390,844 \
   --screenshot=/tmp/openmesh-mobile.png "http://127.0.0.1:5173/?demo=1"
 firefox --headless --window-size=1440,900 \
   --screenshot=/tmp/openmesh-backbone.png "http://127.0.0.1:5173/?demo=1&screen=backbone"
+firefox --headless --window-size=1440,900 \
+  --screenshot=/tmp/openmesh-onboarding.png "http://127.0.0.1:5173/?demo=1&onboarding=1"
+firefox --headless --window-size=1440,900 \
+  --screenshot=/tmp/openmesh-help.png "http://127.0.0.1:5173/help/getting-started?demo=1"
 ```
 
 ---
@@ -300,3 +405,12 @@ firefox --headless --window-size=1440,900 \
   the release setup serves the panel from `/backbone` on the bridge origin.
 - The rotated backbone token lives only in panel memory; after a reload the connection string falls
   back to the setup payload/CLI (the API never re-returns tokens by design).
+- The v0.3 bridge has no bridge-token rotation API, so the Agents page's revoke action is guidance
+  (with copyable steps) rather than a button that silently fails.
+- WS write attribution cannot be set from a browser WebSocket upgrade; REST calls are tagged
+  `X-OpenMesh-Client: web`.
+- HelpTip coverage is enforced by a control registry for Settings/Backbone/Agents; Chats, Map,
+  Contacts and Nodes use inline explanations or `HelpTip`s for the non-obvious actions, but there is
+  no DOM-level test asserting every button on those screens has a tip (structural registry only).
+- No visual-regression tests: screenshots and keyboard/mobile flows are verified manually in
+  headless Firefox (BiDi), including zero console errors in demo mode.

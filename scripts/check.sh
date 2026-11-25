@@ -28,7 +28,9 @@ if [ -d apps/web/node_modules ]; then
   pnpm --dir apps/web test -- --run
 fi
 
-echo "==> docs"
+echo "==> docs, help corpus, OpenAPI coverage"
 python3 scripts/check_docs.py
+python3 scripts/check_help.py
+python3 scripts/check_openapi.py
 
 echo "OK"

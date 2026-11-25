@@ -1,0 +1,188 @@
+{
+  "version": 1,
+  "generated_by": "openmesh help index",
+  "topics": [
+    {
+      "slug": "getting-started",
+      "title": "Your first mesh in 10 minutes",
+      "summary": "Install, name your node, pick a region, join a channel and send your first message \u2014 no jargon required.",
+      "audience": "beginner",
+      "minutes": 8,
+      "related": [
+        "install",
+        "first-mesh",
+        "security"
+      ]
+    },
+    {
+      "slug": "install",
+      "title": "Install OpenMesh",
+      "summary": "One-line installer, manual installs and what each piece does.",
+      "audience": "beginner",
+      "minutes": 6,
+      "related": [
+        "getting-started",
+        "backbone"
+      ]
+    },
+    {
+      "slug": "first-mesh",
+      "title": "Build a tiny mesh",
+      "summary": "Two devices, one channel, one repeater: the smallest useful network and how to invite someone.",
+      "audience": "beginner",
+      "minutes": 7,
+      "related": [
+        "channels",
+        "contacts-identity",
+        "radio-and-region"
+      ]
+    },
+    {
+      "slug": "radio-and-region",
+      "title": "Radios, regions and airtime",
+      "summary": "What the radio settings mean, which region to pick, and why images cost airtime.",
+      "audience": "both",
+      "minutes": 10,
+      "related": [
+        "media",
+        "nodes-telemetry",
+        "troubleshooting"
+      ]
+    },
+    {
+      "slug": "messaging",
+      "title": "Messages, delivery and offline mail",
+      "summary": "Sending, delivery ticks, retries, and how repeaters hold mail for people who are offline.",
+      "audience": "beginner",
+      "minutes": 8,
+      "related": [
+        "channels",
+        "nodes-telemetry",
+        "troubleshooting"
+      ]
+    },
+    {
+      "slug": "media",
+      "title": "Images and voice notes",
+      "summary": "How compression, size limits and airtime budgets work \u2014 and when not to send a picture.",
+      "audience": "both",
+      "minutes": 9,
+      "related": [
+        "radio-and-region",
+        "troubleshooting"
+      ]
+    },
+    {
+      "slug": "channels",
+      "title": "Group chats (channels)",
+      "summary": "Create a private channel, share the invite, understand shared keys and signed messages.",
+      "audience": "both",
+      "minutes": 8,
+      "related": [
+        "contacts-identity",
+        "first-mesh",
+        "security"
+      ]
+    },
+    {
+      "slug": "contacts-identity",
+      "title": "Contacts and identity",
+      "summary": "Node ids, public keys, QR invites, verification and what a contact actually proves.",
+      "audience": "both",
+      "minutes": 9,
+      "related": [
+        "security",
+        "channels"
+      ]
+    },
+    {
+      "slug": "map-and-position",
+      "title": "Map and location sharing",
+      "summary": "Positions, accuracy, privacy choices, offline maps and sharing with people vs channels.",
+      "audience": "both",
+      "minutes": 7,
+      "related": [
+        "nodes-telemetry",
+        "security"
+      ]
+    },
+    {
+      "slug": "nodes-telemetry",
+      "title": "Nodes, roles and telemetry",
+      "summary": "Clients, trackers, repeaters and gateways: what each does, and how to read battery/signal.",
+      "audience": "both",
+      "minutes": 8,
+      "related": [
+        "radio-and-region",
+        "backbone"
+      ]
+    },
+    {
+      "slug": "backbone",
+      "title": "Run a backbone",
+      "summary": "Turn any box into an always-on relay for distant meshes: setup, security, peers and operations.",
+      "audience": "advanced",
+      "minutes": 12,
+      "related": [
+        "security",
+        "install",
+        "agents"
+      ]
+    },
+    {
+      "slug": "agents",
+      "title": "Use your AI agent",
+      "summary": "Hook Claude Code, Cursor, DSH or any MCP client to your node; prompts, permissions and guardrails.",
+      "audience": "advanced",
+      "minutes": 10,
+      "related": [
+        "security",
+        "backbone",
+        "troubleshooting"
+      ]
+    },
+    {
+      "slug": "security",
+      "title": "Security and privacy",
+      "summary": "What is encrypted, what a relay sees, backups, tokens and the checklist for a safe setup.",
+      "audience": "both",
+      "minutes": 9,
+      "related": [
+        "contacts-identity",
+        "backbone",
+        "agents"
+      ]
+    },
+    {
+      "slug": "troubleshooting",
+      "title": "When something is broken",
+      "summary": "No messages, no radio, no peers, slow media: the playbook with the exact checks to run.",
+      "audience": "both",
+      "minutes": 12,
+      "related": [
+        "radio-and-region",
+        "messaging",
+        "agents"
+      ]
+    },
+    {
+      "slug": "glossary",
+      "title": "Glossary",
+      "summary": "Every term in OpenMesh in one line: node id, announce, airtime, PSF, LoRa, store-and-forward and more.",
+      "audience": "both",
+      "minutes": 5,
+      "related": []
+    },
+    {
+      "slug": "faq",
+      "title": "FAQ",
+      "summary": "The questions people actually ask, answered without marketing.",
+      "audience": "both",
+      "minutes": 6,
+      "related": [
+        "glossary",
+        "security"
+      ]
+    }
+  ]
+}

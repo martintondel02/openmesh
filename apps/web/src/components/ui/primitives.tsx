@@ -2,6 +2,7 @@ import type { ButtonHTMLAttributes, HTMLAttributes, ReactNode } from 'react';
 import { Loader2 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import { cn } from '../../lib/utils';
+import { HelpLink, HelpTip } from './help';
 
 /* ------------------------------------------------------------------ */
 /* Button                                                             */
@@ -237,15 +238,19 @@ export interface ToggleProps {
   description?: string;
   disabled?: boolean;
   id?: string;
+  labelAccessory?: ReactNode;
 }
 
-export function Toggle({ checked, onChange, label, description, disabled, id }: ToggleProps) {
+export function Toggle({ checked, onChange, label, description, disabled, id, labelAccessory }: ToggleProps) {
   return (
     <div className="flex items-start justify-between gap-4">
       <div className="min-w-0">
-        <label htmlFor={id} className="block cursor-pointer text-[13px] font-medium text-slate-200">
-          {label}
-        </label>
+        <span className="flex items-center gap-1.5">
+          <label htmlFor={id} className="block cursor-pointer text-[13px] font-medium text-slate-200">
+            {label}
+          </label>
+          {labelAccessory}
+        </span>
         {description ? <p className="mt-0.5 text-xs leading-relaxed text-slate-500">{description}</p> : null}
       </div>
       <button
@@ -328,12 +333,14 @@ export function EmptyState({
   title,
   description,
   action,
+  helpTopic,
   className,
 }: {
   icon: LucideIcon;
   title: string;
   description?: string;
   action?: ReactNode;
+  helpTopic?: string;
   className?: string;
 }) {
   return (
@@ -346,6 +353,7 @@ export function EmptyState({
         {description ? <p className="mt-1 max-w-xs text-xs leading-relaxed text-slate-500">{description}</p> : null}
       </div>
       {action}
+      {helpTopic ? <HelpLink topic={helpTopic} /> : null}
     </div>
   );
 }
@@ -398,10 +406,13 @@ export function SegmentedControl<T extends string>({
   );
 }
 
-export function Stat({ label, value, hint }: { label: string; value: ReactNode; hint?: string }) {
+export function Stat({ label, value, hint, helpKey }: { label: string; value: ReactNode; hint?: string; helpKey?: string }) {
   return (
     <div className="min-w-0">
-      <p className="text-3xs font-medium uppercase tracking-[0.14em] text-slate-500">{label}</p>
+      <p className="flex items-center gap-1 text-3xs font-medium uppercase tracking-[0.14em] text-slate-500">
+        {label}
+        {helpKey ? <HelpTip helpKey={helpKey} label={label} /> : null}
+      </p>
       <p className="mt-1 truncate text-lg font-semibold tabular-nums text-slate-100">{value}</p>
       {hint ? <p className="mt-0.5 truncate text-3xs text-slate-500">{hint}</p> : null}
     </div>

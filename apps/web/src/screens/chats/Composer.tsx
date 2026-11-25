@@ -29,7 +29,14 @@ export function Composer({ thread }: { thread: ActiveThread }) {
   const profileId = config?.radio.profile ?? 'MEDIUM_FAST';
   const profile = getProfile(profileId);
 
-  const [text, setText] = useState('');
+  const draftKey = `${thread.kind}:${thread.id}`;
+  const setComposerDraft = useAppStore((state) => state.setComposerDraft);
+  const clearComposerDraft = useAppStore((state) => state.clearComposerDraft);
+  const [text, setTextState] = useState(() => useAppStore.getState().composerDrafts[draftKey] ?? '');
+  const setText = (value: string) => {
+    setTextState(value);
+    setComposerDraft(draftKey, value);
+  };
   const [sending, setSending] = useState(false);
   const [imageFile, setImageFile] = useState<File | null>(null);
   const [imageOpen, setImageOpen] = useState(false);
@@ -41,14 +48,14 @@ export function Composer({ thread }: { thread: ActiveThread }) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
-    setText('');
+    setTextState(useAppStore.getState().composerDrafts[draftKey] ?? '');
     setReplyTo(null);
     // Focus the composer when switching threads (desktop only).
     if (window.matchMedia?.('(min-width: 768px)').matches) {
       requestAnimationFrame(() => textareaRef.current?.focus());
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [thread.id, thread.kind]);
+  }, [thread.id, thread.kind, draftKey]);
 
   const replyTarget = useMemo(() => {
     if (!replyTo) return null;
@@ -77,7 +84,8 @@ export function Composer({ thread }: { thread: ActiveThread }) {
     setSending(true);
     try {
       await sendText(trimmed);
-      setText('');
+      setTextState('');
+      clearComposerDraft(draftKey);
       focusComposer();
     } finally {
       setSending(false);

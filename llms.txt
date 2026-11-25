@@ -1,0 +1,71 @@
+# OpenMesh
+
+> Open-source, end-to-end encrypted mesh messaging over LoRa — text, images, voice notes and
+> position sharing without accounts, cell towers or cloud services. Includes a Rust protocol core,
+> a local bridge daemon with WebSocket/REST/MCP APIs, a React web/PWA client, LoRa firmware, a
+> self-hosted backbone mode for linking distant meshes, and an AI-native agent surface.
+
+OpenMesh v0.3.0. Normative contracts live in `docs/architecture/`; user-facing help topics live in
+`content/help/` and are served by the bridge and web UI. Repository: https://github.com/martintondel02/openmesh
+
+## Start here
+
+- [README](https://github.com/martintondel02/openmesh/blob/main/README.md): project overview, feature status, quick start, hardware.
+- [Quick start: zero to secure mesh in 10 minutes](https://github.com/martintondel02/openmesh/blob/main/docs/QUICKSTART.md): beginner path with demo and real-radio options.
+- [Install guide](https://github.com/martintondel02/openmesh/blob/main/docs/INSTALL.md): one-line installer, manual install, services, update/uninstall, troubleshooting.
+- [Glossary](https://github.com/martintondel02/openmesh/blob/main/docs/glossary.md): every protocol and UX term in one place.
+- [FAQ](https://github.com/martintondel02/openmesh/blob/main/docs/guides/faq.md): product, identity, mesh-behaviour and agent questions.
+- [Agent instructions](https://github.com/martintondel02/openmesh/blob/main/AGENTS.md): rules for coding agents working on this repository.
+
+## Architecture (normative)
+
+- [ARCHITECTURE](https://github.com/martintondel02/openmesh/blob/main/docs/architecture/ARCHITECTURE.md): components, boundaries, key decisions.
+- [PROTOCOL (OMP/1)](https://github.com/martintondel02/openmesh/blob/main/docs/architecture/PROTOCOL.md): wire format, headers, crypto, resources, store-and-forward, constants.
+- [WEBSOCKET-API](https://github.com/martintondel02/openmesh/blob/main/docs/architecture/WEBSOCKET-API.md): bridge WebSocket events/commands and REST surface.
+- [OpenAPI 3.1 (REST)](https://github.com/martintondel02/openmesh/blob/main/docs/api/openapi.json): machine-readable bridge REST contract.
+- [BACKBONE (OBB/1)](https://github.com/martintondel02/openmesh/blob/main/docs/architecture/BACKBONE.md): authenticated TCP relay, config, API, security model.
+- [AI-NATIVE](https://github.com/martintondel02/openmesh/blob/main/docs/architecture/AI-NATIVE.md): MCP server, tool catalog, activity log, prompt pack, OpenAPI requirements.
+- [UX & help system](https://github.com/martintondel02/openmesh/blob/main/docs/design/ux-help-system.md): beginner/advanced modes, help surfaces, setup presets.
+- [COMPANION-API](https://github.com/martintondel02/openmesh/blob/main/docs/architecture/COMPANION-API.md): BLE/USB companion protocol for mobile firmware links.
+- [ROADMAP](https://github.com/martintondel02/openmesh/blob/main/docs/ROADMAP.md): milestones and scope; v0.3.0 is the AI-native + beginner-UX release.
+
+## Guides
+
+- [Backbone deployment & operations](https://github.com/martintondel02/openmesh/blob/main/docs/operations/backbone-deployment.md): sizing, monitoring, backups, TLS/VPN, multi-region, incidents.
+- [Advanced cookbook](https://github.com/martintondel02/openmesh/blob/main/docs/guides/advanced-cookbook.md): radio tuning, WireGuard backbone, API scripting, MCP automations, backups/migration.
+- [Troubleshooting](https://github.com/martintondel02/openmesh/blob/main/docs/guides/troubleshooting.md): symptom → check → fix, logs, diagnostic commands.
+- [Research notes](https://github.com/martintondel02/openmesh/blob/main/docs/research/): comparative and technical background (Meshtastic/MeshCore, Reticulum/LXMF, LoRa capacity, NomadNet, AI workflows).
+
+## Agents and automation
+
+- [MCP server reference](https://github.com/martintondel02/openmesh/blob/main/docs/agents/mcp.md): install/config for Claude Desktop/Code, Cursor, DSH and generic clients; env vars; 27-tool catalog; resources/prompts; read-only mode; safety; troubleshooting.
+- [Prompt pack](https://github.com/martintondel02/openmesh/blob/main/docs/agents/prompts.md): copy-paste prompts for troubleshooting, family setup, backup/migration, VPS backbone, API integration, sensor/radio tweaks, daily operations.
+- [Help topic: Use your AI agent](https://github.com/martintondel02/openmesh/blob/main/content/help/agents.md): beginner-friendly agent usage.
+- [Help corpus index](https://github.com/martintondel02/openmesh/blob/main/content/help/index.json): machine-readable topic metadata (16 topics; beginner/advanced/both).
+
+## Help corpus (in-app content)
+
+- [Getting started](https://github.com/martintondel02/openmesh/blob/main/content/help/getting-started.md) · [Install](https://github.com/martintondel02/openmesh/blob/main/content/help/install.md) · [First mesh](https://github.com/martintondel02/openmesh/blob/main/content/help/first-mesh.md) · [Radio & region](https://github.com/martintondel02/openmesh/blob/main/content/help/radio-and-region.md)
+- [Messaging](https://github.com/martintondel02/openmesh/blob/main/content/help/messaging.md) · [Media](https://github.com/martintondel02/openmesh/blob/main/content/help/media.md) · [Channels](https://github.com/martintondel02/openmesh/blob/main/content/help/channels.md) · [Contacts & identity](https://github.com/martintondel02/openmesh/blob/main/content/help/contacts-identity.md)
+- [Map & position](https://github.com/martintondel02/openmesh/blob/main/content/help/map-and-position.md) · [Nodes & telemetry](https://github.com/martintondel02/openmesh/blob/main/content/help/nodes-telemetry.md) · [Backbone](https://github.com/martintondel02/openmesh/blob/main/content/help/backbone.md)
+- [Agents](https://github.com/martintondel02/openmesh/blob/main/content/help/agents.md) · [Security](https://github.com/martintondel02/openmesh/blob/main/content/help/security.md) · [Troubleshooting](https://github.com/martintondel02/openmesh/blob/main/content/help/troubleshooting.md) · [Glossary](https://github.com/martintondel02/openmesh/blob/main/content/help/glossary.md) · [FAQ](https://github.com/martintondel02/openmesh/blob/main/content/help/faq.md)
+
+## Decisions (ADRs)
+
+- [0001 Own protocol vs Reticulum](https://github.com/martintondel02/openmesh/blob/main/docs/adr/0001-own-protocol-vs-reticulum.md)
+- [0002 Managed flooding](https://github.com/martintondel02/openmesh/blob/main/docs/adr/0002-managed-flooding.md)
+- [0003 Static ECDH then ratchet](https://github.com/martintondel02/openmesh/blob/main/docs/adr/0003-static-ecdh-then-ratchet.md)
+- [0004 Rust core + C++ firmware + golden vectors](https://github.com/martintondel02/openmesh/blob/main/docs/adr/0004-rust-core-cpp-firmware-golden-vectors.md)
+- [0005 Companion radio architecture](https://github.com/martintondel02/openmesh/blob/main/docs/adr/0005-companion-radio-architecture.md)
+- [0006 Web-first clients, Tauri, native Android](https://github.com/martintondel02/openmesh/blob/main/docs/adr/0006-web-first-clients-tauri-native-android.md)
+- [0007 Media pipeline](https://github.com/martintondel02/openmesh/blob/main/docs/adr/0007-media-pipeline.md)
+- [0008 AGPL-3.0 licensing](https://github.com/martintondel02/openmesh/blob/main/docs/adr/0008-agpl-3-0-licensing.md)
+- [0009 Backbone mode](https://github.com/martintondel02/openmesh/blob/main/docs/adr/0009-backbone-mode.md)
+- [0010 AI-native + beginner UX](https://github.com/martintondel02/openmesh/blob/main/docs/adr/0010-ai-native-and-beginner-ux.md)
+
+## Machine-readable surfaces
+
+- Bridge: `http://127.0.0.1:8787/api/health` (public), `/api/openapi.json` (full REST), `/api/help` + `/api/help/{slug}` (help corpus), `/api/ws` (WebSocket), `/api/events` (SSE).
+- MCP: `openmesh-bridge mcp` (stdio JSON-RPC; tools `openmesh_health`, `openmesh_status`, `openmesh_nodes`, `openmesh_messages`, `openmesh_channels`, `openmesh_contacts`, `openmesh_backbone_status`, `openmesh_setup_state`, `openmesh_activity`, `openmesh_help`, writes incl. `openmesh_send_message`, `openmesh_setup_quick`; read-only mode via `OPENMESH_MCP_READ_ONLY=1`).
+- Help index: `content/help/index.json`; OpenAPI document also served at `/api/openapi.json`.
+- License: AGPL-3.0-or-later. See `LICENSE`, `NOTICE`.

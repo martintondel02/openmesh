@@ -237,6 +237,7 @@ export function ChatThread() {
           <div className="mx-auto flex w-full max-w-3xl flex-col gap-1">
             {all.length === 0 ? (
               <EmptyState
+                helpTopic="messaging"
                 icon={MessageSquare}
                 title={`Start chatting with ${header.name}`}
                 description={

@@ -17,6 +17,9 @@ import type {
   BackboneSetup,
   BackboneStatus,
 } from '../../types/backbone';
+import type { ActivityEntry } from '../../types/agents';
+import type { SetupRecommendation, SetupState } from '../../types/setup';
+import { recommendedFor } from '../setup';
 import type {
   ConfigData,
   ConfigChannel,
@@ -87,6 +90,19 @@ export interface DemoDataset {
   cabinMap: DemoMedia;
   voiceNote: { dataUrl: string; waveform: number[]; durationMs: number };
   backbone: DemoBackbone;
+  setup: DemoSetupSeed;
+  agents: DemoAgentSeed;
+}
+
+export interface DemoSetupSeed {
+  state: SetupState;
+  recommendation: SetupRecommendation;
+}
+
+export interface DemoAgentSeed {
+  configured: boolean;
+  name: string;
+  activities: ActivityEntry[];
 }
 
 /* ------------------------------------------------------------------ */
@@ -758,7 +774,7 @@ export function createDemoDataset(nowMs: number = Date.now()): DemoDataset {
   };
 
   const hello: HelloData = {
-    bridge_version: '0.1.0-demo',
+    bridge_version: '0.3.0-demo',
     protocol: 'omp/1',
     node: { node_id: ownId, name: 'martin-nord', class: 'client', caps: 0b1010001 },
     radios: [
@@ -904,10 +920,42 @@ export function createDemoDataset(nowMs: number = Date.now()): DemoDataset {
     token: backboneToken,
   };
 
+  /* ---------------- beginner setup + AI agents (v0.3) ---------------- */
+  const setupRecommendation: SetupRecommendation = recommendedFor('NO', 'client');
+  const setup: DemoSetupSeed = {
+    state: {
+      first_run: false,
+      checks: { identity: true, radio: true, api_token: true, channel: true, backbone: true, agent: true },
+      recommended: setupRecommendation,
+      counts: {
+        nodes: nodes.length,
+        contacts: contacts.length,
+        channels: channels.length,
+        messages: messages.length + groupMessages.length,
+      },
+      ui_mode: 'beginner',
+    },
+    recommendation: setupRecommendation,
+  };
+
+  const agentActivities: ActivityEntry[] = [
+    { id: 1, at_ms: nowMs - 2 * MINUTE, source: 'agent:claude', method: 'POST', path: '/api/messages', summary: 'send message to anne (24 bytes)', ok: true, error: null },
+    { id: 2, at_ms: nowMs - 14 * MINUTE, source: 'user', method: 'POST', path: '/api/channels', summary: 'create channel “Familien”', ok: true, error: null },
+    { id: 3, at_ms: nowMs - 27 * MINUTE, source: 'agent:claude', method: 'POST', path: '/api/announce', summary: 'force announce', ok: true, error: null },
+    { id: 4, at_ms: nowMs - 46 * MINUTE, source: 'web', method: 'POST', path: '/api/position', summary: 'share position with channel “Familien”', ok: true, error: null },
+    { id: 5, at_ms: nowMs - 65 * MINUTE, source: 'agent:claude', method: 'POST', path: '/api/contacts', summary: 'add contact d3e4f5a6b7c8d901', ok: false, error: 'contact already exists' },
+    { id: 6, at_ms: nowMs - 2 * 60 * MINUTE, source: 'user', method: 'POST', path: '/api/messages/retry', summary: 'retry messages for lars', ok: true, error: null },
+    { id: 7, at_ms: nowMs - 3 * 60 * MINUTE, source: 'cli', method: 'POST', path: '/api/config', summary: 'store-and-forward on', ok: true, error: null },
+    { id: 8, at_ms: nowMs - 4 * 60 * MINUTE, source: 'agent:claude', method: 'POST', path: '/api/channels/messages', summary: 'send channel message to “Familien” (41 bytes)', ok: true, error: null },
+  ];
+  const agents: DemoAgentSeed = { configured: true, name: 'claude', activities: agentActivities };
+
   return {
     now: nowMs,
     ownNodeId: ownId,
     backbone,
+    setup,
+    agents,
     ownName: 'martin-nord',
     ownPosition,
     hello,

@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import {
+  BookOpen,
+  Bot,
   ChevronDown,
   Copy,
   Map,
@@ -23,6 +25,8 @@ import { selectBackboneAvailable } from '../../store/backbone-selectors';
 import { cn, formatNodeId, shortenNodeId } from '../../lib/utils';
 import { Avatar, Badge, Button } from '../ui/primitives';
 import { copyText } from '../ui/signals';
+import { ModeToggle } from './ModeToggle';
+import { SystemBanners } from './SystemBanners';
 
 /* ------------------------------------------------------------------ */
 /* Brand mark                                                         */
@@ -59,7 +63,7 @@ export function LogoMark({ size = 28, className }: { size?: number; className?: 
 /* ------------------------------------------------------------------ */
 
 interface NavItem {
-  screen: 'chats' | 'map' | 'nodes' | 'contacts' | 'backbone' | 'settings';
+  screen: 'chats' | 'map' | 'nodes' | 'contacts' | 'backbone' | 'agents' | 'help' | 'settings';
   label: string;
   icon: LucideIcon;
 }
@@ -70,8 +74,18 @@ const NAV_ITEMS: NavItem[] = [
   { screen: 'nodes', label: 'Nodes', icon: Radio },
   { screen: 'contacts', label: 'Contacts', icon: Users },
   { screen: 'backbone', label: 'Backbone', icon: RadioTower },
+  { screen: 'agents', label: 'Agents', icon: Bot },
+  { screen: 'help', label: 'Help', icon: BookOpen },
   { screen: 'settings', label: 'Settings', icon: Settings },
 ];
+
+function navItemsFor(mode: 'beginner' | 'advanced', backboneAvailable: boolean, agentsAvailable: boolean): NavItem[] {
+  return NAV_ITEMS.filter((item) => {
+    if (item.screen === 'backbone') return mode === 'advanced' || backboneAvailable;
+    if (item.screen === 'agents') return mode === 'advanced' || agentsAvailable;
+    return true;
+  });
+}
 
 /* ------------------------------------------------------------------ */
 /* Connection pill                                                    */
@@ -295,10 +309,12 @@ function Sidebar() {
   const mode = useAppStore((state) => state.mode);
   const bridgeVersion = useAppStore((state) => state.bridgeVersion);
   const backboneAvailable = useAppStore((state) => selectBackboneAvailable(state));
+  const uiMode = useAppStore((state) => state.uiMode);
+  const agentsAvailable = useAppStore((state) => state.agentConnected || Boolean(state.setupState?.checks.agent));
 
   const meta = CONNECTION_META[connection] ?? CONNECTION_META.idle;
-  const mainItems = NAV_ITEMS.filter(
-    (item) => item.screen !== 'settings' && (item.screen !== 'backbone' || backboneAvailable),
+  const mainItems = navItemsFor(uiMode, backboneAvailable, agentsAvailable).filter(
+    (item) => item.screen !== 'settings' && item.screen !== 'help',
   );
 
   return (
@@ -353,21 +369,28 @@ function Sidebar() {
 
       <div className="my-3 h-px bg-white/[0.06]" />
 
-      <button
-        type="button"
-        onClick={() => setScreen('settings')}
-        aria-current={screen === 'settings' ? 'page' : undefined}
-        title="Settings"
-        className={cn(
-          'focus-ring group flex items-center gap-2.5 rounded-lg px-2 py-2 text-left transition-colors',
-          screen === 'settings' ? 'bg-white/[0.07] text-white' : 'text-slate-400 hover:bg-white/[0.04] hover:text-slate-200',
-        )}
-      >
-        <span className="grid h-5 w-5 shrink-0 place-items-center">
-          <Settings className={cn('h-[17px] w-[17px]', screen === 'settings' ? 'text-emerald-300' : 'text-slate-500')} aria-hidden="true" />
-        </span>
-        <span className="hidden text-[13px] font-medium xl:block">Settings</span>
-      </button>
+      {[NAV_ITEMS.find((item) => item.screen === 'help')!, NAV_ITEMS.find((item) => item.screen === 'settings')!].map((item) => {
+        const Icon = item.icon;
+        const active = screen === item.screen;
+        return (
+          <button
+            key={item.screen}
+            type="button"
+            onClick={() => setScreen(item.screen)}
+            aria-current={active ? 'page' : undefined}
+            title={item.label}
+            className={cn(
+              'focus-ring group flex items-center gap-2.5 rounded-lg px-2 py-2 text-left transition-colors',
+              active ? 'bg-white/[0.07] text-white' : 'text-slate-400 hover:bg-white/[0.04] hover:text-slate-200',
+            )}
+          >
+            <span className="grid h-5 w-5 shrink-0 place-items-center">
+              <Icon className={cn('h-[17px] w-[17px]', active ? 'text-emerald-300' : 'text-slate-500')} aria-hidden="true" />
+            </span>
+            <span className="hidden text-[13px] font-medium xl:block">{item.label}</span>
+          </button>
+        );
+      })}
 
       <div className="mt-auto space-y-2 pt-4">
         <div className="hidden rounded-xl border border-white/[0.06] bg-white/[0.02] p-2.5 xl:block">
@@ -384,7 +407,7 @@ function Sidebar() {
           </div>
         </div>
         <p className="hidden px-1 text-center text-3xs leading-relaxed text-slate-600 xl:block">
-          OpenMesh v0.1.0
+          OpenMesh v0.3.0
           <br />
           AGPL-3.0-or-later
         </p>
@@ -403,6 +426,8 @@ const SCREEN_TITLES: Record<string, { title: string; subtitle: string }> = {
   nodes: { title: 'Nodes', subtitle: 'Everything your radio has heard' },
   contacts: { title: 'Contacts', subtitle: 'Verified identities you trust' },
   backbone: { title: 'Backbone', subtitle: 'Always-on relay for distant meshes' },
+  agents: { title: 'Agents', subtitle: 'Connect an AI assistant and review what it changes' },
+  help: { title: 'Help Center', subtitle: 'The handbook, offline too' },
   settings: { title: 'Settings', subtitle: 'Identity, radio and bridge' },
 };
 
@@ -415,6 +440,7 @@ function TopBar() {
   const backboneConfig = useAppStore((state) => state.backboneConfig);
   const backbonePeers = useAppStore((state) => state.backbonePeers.length);
   const setScreen = useAppStore((state) => state.setScreen);
+  const openHelp = useAppStore((state) => state.openHelp);
   const meta = SCREEN_TITLES[screen] ?? SCREEN_TITLES.chats!;
   const threadOpen = screen === 'chats' && Boolean(activeThread);
 
@@ -459,6 +485,16 @@ function TopBar() {
             </button>
           ) : null}
         </div>
+        <button
+          type="button"
+          onClick={() => openHelp()}
+          aria-label="Open Help Center"
+          title="Help Center (works offline)"
+          className="focus-ring inline-grid h-7 w-7 shrink-0 place-items-center rounded-full border border-white/[0.08] bg-white/[0.03] text-slate-400 hover:text-emerald-200"
+        >
+          <BookOpen className="h-3.5 w-3.5" aria-hidden="true" />
+        </button>
+        <ModeToggle className="hidden md:inline-flex" />
         <ConnectionPill compact />
         <NodeIdentityChip />
       </div>
@@ -517,12 +553,14 @@ function MobileNav() {
   const setScreen = useAppStore((state) => state.setScreen);
   const unread = useAppStore((state) => selectTotalUnread(state));
   const backboneAvailable = useAppStore((state) => selectBackboneAvailable(state));
-  const items = NAV_ITEMS.filter((item) => item.screen !== 'backbone' || backboneAvailable);
+  const uiMode = useAppStore((state) => state.uiMode);
+  const agentsAvailable = useAppStore((state) => state.agentConnected || Boolean(state.setupState?.checks.agent));
+  const items = navItemsFor(uiMode, backboneAvailable, agentsAvailable);
 
   return (
     <nav
       aria-label="Primary"
-      className="safe-bottom relative z-30 flex shrink-0 items-stretch border-t border-white/[0.07] bg-ink-925/95 backdrop-blur-md md:hidden"
+      className="no-scrollbar safe-bottom relative z-30 flex shrink-0 items-stretch overflow-x-auto border-t border-white/[0.07] bg-ink-925/95 backdrop-blur-md md:hidden"
     >
       {items.map((item) => {
         const Icon = item.icon;
@@ -534,7 +572,7 @@ function MobileNav() {
             onClick={() => setScreen(item.screen)}
             aria-current={active ? 'page' : undefined}
             className={cn(
-              'focus-ring relative flex flex-1 flex-col items-center gap-0.5 py-2 text-3xs font-medium transition-colors',
+              'focus-ring relative flex min-w-[44px] flex-1 flex-col items-center gap-0.5 px-0 py-2 text-[9px] font-medium transition-colors',
               active ? 'text-emerald-300' : 'text-slate-500',
             )}
           >
@@ -609,6 +647,7 @@ export function AppShell({ children }: { children: ReactNode }) {
         </a>
         <TopBar />
         <DemoBanner />
+        <SystemBanners />
         <main id="main-content" className="relative flex min-h-0 flex-1 flex-col overflow-hidden">
           {children}
         </main>

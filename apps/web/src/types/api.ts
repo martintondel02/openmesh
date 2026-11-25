@@ -1,7 +1,7 @@
 /**
  * Wire types for the OpenMesh Bridge API.
  *
- * Normative source: `docs/architecture/WEBSOCKET-API.md` (v0.1.0).
+ * Normative source: `docs/architecture/WEBSOCKET-API.md` (v0.3.0).
  * Field names here are copied verbatim from the spec — do not rename them.
  * Per spec §7, clients MUST ignore unknown event types and unknown fields.
  */
@@ -213,7 +213,13 @@ export interface ConfigData {
     frequency_mhz?: number | null;
     interface?: string | null;
   };
-  features: { auto_announce: boolean; store_forward: boolean; position_sharing: boolean };
+  features: {
+    auto_announce: boolean;
+    store_forward: boolean;
+    position_sharing: boolean;
+    /** v0.3 UI mode synced from this client (local layout preference wins). */
+    ui_mode?: 'beginner' | 'advanced';
+  };
   channels: ConfigChannel[];
   /** Optional backbone section pushed with `config` after set_backbone_config (BACKBONE.md §7.2). */
   backbone?: BackboneConfig;
@@ -367,7 +373,7 @@ export interface Contact extends ContactData {
   seeded?: boolean;
 }
 
-export type Screen = 'chats' | 'map' | 'nodes' | 'contacts' | 'backbone' | 'settings';
+export type Screen = 'chats' | 'map' | 'nodes' | 'contacts' | 'backbone' | 'agents' | 'help' | 'settings';
 
 /** A conversation row in the chats sidebar. */
 export interface Conversation {

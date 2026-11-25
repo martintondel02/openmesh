@@ -37,6 +37,21 @@ import type {
 import type { BackboneConfig, BackboneConfigPatch, BackbonePeer, BackbonePeerEvent, BackboneSetup, BackboneStatus, BackboneStatusEvent } from '../types/backbone';
 import { BackboneRestClient } from '../lib/backbone-api';
 import { applyPeerEvent, buildBackboneConnectionString, buildFallbackSetup, mergeBackboneConfig, normalizeBackboneConfig, normalizeBackboneSetup } from '../lib/backbone';
+import type { SetupRecommendation, SetupRole, SetupState, QuickSetupRequest, QuickSetupResult, OnboardingState, OnboardingDraft } from '../types/setup';
+import type { ActivityEntry } from '../types/agents';
+import { type UiMode, DEFAULT_UI_MODE, loadUiMode, persistUiMode, resolveUiModeOverride } from '../lib/mode';
+import {
+  buildDemoQuickSetupResult,
+  createOnboardingState,
+  normalizeQuickSetupRequest,
+  onboardingReducer,
+  recommendedFor,
+  suggestNodeName,
+} from '../lib/setup';
+import { SetupRestClient } from '../lib/setup-api';
+import { AgentsRestClient } from '../lib/agents-api';
+import { normalizeActivityPayload } from '../lib/agents';
+import { parseHelpRoute } from '../lib/help';
 import type { ConfigPatch } from './reducers';
 import { deriveDelivery, mergeConfig, removeContact as removeContactReducer, upsertChannel, upsertGroupMessage, upsertMessage, upsertNode, applyAck, applyMessageUpdate, appendPositionHistory } from './reducers';
 import type { MeshTransport, TransportStatus } from '../lib/transport';
@@ -54,6 +69,10 @@ export interface Toast {
   kind: 'info' | 'success' | 'error' | 'warn';
   title: string;
   message?: string;
+  /** Help Center topic shown as an actionable "Get help" link. */
+  helpTopic?: string;
+  /** Optional redacted context for the copy-diagnostics button. */
+  diagnostics?: Record<string, unknown>;
 }
 
 export interface ActiveThread {
@@ -77,19 +96,76 @@ type Resolver<T> = { resolve: (value: T) => void; reject: (error: Error) => void
 
 const SETTINGS_KEY = 'openmesh.settings.v1';
 
-const SCREEN_NAMES: Screen[] = ['chats', 'map', 'nodes', 'contacts', 'backbone', 'settings'];
+const SCREEN_NAMES: Screen[] = ['chats', 'map', 'nodes', 'contacts', 'backbone', 'agents', 'help', 'settings'];
 
-/** Allow deep links/screenshots: ?screen=map&demo=1 */
+/** Allow deep links/screenshots: ?screen=map&demo=1, /help/slug, /agents. */
 function initialScreenFromUrl(): Screen {
   try {
-    // Deep link: /backbone (route form) or ?screen=backbone (query form).
     if (/\/backbone\/?$/.test(window.location.pathname)) return 'backbone';
+    if (/\/agents\/?$/.test(window.location.pathname)) return 'agents';
+    if (parseHelpRoute(window.location.pathname, window.location.search, window.location.hash)) return 'help';
     const requested = new URLSearchParams(window.location.search).get('screen');
     if (requested && (SCREEN_NAMES as string[]).includes(requested)) return requested as Screen;
   } catch {
     // ignore
   }
   return 'chats';
+}
+
+function initialHelpRoute(): { slug: string | null; anchor: string | null } {
+  try {
+    const route = parseHelpRoute(window.location.pathname, window.location.search, window.location.hash);
+    if (route) return route;
+  } catch {
+    // ignore
+  }
+  return { slug: null, anchor: null };
+}
+
+function initialUiMode(): UiMode {
+  try {
+    const override = resolveUiModeOverride(window.location.search);
+    if (override) return override;
+    return loadUiMode(window.localStorage);
+  } catch {
+    return DEFAULT_UI_MODE;
+  }
+}
+
+function forceSetupCardFromUrl(): boolean {
+  try {
+    return new URLSearchParams(window.location.search).get('setup') === 'card';
+  } catch {
+    return false;
+  }
+}
+
+function wantsOnboardingFromUrl(): boolean {
+  try {
+    const value = new URLSearchParams(window.location.search).get('onboarding');
+    return value === '1' || value === 'true';
+  } catch {
+    return false;
+  }
+}
+
+const CHECKLIST_STORAGE_KEY = 'openmesh.checklist.v1';
+function loadChecklistFlags(): Record<string, boolean> {
+  try {
+    const raw = window.localStorage.getItem(CHECKLIST_STORAGE_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw) as unknown;
+    return parsed && typeof parsed === 'object' ? (parsed as Record<string, boolean>) : {};
+  } catch {
+    return {};
+  }
+}
+function persistChecklistFlags(flags: Record<string, boolean>): void {
+  try {
+    window.localStorage.setItem(CHECKLIST_STORAGE_KEY, JSON.stringify(flags));
+  } catch {
+    // ignore
+  }
 }
 const DEMO_KEY = 'openmesh.demo';
 const PROBE_TIMEOUT_MS = 1800;
@@ -260,6 +336,29 @@ export interface AppState {
   backboneError: string | null;
   backboneLastUpdated: number | null;
 
+  /* beginner/advanced mode + help (v0.3) */
+  uiMode: UiMode;
+  helpSlug: string | null;
+  helpAnchor: string | null;
+  setupState: SetupState | null;
+  setupRecommendation: SetupRecommendation | null;
+  setupLoading: boolean;
+  setupError: string | null;
+  onboarding: OnboardingState;
+  setupCardDismissed: boolean;
+  forceSetupCard: boolean;
+  advancedChecklistDone: Record<string, boolean>;
+  composerDrafts: Record<string, string>;
+
+  /* AI agents (v0.3) */
+  agentActivities: ActivityEntry[];
+  agentConnected: boolean;
+  lastAgentAtMs: number | null;
+  activityCapacity: number;
+  activitySources: string[];
+  agentLoading: boolean;
+  agentError: string | null;
+
   /* actions */
   bootstrap: () => Promise<void>;
   retryConnection: () => Promise<void>;
@@ -290,6 +389,25 @@ export interface AppState {
   resetIdentity: () => Promise<void>;
   setOwnPositionFromGeo: (position: Position, accuracyM?: number | null) => void;
   loadBackbone: () => Promise<void>;
+
+  /* v0.3 mode / onboarding / help / agents */
+  setUiMode: (mode: UiMode) => void;
+  openHelp: (topic?: string | null, anchor?: string | null) => void;
+  setHelpTopic: (slug: string | null, anchor?: string | null) => void;
+  loadSetupState: () => Promise<void>;
+  openOnboarding: () => void;
+  closeOnboarding: () => void;
+  onboardingNext: () => void;
+  onboardingBack: () => void;
+  updateOnboardingDraft: (patch: Partial<OnboardingDraft>) => void;
+  submitQuickSetup: (overrides?: Partial<QuickSetupRequest>) => Promise<void>;
+  loadSetupRecommendation: (country?: string, role?: SetupRole) => Promise<void>;
+  dismissSetupCard: () => void;
+  toggleAdvancedChecklist: (key: string) => void;
+  setComposerDraft: (key: string, text: string) => void;
+  clearComposerDraft: (key: string) => void;
+  loadActivity: () => Promise<void>;
+  revokeApiToken: () => Promise<string | null>;
   saveBackboneConfig: (patch: BackboneConfigPatch) => Promise<boolean>;
   setBackboneEnabled: (enabled: boolean) => Promise<boolean>;
   kickBackbonePeer: (nodeId: string) => Promise<void>;
@@ -329,6 +447,40 @@ function errorMessage(error: unknown): string {
   return String(error);
 }
 
+let demoDatasetRef: DemoDataset | null = null;
+let setupAutoOpenAttempted = false;
+
+function setupRestClient(settings: AppSettings): SetupRestClient {
+  return new SetupRestClient({
+    baseUrl: settings.bridgeUrl,
+    token: settings.token || null,
+    timeoutMs: 8000,
+  });
+}
+
+function agentsRestClient(settings: AppSettings): AgentsRestClient {
+  return new AgentsRestClient({
+    baseUrl: settings.bridgeUrl,
+    token: settings.token || null,
+    timeoutMs: 8000,
+  });
+}
+
+function demoChannelInvite(channel: { channel_id: string; name: string } | undefined): string {
+  const id = channel?.channel_id ?? 'demo-channel';
+  const name = channel?.name ?? 'Private channel';
+  return `openmesh://channel?channel=${encodeURIComponent(id)}&name=${encodeURIComponent(name)}&psk=demo-channel-key-not-a-real-secret&v=1`;
+}
+
+function syncUiModeToBridge(mode: UiMode, config: ConfigData | null): void {
+  if (!transport || !config) return;
+  try {
+    transport.send('set_config', { features: { ...config.features, ui_mode: mode } });
+  } catch {
+    // Best effort: the local preference still applies to layout.
+  }
+}
+
 /** Best-effort connection string from the current panel state (token may be unknown). */
 function connectionStringFromState(state: Pick<AppState, 'backboneConfig' | 'backboneSessionToken' | 'ownNodeId' | 'backboneSetup'>): string {
   const config = state.backboneConfig;
@@ -343,19 +495,31 @@ function connectionStringFromState(state: Pick<AppState, 'backboneConfig' | 'bac
   });
 }
 
-function syncScreenUrl(screen: Screen): void {
+function syncScreenUrl(screen: Screen, helpSlug: string | null = null, helpAnchor: string | null = null): void {
   if (typeof window === 'undefined' || !window.history?.pushState) return;
   try {
     const url = new URL(window.location.href);
-    const wantsBackbone = screen === 'backbone';
-    const isBackbone = /\/backbone\/?$/.test(url.pathname);
-    if (wantsBackbone && !isBackbone) {
-      url.pathname = `${url.pathname.replace(/\/+$/, '')}/backbone`;
-      window.history.pushState({ screen }, '', url.toString());
-    } else if (!wantsBackbone && isBackbone) {
-      url.pathname = url.pathname.replace(/\/backbone\/?$/, '/');
-      window.history.pushState({ screen }, '', url.toString());
+    const previous = url.toString();
+    if (screen === 'backbone') {
+      url.pathname = `${url.pathname.replace(/\/(backbone|agents|help(?:\/[A-Za-z0-9-]+)?)\/?$/, '')}/backbone`.replace(/\/+/g, '/');
+      url.searchParams.delete('screen');
+      url.hash = '';
+    } else if (screen === 'agents') {
+      url.pathname = `${url.pathname.replace(/\/(backbone|agents|help(?:\/[A-Za-z0-9-]+)?)\/?$/, '')}/agents`.replace(/\/+/g, '/');
+      url.searchParams.delete('screen');
+      url.hash = '';
+    } else if (screen === 'help') {
+      const base = url.pathname.replace(/\/(backbone|agents|help(?:\/[A-Za-z0-9-]+)?)\/?$/, '');
+      url.pathname = `/help${helpSlug ? `/${encodeURIComponent(helpSlug)}` : ''}`.replace(/\/+/g, '/');
+      if (base && base !== '/') url.pathname = `${base.replace(/\/$/, '')}${url.pathname}`.replace(/\/+/g, '/');
+      url.searchParams.delete('screen');
+      url.hash = helpAnchor ? `#${helpAnchor}` : '';
+    } else {
+      url.pathname = url.pathname.replace(/\/(backbone|agents|help(?:\/[A-Za-z0-9-]+)?)\/?$/, '/');
+      url.searchParams.delete('screen');
+      url.hash = '';
     }
+    if (url.toString() !== previous) window.history.pushState({ screen, helpSlug }, '', url.toString());
   } catch {
     // History API unavailable (sandboxed webview) — deep links still work on load.
   }
@@ -523,6 +687,26 @@ export const useAppStore = create<AppState>()((set, get) => ({
   backboneError: null,
   backboneLastUpdated: null,
 
+  uiMode: initialUiMode(),
+  helpSlug: initialHelpRoute().slug,
+  helpAnchor: initialHelpRoute().anchor,
+  setupState: null,
+  setupRecommendation: null,
+  setupLoading: false,
+  setupError: null,
+  onboarding: createOnboardingState(),
+  setupCardDismissed: false,
+  forceSetupCard: forceSetupCardFromUrl(),
+  advancedChecklistDone: loadChecklistFlags(),
+  composerDrafts: {},
+  agentActivities: [],
+  agentConnected: false,
+  lastAgentAtMs: null,
+  activityCapacity: 256,
+  activitySources: [],
+  agentLoading: false,
+  agentError: null,
+
   resolveAttachmentUrl: async (attachmentId, mime) => {
     if (!transport) throw new Error('Not connected');
     return transport.resolveAttachmentUrl(attachmentId, mime);
@@ -572,11 +756,15 @@ export const useAppStore = create<AppState>()((set, get) => ({
     }
     const mock = new MockTransport({ dataset });
     attachTransport(set, get, mock);
+    if (wantsOnboardingFromUrl()) {
+      get().openOnboarding();
+    }
     if (!forced) {
       get().pushToast({
         kind: 'warn',
         title: 'Bridge not found — demo mode',
         message: 'Showing a seeded Oslo mesh. Start the bridge or set the URL in Settings, then retry.',
+        helpTopic: 'troubleshooting',
       });
     }
   },
@@ -607,11 +795,16 @@ export const useAppStore = create<AppState>()((set, get) => ({
       reconnectAttempt: status.attempt ?? 0,
       ...(status.state === 'connected' || status.state === 'demo' ? { syncing: false } : {}),
     });
+    const state = get();
+    if (status.state === 'connected' && state.mode === 'live' && !state.setupState && !state.setupLoading && !setupAutoOpenAttempted) {
+      void state.loadSetupState();
+    }
   },
 
   /* -------------------- demo hydration -------------------- */
 
   hydrateDemo: (dataset) => {
+    demoDatasetRef = dataset;
     const nodes: Record<string, NodeData> = {};
     for (const node of dataset.nodes) nodes[node.node_id] = node;
     const contacts: Record<string, Contact> = {};
@@ -662,14 +855,34 @@ export const useAppStore = create<AppState>()((set, get) => ({
       backboneSaving: false,
       backboneError: null,
       backboneLastUpdated: Date.now(),
+      setupState: cloneValue(dataset.setup.state),
+      setupRecommendation: cloneValue(dataset.setup.recommendation),
+      setupLoading: false,
+      setupError: null,
+      onboarding: {
+        ...createOnboardingState({ nodeName: suggestNodeName('client') }),
+        open: false,
+      },
+      setupCardDismissed: false,
+      forceSetupCard: forceSetupCardFromUrl(),
+      advancedChecklistDone: loadChecklistFlags(),
+      agentActivities: cloneValue(dataset.agents.activities),
+      agentConnected: dataset.agents.configured,
+      lastAgentAtMs: dataset.agents.activities[0]?.at_ms ?? null,
+      activityCapacity: 256,
+      activitySources: [...new Set(dataset.agents.activities.map((entry) => entry.source))],
+      agentLoading: false,
+      agentError: null,
+      composerDrafts: {},
     });
   },
 
   /* -------------------- navigation -------------------- */
 
   setScreen: (screen) => {
-    set({ screen });
-    syncScreenUrl(screen);
+    set({ screen, ...(screen === 'help' ? {} : { helpAnchor: null }) });
+    const state = get();
+    syncScreenUrl(screen, state.helpSlug, state.helpAnchor);
   },
 
   openThread: (thread) => {
@@ -1272,11 +1485,299 @@ export const useAppStore = create<AppState>()((set, get) => ({
     }
   },
 
+  /* -------------------- mode, help, setup, agents (v0.3) -------------------- */
+
+  setUiMode: (mode) => {
+    if (get().uiMode === mode) return;
+    try {
+      persistUiMode(mode, window.localStorage);
+    } catch {
+      // ignore
+    }
+    set({ uiMode: mode });
+    const state = get();
+    if (state.connection === 'connected' && state.config) {
+      syncUiModeToBridge(mode, state.config);
+    }
+  },
+
+  openHelp: (topic = null, anchor = null) => {
+    set({ screen: 'help', helpSlug: topic, helpAnchor: anchor });
+    syncScreenUrl('help', topic, anchor);
+  },
+
+  setHelpTopic: (slug, anchor = null) => {
+    set({ screen: 'help', helpSlug: slug, helpAnchor: anchor });
+    syncScreenUrl('help', slug, anchor);
+  },
+
+  loadSetupState: async () => {
+    const state = get();
+    if (state.mode === 'demo') {
+      if (demoDatasetRef) {
+        set({
+          setupState: cloneValue(demoDatasetRef.setup.state),
+          setupRecommendation: cloneValue(demoDatasetRef.setup.recommendation),
+          setupLoading: false,
+          setupError: null,
+        });
+      }
+      return;
+    }
+    if (state.connection !== 'connected' || state.setupLoading) return;
+    set({ setupLoading: true, setupError: null });
+    try {
+      const next = await setupRestClient(state.settings).getState();
+      set({ setupState: next, setupRecommendation: next.recommended, setupLoading: false });
+      const now = get();
+      if (
+        now.uiMode === 'beginner' &&
+        next.first_run &&
+        !now.setupCardDismissed &&
+        !now.onboarding.open &&
+        !setupAutoOpenAttempted
+      ) {
+        setupAutoOpenAttempted = true;
+        set({
+          onboarding: {
+            ...now.onboarding,
+            open: true,
+            step: 'role',
+            draft: { ...now.onboarding.draft, nodeName: now.onboarding.draft.nodeName || suggestNodeName(now.onboarding.draft.role) },
+          },
+        });
+      }
+    } catch (error) {
+      set({ setupLoading: false, setupError: errorMessage(error) });
+    }
+  },
+
+  openOnboarding: () => {
+    const state = get();
+    set({
+      onboarding: onboardingReducer(
+        {
+          ...state.onboarding,
+          draft: {
+            ...state.onboarding.draft,
+            nodeName: state.onboarding.draft.nodeName || suggestNodeName(state.onboarding.draft.role, state.ownName),
+          },
+        },
+        { type: 'open' },
+      ),
+    });
+  },
+
+  closeOnboarding: () => {
+    set({ onboarding: onboardingReducer(get().onboarding, { type: 'close' }), setupCardDismissed: false });
+  },
+
+  onboardingNext: () => set({ onboarding: onboardingReducer(get().onboarding, { type: 'next' }) }),
+  onboardingBack: () => set({ onboarding: onboardingReducer(get().onboarding, { type: 'back' }) }),
+
+  updateOnboardingDraft: (patch) => {
+    set({ onboarding: onboardingReducer(get().onboarding, { type: 'draft', patch }) });
+  },
+
+  submitQuickSetup: async (overrides = {}) => {
+    const state = get();
+    const draft = {
+      role: overrides.role ?? state.onboarding.draft.role,
+      country: overrides.country ?? state.onboarding.draft.country,
+      nodeName: overrides.node_name ?? state.onboarding.draft.nodeName,
+      privacy: overrides.privacy ?? state.onboarding.draft.privacy,
+    };
+    const request = normalizeQuickSetupRequest({
+      role: draft.role,
+      country: draft.country,
+      node_name: draft.nodeName || suggestNodeName(draft.role),
+      privacy: draft.privacy,
+      create_channel: true,
+    });
+    const recommended = recommendedFor(request.country, request.role);
+    set({ onboarding: onboardingReducer(state.onboarding, { type: 'submit-start' }) });
+    try {
+      let result: QuickSetupResult;
+      if (state.mode === 'demo') {
+        const dataset = demoDatasetRef;
+        const channel =
+          dataset?.channels[0] ??
+          Object.values(state.channels)[0] ?? { channel_id: 'demo-channel', name: 'Private channel' };
+        result = buildDemoQuickSetupResult({
+          role: request.role,
+          country: request.country,
+          nodeName: request.node_name ?? suggestNodeName(request.role),
+          privacy: request.privacy,
+          channelId: channel.channel_id,
+          channelName: channel.name,
+          inviteUrl: demoChannelInvite(channel),
+        });
+        const config = state.config
+          ? mergeConfig(state.config, {
+              node: { ...state.config.node, name: request.node_name ?? state.config.node.name, class: request.role },
+              radio: { ...state.config.radio, region: recommended.region, profile: recommended.profile },
+              features: {
+                ...state.config.features,
+                position_sharing: request.privacy === 'shared',
+                store_forward: recommended.store_forward ?? state.config.features.store_forward,
+                ui_mode: state.uiMode,
+              },
+            })
+          : state.config;
+        const checks = { identity: true, radio: true, api_token: true, channel: true, backbone: true, agent: true };
+        set({
+          config,
+          ownName: request.node_name ?? state.ownName,
+          setupState: {
+            first_run: false,
+            checks,
+            recommended,
+            counts: state.setupState?.counts ?? {},
+            ui_mode: state.uiMode,
+          },
+          setupRecommendation: recommended,
+          onboarding: onboardingReducer(state.onboarding, { type: 'submit-success', result }),
+          setupCardDismissed: true,
+          setupError: null,
+        });
+      } else {
+        result = await setupRestClient(state.settings).quickSetup(request);
+        set({
+          onboarding: onboardingReducer(get().onboarding, { type: 'submit-success', result }),
+          setupCardDismissed: true,
+          setupError: null,
+        });
+        void get().loadSetupState();
+      }
+      get().pushToast({
+        kind: 'success',
+        title: 'Your node is secured',
+        message: 'A private channel is ready and safe defaults are on. You can change anything later.',
+        helpTopic: 'getting-started',
+      });
+    } catch (error) {
+      set({
+        onboarding: onboardingReducer(get().onboarding, { type: 'submit-error', message: errorMessage(error) }),
+      });
+      get().pushToast({
+        kind: 'error',
+        title: 'Secure setup did not finish',
+        message: errorMessage(error),
+        helpTopic: 'troubleshooting',
+        diagnostics: {
+          step: 'setup/quick',
+          bridge: state.settings.bridgeUrl,
+          role: request.role,
+          country: request.country,
+        },
+      });
+    }
+  },
+
+  loadSetupRecommendation: async (country, role) => {
+    const state = get();
+    const targetCountry = country ?? state.onboarding.draft.country;
+    const targetRole = role ?? state.onboarding.draft.role;
+    const local = recommendedFor(targetCountry, targetRole);
+    set({ setupRecommendation: local });
+    if (state.mode !== 'live' || state.connection !== 'connected') return;
+    try {
+      const remote = await setupRestClient(state.settings).getRecommendation(targetCountry, targetRole);
+      set({ setupRecommendation: remote });
+    } catch {
+      // Keep the local preset-derived recommendation; the wizard stays usable offline.
+    }
+  },
+
+  dismissSetupCard: () => set({ setupCardDismissed: true }),
+
+  toggleAdvancedChecklist: (key) => {
+    const flags = { ...get().advancedChecklistDone, [key]: !get().advancedChecklistDone[key] };
+    persistChecklistFlags(flags);
+    set({ advancedChecklistDone: flags });
+  },
+
+  setComposerDraft: (key, text) => {
+    const drafts = get().composerDrafts;
+    if (drafts[key] === text) return;
+    set({ composerDrafts: { ...drafts, [key]: text } });
+  },
+
+  clearComposerDraft: (key) => {
+    const drafts = { ...get().composerDrafts };
+    delete drafts[key];
+    set({ composerDrafts: drafts });
+  },
+
+  loadActivity: async () => {
+    const state = get();
+    if (state.mode === 'demo') {
+      if (demoDatasetRef) {
+        set({
+          agentActivities: cloneValue(demoDatasetRef.agents.activities),
+          agentConnected: demoDatasetRef.agents.configured,
+          lastAgentAtMs: demoDatasetRef.agents.activities[0]?.at_ms ?? null,
+          activitySources: [...new Set(demoDatasetRef.agents.activities.map((entry) => entry.source))],
+          agentError: null,
+        });
+      }
+      return;
+    }
+    if (state.connection !== 'connected' || state.agentLoading) return;
+    set({ agentLoading: true, agentError: null });
+    try {
+      const payload = normalizeActivityPayload(await agentsRestClient(state.settings).getActivityPayload(100));
+      set({
+        agentActivities: payload.entries,
+        agentConnected: payload.agentConnected,
+        lastAgentAtMs: payload.lastAgentAtMs,
+        activityCapacity: payload.capacity,
+        activitySources: payload.sources,
+        agentLoading: false,
+      });
+    } catch (error) {
+      set({ agentLoading: false, agentError: errorMessage(error) });
+      get().pushToast({
+        kind: 'error',
+        title: 'Could not load agent activity',
+        message: `${errorMessage(error)} Check the bridge URL and token, then retry.`,
+        helpTopic: 'agents',
+        diagnostics: { endpoint: '/api/activity', bridge: state.settings.bridgeUrl },
+      });
+    }
+  },
+
+  revokeApiToken: async () => {
+    const state = get();
+    get().pushToast({
+      kind: 'warn',
+      title: 'Rotate the token on the bridge host',
+      message:
+        'The v0.3 bridge has no API to rotate its own token. Replace the token file and restart the bridge, then paste the new token into Settings. Steps are in the revoke dialog.',
+      helpTopic: 'security',
+      diagnostics: { bridge: state.settings.bridgeUrl, bridge_version: state.bridgeVersion, mode: state.mode },
+    });
+    return null;
+  },
+
   /* -------------------- toasts + errors -------------------- */
 
   pushToast: (toast) => {
     const id = localId('toast');
-    set({ toasts: [...get().toasts, { ...toast, id }].slice(-4) });
+    const state = get();
+    const actionable =
+      toast.kind === 'error' || toast.kind === 'warn'
+        ? {
+            helpTopic: toast.helpTopic ?? 'troubleshooting',
+            diagnostics: toast.diagnostics ?? {
+              bridge: state.settings.bridgeUrl,
+              connection: state.connection,
+              bridge_version: state.bridgeVersion ?? null,
+              url: typeof window !== 'undefined' ? window.location.href : null,
+            },
+          }
+        : {};
+    set({ toasts: [...state.toasts, { ...toast, ...actionable, id }].slice(-4) });
     setTimeout(() => {
       set({ toasts: get().toasts.filter((t) => t.id !== id) });
     }, toast.kind === 'error' ? 8_000 : 5_000);

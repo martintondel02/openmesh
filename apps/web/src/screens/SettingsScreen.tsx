@@ -38,10 +38,12 @@ import {
 } from '../lib/airtime';
 import { buildHttpBaseUrl } from '../lib/ws';
 import { cn, formatBytes, formatSeconds, formatUptime, formatNodeId } from '../lib/utils';
-import { Badge, Button, SectionTitle, Toggle } from '../components/ui/primitives';
+import { Badge, Button, SectionTitle, SegmentedControl, Toggle } from '../components/ui/primitives';
 import { CopyButton } from '../components/ui/signals';
 import { Callout, Field, Slider, TextInput, InlineCode } from '../components/ui/forms';
 import { Modal } from '../components/ui/overlay';
+import { HelpTip } from '../components/ui/help';
+import { BeginnerSettings } from './settings/BeginnerSettings';
 
 const NODE_CLASSES = [
   { value: 'client', label: 'Client', hint: 'Phone or handheld; sleeps to save power.' },
@@ -68,6 +70,8 @@ export function SettingsScreen() {
   const retryConnection = useAppStore((state) => state.retryConnection);
   const resetIdentity = useAppStore((state) => state.resetIdentity);
   const pushToast = useAppStore((state) => state.pushToast);
+  const uiMode = useAppStore((state) => state.uiMode);
+  const setUiMode = useAppStore((state) => state.setUiMode);
 
   const profile = getProfile(config?.radio.profile);
   const region = getRegion(config?.radio.region);
@@ -174,6 +178,10 @@ export function SettingsScreen() {
     }
   };
 
+  if (uiMode === 'beginner') {
+    return <BeginnerSettings setMode={setUiMode} />;
+  }
+
   return (
     <div className="min-h-0 flex-1 overflow-y-auto">
       <div className="mx-auto max-w-4xl space-y-4 px-4 py-5 md:px-6">
@@ -193,10 +201,31 @@ export function SettingsScreen() {
           </Callout>
         ) : null}
 
+        <SectionCard
+          icon={SlidersHorizontal}
+          title="Interface mode"
+          description="Beginner keeps the safe basics; Advanced reveals every radio, identity, backbone and agent control."
+        >
+          <div className="flex flex-wrap items-center gap-3">
+            <SegmentedControl
+              value={uiMode}
+              options={[
+                { value: 'beginner', label: 'Beginner' },
+                { value: 'advanced', label: 'Advanced' },
+              ]}
+              onChange={(next) => setUiMode(next)}
+              ariaLabel="Interface mode"
+              className="w-full sm:w-auto"
+            />
+            <HelpTip helpKey="mode.toggle" label="Interface mode" />
+            <p className="text-2xs text-slate-500">Switching never changes a setting; it only changes what is shown.</p>
+          </div>
+        </SectionCard>
+
         {/* Identity */}
         <SectionCard icon={UserRound} title="Identity" description="Who this node is on the mesh. Announces are signed with this identity.">
           <div className="grid gap-4 sm:grid-cols-2">
-            <Field label="Node name" hint="Shown in announces and to other clients. 0–32 bytes.">
+            <Field label="Node name" hint="Shown in announces and to other clients. 0–32 bytes." labelAccessory={<HelpTip helpKey="settings.node.name" label="Node name" />}>
               {({ id }) => (
                 <TextInput
                   id={id}
@@ -215,7 +244,7 @@ export function SettingsScreen() {
               )}
             </Field>
 
-            <Field label="Node class" hint={NODE_CLASSES.find((item) => item.value === (config?.node.class ?? 'client'))?.hint}>
+            <Field label="Node class" hint={NODE_CLASSES.find((item) => item.value === (config?.node.class ?? 'client'))?.hint} labelAccessory={<HelpTip helpKey="settings.node.class" label="Node class" />}>
               {({ id }) => (
                 <select
                   id={id}
@@ -236,6 +265,7 @@ export function SettingsScreen() {
           <div className="grid gap-4 sm:grid-cols-2">
             <Field
               label="Node id (self-certifying)"
+              labelAccessory={<HelpTip helpKey="settings.identity.public" label="Node id" />}
               hint="SHA-256(“openmesh/v1/node” || sign_pk || dh_pk)[0..8]"
             >
               {() => (
@@ -251,6 +281,7 @@ export function SettingsScreen() {
               <Slider
                 id="announce-interval"
                 label="Announce interval"
+                labelAccessory={<HelpTip helpKey="settings.announce.interval" label="Announce interval" />}
                 min={5}
                 max={60}
                 step={5}
@@ -273,6 +304,7 @@ export function SettingsScreen() {
               id="auto-announce"
               label="Auto-announce"
               description="Re-announce on the interval above, plus on start and network change (5 min minimum)."
+              labelAccessory={<HelpTip helpKey="settings.auto.announce" label="Auto-announce" />}
               checked={config?.features.auto_announce ?? true}
               onChange={(checked) => commitFeatures({ auto_announce: checked })}
             />
@@ -287,7 +319,7 @@ export function SettingsScreen() {
         {/* Radio */}
         <SectionCard icon={Radio} title="Radio & airtime" description="LoRa modem preset and regulatory region. Media budgets follow from these.">
           <div className="grid gap-4 sm:grid-cols-2">
-            <Field label="Modem preset" hint={profile.description}>
+            <Field label="Modem preset" hint={profile.description} labelAccessory={<HelpTip helpKey="settings.radio.profile" label="Modem preset" />}>
               {({ id }) => (
                 <select
                   id={id}
@@ -304,7 +336,7 @@ export function SettingsScreen() {
                 </select>
               )}
             </Field>
-            <Field label="Region" hint={region.notes}>
+            <Field label="Region" hint={region.notes} labelAccessory={<HelpTip helpKey="settings.radio.region" label="Region" />}>
               {({ id }) => (
                 <select
                   id={id}
@@ -326,6 +358,7 @@ export function SettingsScreen() {
             <Slider
               id="tx-power"
               label="Transmit power"
+              labelAccessory={<HelpTip helpKey="settings.radio.txpower" label="Transmit power" />}
               min={5}
               max={region.maxTxPowerDbm}
               step={1}
@@ -377,6 +410,7 @@ export function SettingsScreen() {
               id="position-sharing"
               label="Position sharing"
               description="Include GPS fixes in announces and position messages when available."
+              labelAccessory={<HelpTip helpKey="settings.position.sharing" label="Position sharing" />}
               checked={config?.features.position_sharing ?? true}
               onChange={(checked) => commitFeatures({ position_sharing: checked })}
             />
@@ -385,6 +419,7 @@ export function SettingsScreen() {
               id="store-forward"
               label="Store & forward"
               description="Ask repeaters to hold sealed envelopes for offline peers (up to 72 h)."
+              labelAccessory={<HelpTip helpKey="settings.store.forward" label="Store & forward" />}
               checked={config?.features.store_forward ?? true}
               onChange={(checked) => commitFeatures({ store_forward: checked })}
             />
@@ -393,6 +428,7 @@ export function SettingsScreen() {
               id="auto-announce-feature"
               label="Announce on network change"
               description="Announce immediately when the radio reconnects or the region changes."
+              labelAccessory={<HelpTip helpKey="settings.auto.announce" label="Announce on network change" />}
               checked={config?.features.auto_announce ?? true}
               onChange={(checked) => commitFeatures({ auto_announce: checked })}
             />
@@ -402,7 +438,7 @@ export function SettingsScreen() {
         {/* Bridge */}
         <SectionCard icon={Plug} title="Bridge connection" description="The local daemon that owns the radio, message store and attachments.">
           <div className="grid gap-4 sm:grid-cols-2">
-            <Field label="Bridge URL" hint="Loopback by default. WebSocket URL is derived automatically.">
+            <Field label="Bridge URL" hint="Loopback by default. WebSocket URL is derived automatically." labelAccessory={<HelpTip helpKey="settings.bridge.url" label="Bridge URL" />}>
               {({ id }) => (
                 <TextInput
                   id={id}
@@ -413,7 +449,7 @@ export function SettingsScreen() {
                 />
               )}
             </Field>
-            <Field label="Bearer token" hint="From ~/.config/openmesh/bridge-token.">
+            <Field label="Bearer token" hint="From ~/.config/openmesh/bridge-token." labelAccessory={<HelpTip helpKey="settings.bridge.token" label="Bearer token" />}>
               {({ id }) => (
                 <div className="relative">
                   <TextInput
