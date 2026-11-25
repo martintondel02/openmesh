@@ -41,8 +41,11 @@ pub const PUBLIC_IDENTITY_LEN: usize = 8 + 32 + 32;
 /// A node's public identity: address plus both verification keys.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct PublicIdentity {
+    /// Self-certifying node address.
     pub node_id: NodeId,
+    /// Ed25519 verification key.
     pub sign_pk: [u8; 32],
+    /// X25519 static Diffie-Hellman public key.
     pub dh_pk: [u8; 32],
 }
 
@@ -54,7 +57,14 @@ impl PublicIdentity {
         hasher.update(sign_pk);
         hasher.update(dh_pk);
         let digest: [u8; 32] = hasher.finalize().into();
-        Self { node_id: NodeId::from_hash(&digest), sign_pk, dh_pk }
+        let mut node_id = NodeId::from_hash(&digest);
+        // Address class rule (PROTOCOL.md §3): unicast node ids have the high bit cleared.
+        node_id.0[0] &= 0x7F;
+        Self {
+            node_id,
+            sign_pk,
+            dh_pk,
+        }
     }
 
     /// Verify that a claimed address matches the keys.
@@ -71,6 +81,7 @@ impl PublicIdentity {
         out
     }
 
+    /// Parse the fixed 72-byte encoding (`node_id || sign_pk || dh_pk`).
     pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
         if bytes.len() != PUBLIC_IDENTITY_LEN {
             return Err(Error::Malformed("public identity must be 72 bytes"));
@@ -81,7 +92,11 @@ impl PublicIdentity {
         sign_pk.copy_from_slice(&bytes[8..40]);
         let mut dh_pk = [0u8; 32];
         dh_pk.copy_from_slice(&bytes[40..72]);
-        Ok(Self { node_id: NodeId(id), sign_pk, dh_pk })
+        Ok(Self {
+            node_id: NodeId(id),
+            sign_pk,
+            dh_pk,
+        })
     }
 
     /// Verify a signature produced by the matching private identity.
@@ -128,7 +143,11 @@ impl Identity {
             .expect("32 bytes is a valid HKDF-SHA256 output length");
         let dh = StaticSecret::from(dh_bytes);
         dh_bytes.zeroize();
-        Self { seed: *seed, signing, dh }
+        Self {
+            seed: *seed,
+            signing,
+            dh,
+        }
     }
 
     /// The 32-byte master secret (used for encrypted local storage).
@@ -136,12 +155,14 @@ impl Identity {
         self.seed
     }
 
+    /// Derive the public identity (keys are recomputed from the seed).
     pub fn public(&self) -> PublicIdentity {
         let sign_pk = self.signing.verifying_key().to_bytes();
         let dh_pk = X25519Public::from(&self.dh).to_bytes();
         PublicIdentity::from_keys(sign_pk, dh_pk)
     }
 
+    /// This node's address.
     pub fn node_id(&self) -> NodeId {
         self.public().node_id
     }
@@ -164,13 +185,18 @@ impl Identity {
     pub fn dm_key(&self, peer: &PublicIdentity) -> Result<[u8; 32]> {
         let me = self.public().node_id;
         let shared = self.dh_shared(&peer.dh_pk);
-        let (lo, hi) = if me.0 <= peer.node_id.0 { (me, peer.node_id) } else { (peer.node_id, me) };
+        let (lo, hi) = if me.0 <= peer.node_id.0 {
+            (me, peer.node_id)
+        } else {
+            (peer.node_id, me)
+        };
         let mut info = [0u8; 16];
         info[..8].copy_from_slice(&lo.0);
         info[8..].copy_from_slice(&hi.0);
         let hk = Hkdf::<Sha256>::new(Some(DM_KDF_SALT), &shared);
         let mut key = [0u8; 32];
-        hk.expand(&info, &mut key).map_err(|_| Error::Config("hkdf"))?;
+        hk.expand(&info, &mut key)
+            .map_err(|_| Error::Config("hkdf"))?;
         Ok(key)
     }
 
@@ -187,6 +213,24 @@ impl Identity {
     pub fn open(&self, peer: &PublicIdentity, aad: &[u8], sealed: &[u8]) -> Result<Vec<u8>> {
         let key = self.dm_key(peer)?;
         open_with_key(&key, aad, sealed)
+    }
+
+    /// Seal a plaintext for `peer` with a caller-supplied nonce prefix.
+    ///
+    /// **Only for tests and golden vectors**: real traffic must use [`Identity::seal`], which
+    /// draws the prefix from the OS CSPRNG. Reusing a nonce prefix with the same key and AAD
+    /// catastrophically breaks XChaCha20-Poly1305.
+    pub fn seal_with_nonce_prefix(
+        &self,
+        peer: &PublicIdentity,
+        aad: &[u8],
+        plaintext: &[u8],
+        nonce_prefix: &[u8; NONCE_PREFIX_LEN],
+    ) -> Result<Vec<u8>> {
+        let key = self.dm_key(peer)?;
+        let mut nonce = [0u8; 24];
+        nonce[..NONCE_PREFIX_LEN].copy_from_slice(nonce_prefix);
+        seal_with_key(&key, &nonce, aad, plaintext)
     }
 }
 
@@ -208,7 +252,8 @@ impl ChannelKey {
         let mut info = Vec::with_capacity(name.len() + 8);
         info.extend_from_slice(b"channel/");
         info.extend_from_slice(name.as_bytes());
-        hk.expand(&info, &mut key).expect("32 bytes is a valid HKDF output length");
+        hk.expand(&info, &mut key)
+            .expect("32 bytes is a valid HKDF output length");
         Self(key)
     }
 
@@ -219,24 +264,55 @@ impl ChannelKey {
         hasher.update(b"openmesh/v1/chan");
         hasher.update(self.0);
         let digest: [u8; 32] = hasher.finalize().into();
-        NodeId::from_hash(&digest)
+        let mut id = NodeId::from_hash(&digest);
+        // Address class rule (PROTOCOL.md §3): channel ids have the high bit set.
+        id.0[0] |= 0x80;
+        id
     }
 
+    /// Seal a plaintext with the channel key, returning `nonce_prefix || ciphertext || tag`.
     pub fn seal(&self, aad: &[u8], plaintext: &[u8]) -> Result<Vec<u8>> {
         let mut nonce = [0u8; 24];
         OsRng.fill_bytes(&mut nonce[..NONCE_PREFIX_LEN]);
         seal_with_key(&self.0, &nonce, aad, plaintext)
     }
 
+    /// Open a payload sealed with the channel key.
     pub fn open(&self, aad: &[u8], sealed: &[u8]) -> Result<Vec<u8>> {
         open_with_key(&self.0, aad, sealed)
     }
+
+    /// Seal a plaintext with a caller-supplied nonce prefix.
+    ///
+    /// **Only for tests and golden vectors**: real traffic must use [`ChannelKey::seal`],
+    /// which draws the prefix from the OS CSPRNG.
+    pub fn seal_with_nonce_prefix(
+        &self,
+        aad: &[u8],
+        plaintext: &[u8],
+        nonce_prefix: &[u8; NONCE_PREFIX_LEN],
+    ) -> Result<Vec<u8>> {
+        let mut nonce = [0u8; 24];
+        nonce[..NONCE_PREFIX_LEN].copy_from_slice(nonce_prefix);
+        seal_with_key(&self.0, &nonce, aad, plaintext)
+    }
 }
 
-fn seal_with_key(key: &[u8; 32], nonce: &[u8; 24], aad: &[u8], plaintext: &[u8]) -> Result<Vec<u8>> {
+fn seal_with_key(
+    key: &[u8; 32],
+    nonce: &[u8; 24],
+    aad: &[u8],
+    plaintext: &[u8],
+) -> Result<Vec<u8>> {
     let cipher = XChaCha20Poly1305::new(key.into());
     let ct = cipher
-        .encrypt(XNonce::from_slice(nonce), Payload { msg: plaintext, aad })
+        .encrypt(
+            XNonce::from_slice(nonce),
+            Payload {
+                msg: plaintext,
+                aad,
+            },
+        )
         .map_err(|_| Error::Decrypt)?;
     let mut out = Vec::with_capacity(NONCE_PREFIX_LEN + ct.len());
     out.extend_from_slice(&nonce[..NONCE_PREFIX_LEN]);
@@ -246,80 +322,23 @@ fn seal_with_key(key: &[u8; 32], nonce: &[u8; 24], aad: &[u8], plaintext: &[u8])
 
 fn open_with_key(key: &[u8; 32], aad: &[u8], sealed: &[u8]) -> Result<Vec<u8>> {
     if sealed.len() < SEAL_OVERHEAD {
-        return Err(Error::BufferTooSmall { need: SEAL_OVERHEAD, have: sealed.len() });
+        return Err(Error::BufferTooSmall {
+            need: SEAL_OVERHEAD,
+            have: sealed.len(),
+        });
     }
     let mut nonce = [0u8; 24];
     nonce[..NONCE_PREFIX_LEN].copy_from_slice(&sealed[..NONCE_PREFIX_LEN]);
     let cipher = XChaCha20Poly1305::new(key.into());
     cipher
-        .decrypt(XNonce::from_slice(&nonce), Payload { msg: &sealed[NONCE_PREFIX_LEN..], aad })
+        .decrypt(
+            XNonce::from_slice(&nonce),
+            Payload {
+                msg: &sealed[NONCE_PREFIX_LEN..],
+                aad,
+            },
+        )
         .map_err(|_| Error::Decrypt)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn identity_is_deterministic_and_self_certifying() {
-        let a = Identity::from_seed(&[7u8; 32]);
-        let b = Identity::from_seed(&[7u8; 32]);
-        assert_eq!(a.node_id(), b.node_id());
-        assert!(a.public().is_self_consistent());
-        assert_ne!(a.node_id(), Identity::generate().node_id());
-        assert_eq!(PublicIdentity::from_bytes(&a.public().to_bytes()).unwrap(), a.public());
-    }
-
-    #[test]
-    fn direct_message_roundtrip() {
-        let alice = Identity::from_seed(&[1u8; 32]);
-        let bob = Identity::from_seed(&[2u8; 32]);
-        let aad = b"header";
-        let sealed = alice.seal(&bob.public(), aad, b"hello bob").unwrap();
-        assert_eq!(bob.open(&alice.public(), aad, &sealed).unwrap(), b"hello bob");
-        // Reverse direction derives the same key.
-        let sealed2 = bob.seal(&alice.public(), aad, b"hello alice").unwrap();
-        assert_eq!(alice.open(&bob.public(), aad, &sealed2).unwrap(), b"hello alice");
-    }
-
-    #[test]
-    fn tampered_ciphertext_is_rejected() {
-        let alice = Identity::from_seed(&[1u8; 32]);
-        let bob = Identity::from_seed(&[2u8; 32]);
-        let mut sealed = alice.seal(&bob.public(), b"hdr", b"payload").unwrap();
-        let last = sealed.len() - 1;
-        sealed[last] ^= 0xFF;
-        assert!(matches!(bob.open(&alice.public(), b"hdr", &sealed), Err(Error::Decrypt)));
-    }
-
-    #[test]
-    fn aad_is_authenticated() {
-        let alice = Identity::from_seed(&[1u8; 32]);
-        let bob = Identity::from_seed(&[2u8; 32]);
-        let sealed = alice.seal(&bob.public(), b"header-one", b"payload").unwrap();
-        assert!(bob.open(&alice.public(), b"header-two", &sealed).is_err());
-    }
-
-    #[test]
-    fn signatures_verify() {
-        let alice = Identity::from_seed(&[3u8; 32]);
-        let sig = alice.sign(b"announce");
-        assert!(alice.public().verify(b"announce", &sig).is_ok());
-        assert!(alice.public().verify(b"other", &sig).is_err());
-    }
-
-    #[test]
-    fn channel_key_roundtrip_and_id() {
-        let psk = [9u8; 32];
-        let k1 = ChannelKey::from_psk(&psk, "family");
-        let k2 = ChannelKey::from_psk(&psk, "family");
-        let other = ChannelKey::from_psk(&psk, "friends");
-        assert_eq!(k1.id(), k2.id());
-        assert_ne!(k1.id(), other.id());
-        let sealed = k1.seal(b"aad", b"group message").unwrap();
-        assert_eq!(k2.open(b"aad", &sealed).unwrap(), b"group message");
-        assert!(other.open(b"aad", &sealed).is_err());
-    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -345,7 +364,10 @@ impl<'de> serde::Deserialize<'de> for PublicIdentity {
             fn expecting(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
                 f.write_str("a 72-byte public identity")
             }
-            fn visit_bytes<E: serde::de::Error>(self, v: &[u8]) -> core::result::Result<Self::Value, E> {
+            fn visit_bytes<E: serde::de::Error>(
+                self,
+                v: &[u8],
+            ) -> core::result::Result<Self::Value, E> {
                 PublicIdentity::from_bytes(v).map_err(E::custom)
             }
             fn visit_byte_buf<E: serde::de::Error>(
@@ -356,5 +378,85 @@ impl<'de> serde::Deserialize<'de> for PublicIdentity {
             }
         }
         deserializer.deserialize_bytes(BytesVisitor)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn identity_is_deterministic_and_self_certifying() {
+        let a = Identity::from_seed(&[7u8; 32]);
+        let b = Identity::from_seed(&[7u8; 32]);
+        assert_eq!(a.node_id(), b.node_id());
+        assert!(a.public().is_self_consistent());
+        assert_ne!(a.node_id(), Identity::generate().node_id());
+        assert_eq!(
+            PublicIdentity::from_bytes(&a.public().to_bytes()).unwrap(),
+            a.public()
+        );
+    }
+
+    #[test]
+    fn direct_message_roundtrip() {
+        let alice = Identity::from_seed(&[1u8; 32]);
+        let bob = Identity::from_seed(&[2u8; 32]);
+        let aad = b"header";
+        let sealed = alice.seal(&bob.public(), aad, b"hello bob").unwrap();
+        assert_eq!(
+            bob.open(&alice.public(), aad, &sealed).unwrap(),
+            b"hello bob"
+        );
+        // Reverse direction derives the same key.
+        let sealed2 = bob.seal(&alice.public(), aad, b"hello alice").unwrap();
+        assert_eq!(
+            alice.open(&bob.public(), aad, &sealed2).unwrap(),
+            b"hello alice"
+        );
+    }
+
+    #[test]
+    fn tampered_ciphertext_is_rejected() {
+        let alice = Identity::from_seed(&[1u8; 32]);
+        let bob = Identity::from_seed(&[2u8; 32]);
+        let mut sealed = alice.seal(&bob.public(), b"hdr", b"payload").unwrap();
+        let last = sealed.len() - 1;
+        sealed[last] ^= 0xFF;
+        assert!(matches!(
+            bob.open(&alice.public(), b"hdr", &sealed),
+            Err(Error::Decrypt)
+        ));
+    }
+
+    #[test]
+    fn aad_is_authenticated() {
+        let alice = Identity::from_seed(&[1u8; 32]);
+        let bob = Identity::from_seed(&[2u8; 32]);
+        let sealed = alice
+            .seal(&bob.public(), b"header-one", b"payload")
+            .unwrap();
+        assert!(bob.open(&alice.public(), b"header-two", &sealed).is_err());
+    }
+
+    #[test]
+    fn signatures_verify() {
+        let alice = Identity::from_seed(&[3u8; 32]);
+        let sig = alice.sign(b"announce");
+        assert!(alice.public().verify(b"announce", &sig).is_ok());
+        assert!(alice.public().verify(b"other", &sig).is_err());
+    }
+
+    #[test]
+    fn channel_key_roundtrip_and_id() {
+        let psk = [9u8; 32];
+        let k1 = ChannelKey::from_psk(&psk, "family");
+        let k2 = ChannelKey::from_psk(&psk, "family");
+        let other = ChannelKey::from_psk(&psk, "friends");
+        assert_eq!(k1.id(), k2.id());
+        assert_ne!(k1.id(), other.id());
+        let sealed = k1.seal(b"aad", b"group message").unwrap();
+        assert_eq!(k2.open(b"aad", &sealed).unwrap(), b"group message");
+        assert!(other.open(b"aad", &sealed).is_err());
     }
 }

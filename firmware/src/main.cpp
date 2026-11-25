@@ -1,0 +1,459 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// OpenMesh firmware entry point: one codebase, four boards, standalone mesh node + companion
+// radio. The protocol itself lives in lib/openmesh (Arduino-free); this file wires it to the
+// board HAL: RadioLib, LittleFS/InternalFileSystem, USB CDC + BLE NUS, GNSS UART and ADC.
+#include <Arduino.h>
+
+#include <cstring>
+
+#include "board_select.h"
+#include "hal/hal.h"
+#include "hal/hal_companion.h"
+#include "hal/hal_radio.h"
+#include "hal/hal_storage.h"
+#include "openmesh/om_companion.h"
+#include "openmesh/om_engine.h"
+#include "openmesh/om_gps.h"
+#include "openmesh/om_identity.h"
+#include "openmesh/om_power.h"
+#include "openmesh/om_region.h"
+#include "openmesh/om_sha256.h"
+
+#ifndef OM_FW_VERSION
+#define OM_FW_VERSION "0.1.0"
+#endif
+#ifndef OM_DEFAULT_CHANNEL_NAME
+#define OM_DEFAULT_CHANNEL_NAME "openmesh-public"
+#endif
+#ifndef OM_ENABLE_BLE
+#define OM_ENABLE_BLE 0
+#endif
+#ifndef OM_ANNOUNCE_TTL_SECONDS
+#define OM_ANNOUNCE_TTL_SECONDS 1800
+#endif
+
+namespace {
+
+using namespace om;
+
+constexpr char kSeedFile[] = "om_seed.bin";
+constexpr char kStoreFile[] = "om_store.bin";
+constexpr uint32_t kCompanionTimeoutMs = 90000;
+constexpr uint32_t kBatteryIntervalMs = 30000;
+constexpr uint32_t kStoreSaveIntervalMs = 300000;
+
+hal::Radio g_radio;
+hal::HalStorage g_storage;
+hal::UsbTransport g_usb;
+hal::BleTransport g_ble;
+Engine g_engine;
+NmeaParser g_gps;
+SlipDecoder g_usb_slip;
+SlipDecoder g_ble_slip;
+Identity g_identity;
+const board::Board* g_board = nullptr;
+
+uint8_t g_store_buffer[StoreQueue::kSerializedSize];
+uint64_t g_last_usb_ms = 0;
+uint64_t g_last_ble_ms = 0;
+uint64_t g_last_battery_ms = 0;
+uint64_t g_last_store_save_ms = 0;
+uint64_t g_last_led_ms = 0;
+uint64_t g_last_gps_ms = 0;
+bool g_gps_emitted = false;
+bool g_led_on = false;
+bool g_button_handled = false;
+uint64_t g_button_down_ms = 0;
+
+uint32_t deviceUniqueWord(uint32_t index) {
+#if defined(ARDUINO_ARCH_NRF52) || defined(NRF52_SERIES)
+    if (index == 0) return NRF_FICR->DEVICEID[0];
+    if (index == 1) return NRF_FICR->DEVICEID[1];
+    return NRF_FICR->DEVICEADDR[index & 1];
+#elif defined(ESP32)
+    const uint64_t mac = ESP.getEfuseMac();
+    return index == 0 ? (uint32_t)mac : (uint32_t)(mac >> 32);
+#else
+    return 0x4F4D3031u ^ index;
+#endif
+}
+
+// Device key for seeding encryption at rest: derived from the MCU unique id. This protects
+// against casual flash extraction only; see firmware/README.md "Key storage".
+void deviceKey(uint8_t out[32]) {
+    uint8_t material[16];
+    for (int i = 0; i < 4; ++i) writeU32Be(material + i * 4, deviceUniqueWord((uint32_t)i));
+    om_sha256(material, sizeof(material), out);
+}
+
+bool loadOrCreateIdentity() {
+    uint8_t key[32];
+    deviceKey(key);
+    uint8_t sealed[kSealedSeedLen];
+    size_t sealed_len = 0;
+    if (g_storage.load(kSeedFile, sealed, sizeof(sealed), sealed_len) &&
+        sealed_len == kSealedSeedLen) {
+        uint8_t seed[32];
+        if (openSeedAtRest(sealed, sealed_len, key, seed)) {
+            const bool ok = Identity::fromSeed(seed, g_identity);
+            secureWipe(seed, sizeof(seed));
+            if (ok) return true;
+        }
+    }
+    if (!Identity::generate(hal::randomBytes, nullptr, g_identity)) return false;
+    if (sealSeedAtRest(g_identity.seed, key, hal::randomBytes, nullptr, sealed)) {
+        g_storage.save(kSeedFile, sealed, sizeof(sealed));
+    }
+    return true;
+}
+
+void defaultChannelPsk(const char* name, uint8_t psk[32]) {
+    // Well-known default channel for out-of-the-box mesh testing. Documented in firmware/README
+    // and docs/hardware/boards.md: it is a public channel, not a secret; users should add their
+    // own channel PSK via the companion ConfigSet API.
+    char material[96];
+    const char domain[] = "openmesh/v1/default-channel";
+    const size_t domain_len = sizeof(domain) - 1;
+    std::memcpy(material, domain, domain_len);
+    const size_t name_len = std::strlen(name);
+    std::memcpy(material + domain_len, name, name_len);
+    uint8_t digest[32];
+    om_sha256(material, domain_len + name_len, digest);
+    std::memcpy(psk, digest, 32);
+}
+
+void configureEngine() {
+    EngineConfig config;
+    config.cls = NodeClass::Client;
+    switch (g_board->default_role) {
+        case board::DefaultRole::Tracker: config.cls = NodeClass::Tracker; break;
+        case board::DefaultRole::Repeater: config.cls = NodeClass::Repeater; break;
+        case board::DefaultRole::Gateway: config.cls = NodeClass::Gateway; break;
+        case board::DefaultRole::Client: config.cls = NodeClass::Client; break;
+    }
+    config.store_role = g_board->default_role == board::DefaultRole::Repeater ||
+                        g_board->default_role == board::DefaultRole::Gateway;
+    config.relay_role = true;
+    config.accept_channels = true;
+    config.position_sharing = g_board->gps.module != board::GnssModule::None;
+    config.default_ttl = kDefaultTtl;
+    config.profile = profileByName(g_board->default_profile);
+    if (config.profile == nullptr) config.profile = &kMediumFast;
+    config.region = regionByName(g_board->default_region);
+    if (config.region == nullptr) config.region = &defaultRegion();
+    config.tx_power_dbm = g_board->default_tx_power_dbm;
+    config.announce_interval_ms =
+        config.store_role ? (uint32_t)kAnnounceIntervalRelayMs : (uint32_t)kAnnounceIntervalClientMs;
+    config.telemetry_interval_ms = 900000;
+    config.caps = 0;
+    if (g_board->has_usb) config.caps |= kCapUsb;
+    if (g_board->has_ble && OM_ENABLE_BLE) config.caps |= kCapBle;
+    if (g_board->gps.module != board::GnssModule::None) config.caps |= kCapGps;
+    if (g_board->has_wifi) config.caps |= kCapWifi;
+    if (g_board->has_ethernet) config.caps |= kCapEthernet;
+    if (g_board->has_solar) config.caps |= kCapSolar;
+    if (g_board->ux.has_screen) config.caps |= kCapScreen;
+    config.name_len = (uint8_t)std::snprintf(config.name, sizeof(config.name), "%s-%02x%02x",
+                                             g_board->id, g_identity.nodeId().b[0],
+                                             g_identity.nodeId().b[1]);
+    g_engine.begin(g_identity, config, hal::randomBytes, nullptr, &g_storage);
+    uint8_t channel_psk[32];
+    defaultChannelPsk(OM_DEFAULT_CHANNEL_NAME, channel_psk);
+    g_engine.setChannel(OM_DEFAULT_CHANNEL_NAME, channel_psk);
+    size_t store_len = 0;
+    if (g_storage.load(kStoreFile, g_store_buffer, sizeof(g_store_buffer), store_len)) {
+        g_engine.loadStoreBuffer(g_store_buffer, store_len, millis());
+    }
+    g_engine.start(millis());
+}
+
+void companionSend(const CompanionMsg& msg) {
+    uint8_t chunk[2048];
+    const size_t chunk_len = encodeCompanionChunk(msg, chunk, sizeof(chunk));
+    if (chunk_len == 0) return;
+    uint8_t slip[4096];
+    const size_t slip_len = slipEncode(chunk, chunk_len, slip, sizeof(slip));
+    if (slip_len == 0) return;
+    // Only write to links that recently carried a companion Hello; a USB CDC write with no
+    // host attached can block.
+    if (millis() - g_last_usb_ms < kCompanionTimeoutMs) g_usb.write(slip, slip_len);
+    if (g_ble.enabled() && g_ble.connected() && millis() - g_last_ble_ms < kCompanionTimeoutMs) {
+        g_ble.write(slip, slip_len);
+    }
+}
+
+void sendEvent(const char* kind, const char* detail) {
+    CompanionMsg msg;
+    msg.type = CompanionType::Event;
+    std::snprintf(msg.kind, sizeof(msg.kind), "%s", kind);
+    std::snprintf(msg.detail, sizeof(msg.detail), "%s", detail);
+    companionSend(msg);
+}
+
+void drainEvents() {
+    while (g_engine.events().size() > 0) {
+        const EngineEvent& event = g_engine.events().at(0);
+        switch (event.type) {
+            case EventType::RxFrame: {
+                CompanionMsg msg;
+                msg.type = CompanionType::Rx;
+                const size_t len = event.frame_len;
+                std::memcpy(msg.frame, event.frame, len);
+                msg.frame_len = (uint16_t)len;
+                msg.rssi = event.rssi;
+                msg.snr = event.snr;
+                std::snprintf(msg.link, sizeof(msg.link), event.link == Link::Ble ? "ble" : "lora");
+                msg.at_ms = millis();
+                companionSend(msg);
+                break;
+            }
+            case EventType::LowBattery:
+                sendEvent("low_battery", event.detail);
+                break;
+            case EventType::StoreDelivered:
+                sendEvent("store_deliver", "envelope replayed");
+                break;
+            case EventType::Error:
+                sendEvent("error", event.detail);
+                break;
+            case EventType::Announce:
+                sendEvent("announce_rx", event.announce.name);
+                break;
+            case EventType::AppMessage:
+                break;  // the raw Rx frame already carried this message
+            case EventType::GpsFix:
+                sendEvent("gps_fix", "position acquired");
+                break;
+        }
+        g_engine.events().popFront();
+    }
+}
+
+void drainOutbox() {
+    uint8_t encoded[kMtu];
+    while (g_engine.outbox().size() > 0) {
+        const OutFrame& out = g_engine.outbox().at(0);
+        const size_t len = out.frame.encode(encoded, sizeof(encoded));
+        if (len > 0) {
+            if (!g_radio.transmit(encoded, len)) {
+                ++g_engine.mutableStats().malformed;  // radio TX failure counter reuse
+            } else {
+                g_radio.startReceive();
+            }
+        }
+        g_engine.outbox().popFront();
+    }
+}
+
+void handleCompanionMessage(const CompanionMsg& msg) {
+    switch (msg.type) {
+        case CompanionType::Hello: {
+            CompanionMsg ack;
+            g_engine.fillHelloAck(ack);
+            companionSend(ack);
+            sendEvent("boot", OM_FW_VERSION);
+            break;
+        }
+        case CompanionType::ConfigGet: {
+            CompanionMsg config;
+            g_engine.fillConfig(config);
+            companionSend(config);
+            break;
+        }
+        case CompanionType::ConfigSet: {
+            if (!g_engine.applyConfig(msg.key, msg.value)) {
+                sendEvent("error", "unknown_config_key");
+            } else {
+                CompanionMsg config;
+                g_engine.fillConfig(config);
+                companionSend(config);
+            }
+            break;
+        }
+        case CompanionType::Tx:
+            if (msg.frame_len > kMtu) {
+                sendEvent("error", "frame_too_large");
+            } else if (!g_engine.originateFromApp(msg.frame, msg.frame_len, millis())) {
+                sendEvent("error", "tx_rejected");
+            }
+            break;
+        case CompanionType::StatsGet: {
+            CompanionMsg stats;
+            g_engine.fillStats(stats);
+            companionSend(stats);
+            break;
+        }
+        case CompanionType::Ping: {
+            CompanionMsg pong;
+            pong.type = CompanionType::Pong;
+            pong.nonce = msg.nonce;
+            companionSend(pong);
+            break;
+        }
+        case CompanionType::Reset:
+            sendEvent("boot", "reset requested");
+            delay(200);
+#if defined(ARDUINO_ARCH_NRF52) || defined(NRF52_SERIES)
+            NVIC_SystemReset();
+#elif defined(ESP32)
+            ESP.restart();
+#endif
+            break;
+        default:
+            break;
+    }
+}
+
+void pollCompanion() {
+    uint8_t buffer[512];
+    int n = g_usb.read(buffer, sizeof(buffer));
+    for (int i = 0; i < n; ++i) {
+        if (g_usb_slip.feed(buffer[i]) && g_usb_slip.frameValid()) {
+            CompanionMsg msg;
+            if (decodeCompanionChunk(g_usb_slip.chunk(), g_usb_slip.chunkLen(), msg)) {
+                g_last_usb_ms = millis();
+                handleCompanionMessage(msg);
+            }
+        }
+    }
+    if (g_ble.enabled()) {
+        n = g_ble.read(buffer, sizeof(buffer));
+        for (int i = 0; i < n; ++i) {
+            if (g_ble_slip.feed(buffer[i]) && g_ble_slip.frameValid()) {
+                CompanionMsg msg;
+                if (decodeCompanionChunk(g_ble_slip.chunk(), g_ble_slip.chunkLen(), msg)) {
+                    g_last_ble_ms = millis();
+                    handleCompanionMessage(msg);
+                }
+            }
+        }
+    }
+}
+
+void pollRadio() {
+    uint8_t buffer[kMtu];
+    int16_t rssi = 0;
+    int16_t snr = 0;
+    const int len = g_radio.receive(buffer, sizeof(buffer), rssi, snr);
+    if (len > 0) {
+        g_engine.onBytes(buffer, (size_t)len, Link::Lora, rssi, snr, millis());
+        if (!g_led_on) {
+            g_led_on = true;
+            hal::setLed(true);
+            g_last_led_ms = millis();
+        }
+    } else if (len < 0) {
+        sendEvent("radio_error", "receive");
+    }
+}
+
+void pollGps() {
+    if (g_board->gps.module == board::GnssModule::None) return;
+    uint8_t buffer[128];
+    const int n = hal::gpsRead(buffer, sizeof(buffer));
+    for (int i = 0; i < n; ++i) {
+        g_gps.feed((char)buffer[i], millis());
+    }
+    if (g_gps.fix().valid) {
+        if (!g_gps_emitted) {
+            g_gps_emitted = true;
+            EngineEvent event;
+            event.type = EventType::GpsFix;
+            g_engine.events().push(event);
+        }
+        // Emit at most one position per five minutes; the engine also rate-limits.
+        if (millis() - g_last_gps_ms >= 60000u) {
+            g_last_gps_ms = millis();
+            g_engine.setGpsFix(g_gps.fix(), millis());
+        }
+    }
+}
+
+void pollButton() {
+    if (g_board->ux.button < 0) return;
+    const bool pressed = hal::buttonPressed();
+    if (pressed && g_button_down_ms == 0) g_button_down_ms = millis();
+    if (pressed && !g_button_handled && millis() - g_button_down_ms > 3000u) {
+        g_button_handled = true;
+        Frame announce;
+        if (g_engine.buildAnnounce(millis(), announce)) sendEvent("announce_tx", "button");
+    }
+    if (!pressed) {
+        g_button_down_ms = 0;
+        g_button_handled = false;
+    }
+}
+
+}  // namespace
+
+void setup() {
+    g_board = &board::get();
+    hal::initUx(*g_board);
+    hal::setLed(true);
+    Serial.begin(115200);
+    delay(150);
+    g_storage.begin();
+    if (!loadOrCreateIdentity()) {
+        sendEvent("error", "identity");
+    }
+    configureEngine();
+    if (g_board->gps.module != board::GnssModule::None) {
+        hal::gpsBegin(*g_board);
+    }
+    const bool radio_ok = g_radio.begin(*g_board, *g_engine.config().profile,
+                                        *g_engine.config().region,
+                                        g_engine.config().tx_power_dbm);
+    g_usb.begin();
+    if (OM_ENABLE_BLE) {
+        char device_name[24];
+        std::snprintf(device_name, sizeof(device_name), "%s", g_board->display_name);
+        g_ble.begin(device_name);
+    }
+    hal::setLed(false);
+    g_last_store_save_ms = millis();
+    g_last_battery_ms = 0;
+    if (!radio_ok) {
+        sendEvent("radio_error", "init");
+    }
+    char node_hex[17];
+    g_engine.identity().nodeId().toHex(node_hex);
+    Serial.printf("OpenMesh %s on %s, node %s, radio %s\n", OM_FW_VERSION, g_board->id, node_hex,
+                  radio_ok ? "ok" : "ERROR");
+}
+
+void loop() {
+    const uint64_t now = millis();
+    pollRadio();
+    pollCompanion();
+    g_engine.tick(now);
+    drainEvents();
+    drainOutbox();
+
+    if (now - g_last_battery_ms >= kBatteryIntervalMs) {
+        g_last_battery_ms = now;
+        const BatteryReading reading = hal::readBattery(*g_board);
+        g_engine.setBattery(reading, now);
+        const uint64_t wall = hal::wallTimeMs();
+        if (wall != 0) g_engine.setWallTime(wall, now);
+    }
+    pollGps();
+    pollButton();
+
+    if (now - g_last_store_save_ms >= kStoreSaveIntervalMs) {
+        g_last_store_save_ms = now;
+        if (g_engine.store().dirty()) g_engine.saveStore(now);
+    }
+    // Heartbeat LED: 20 ms flash after traffic, plus a slow blink while idle.
+    if (g_led_on && now - g_last_led_ms > 20) {
+        g_led_on = false;
+        hal::setLed(false);
+    }
+    if (!g_led_on && (now % 5000) < 2) hal::setLed(true);
+
+    // Trackers and battery nodes sleep between scheduler ticks; repeaters stay responsive.
+    if (g_board->default_role == board::DefaultRole::Tracker) {
+        hal::sleepMs(20);
+    } else {
+        hal::sleepMs(4);
+    }
+}

@@ -1,0 +1,75 @@
+{
+  "channels": [
+    {
+      "channel_id_hex": "ccae429b59631245",
+      "class_bit_set": true,
+      "name": "family",
+      "psk_hex": "2121212121212121212121212121212121212121212121212121212121212121"
+    }
+  ],
+  "comment": "PROTOCOL.md §3: seed -> Ed25519 + X25519 keys -> self-certifying 8-byte node id. Unicast node ids have bit 7 of byte 0 cleared; channel ids have it set.",
+  "dm_keys": [
+    {
+      "comment": "HKDF-SHA256(X25519(alice,bob), salt=openmesh/v1/dm, info=min(id)||max(id)); both directions derive the same key.",
+      "dm_key_hex": "df6e5dbf33dde51133caf87b0dcb8b11d45573b5fe75c83c85535474e363b81f",
+      "name": "alice_bob",
+      "public_identity_a_hex": "64a0f52274a2ccb4d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737c10b900e1af41bbebe7265d96cb321ae2f829afad42809b5c2fb35c703083b5d",
+      "public_identity_b_hex": "1d7bf3da583cced4204040e364c10f2bec9c1fe500a1cd4c247c89d650a01ed7e82caba867877c218a47d0da1bf2299af777986956f3e529541fef11348a42ab884a366cae59b325",
+      "seed_a_hex": "1111111111111111111111111111111111111111111111111111111111111111",
+      "seed_b_hex": "1212121212121212121212121212121212121212121212121212121212121212"
+    }
+  ],
+  "generated_by": "openmesh-core",
+  "identity_errors": [
+    {
+      "error": "Malformed",
+      "name": "short_identity",
+      "public_identity_hex": "00112233"
+    },
+    {
+      "error": "Malformed",
+      "name": "long_identity",
+      "public_identity_hex": "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "name": "tampered_node_id_is_not_self_consistent",
+      "public_identity_hex": "65a0f52274a2ccb4d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737c10b900e1af41bbebe7265d96cb321ae2f829afad42809b5c2fb35c703083b5d",
+      "self_consistent": false
+    }
+  ],
+  "nodes": [
+    {
+      "dh_pk_hex": "c10b900e1af41bbebe7265d96cb321ae2f829afad42809b5c2fb35c703083b5d",
+      "name": "alice",
+      "node_id_hex": "64a0f52274a2ccb4",
+      "public_identity_hex": "64a0f52274a2ccb4d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737c10b900e1af41bbebe7265d96cb321ae2f829afad42809b5c2fb35c703083b5d",
+      "seed_hex": "1111111111111111111111111111111111111111111111111111111111111111",
+      "sign_pk_hex": "d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737"
+    },
+    {
+      "name": "bob",
+      "node_id_hex": "1d7bf3da583cced4",
+      "public_identity_hex": "1d7bf3da583cced4204040e364c10f2bec9c1fe500a1cd4c247c89d650a01ed7e82caba867877c218a47d0da1bf2299af777986956f3e529541fef11348a42ab884a366cae59b325",
+      "seed_hex": "1212121212121212121212121212121212121212121212121212121212121212"
+    },
+    {
+      "name": "carol",
+      "node_id_hex": "77f10103d66b7ce0",
+      "public_identity_hex": "77f10103d66b7ce066cd608b928b88e50e0efeaa33faf1c43cefe07294b0b87e9fe0aba6a3cf763375a37a4166176efcf054717076a6a55d3a537c35bdca753a590e498b396d0f0d",
+      "seed_hex": "1313131313131313131313131313131313131313131313131313131313131313"
+    }
+  ],
+  "signatures": [
+    {
+      "expect_verify": true,
+      "expect_verify_tampered": false,
+      "message_hex": "6f70656e6d6573682f76312074657374206d657373616765",
+      "name": "alice_signs_fixed_message",
+      "seed_hex": "1111111111111111111111111111111111111111111111111111111111111111",
+      "signature_hex": "c0afde73dcabd9bced2f98512e8a6e8326b096a5a0872e7c7365529ef1e6ebebf90545b3e26b603416090042dbb9ccf3eafb8bfed8c32c10597dccf683119302",
+      "tampered_message_hex": "6e70656e6d6573682f76312074657374206d657373616765"
+    }
+  ],
+  "spec": "omp/1",
+  "version": 1
+}

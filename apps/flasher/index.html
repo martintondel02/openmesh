@@ -1,0 +1,135 @@
+<!doctype html>
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>OpenMesh — Flash your radio</title>
+    <meta
+      name="description"
+      content="Flash OpenMesh firmware to the Seeed T1000-E, RAK WisBlock solar node, Seeed SenseCAP Solar Node P1 and Heltec Wireless Tracker."
+    />
+    <link rel="stylesheet" href="css/styles.css" />
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='14' fill='%2322d3ee'/%3E%3C/svg%3E" />
+  </head>
+  <body>
+    <header class="hero">
+      <nav class="nav">
+        <span class="brand"><span class="brand-dot"></span> OpenMesh</span>
+        <div class="nav-links">
+          <a href="#boards">Boards</a>
+          <a href="#linux">Linux CLI</a>
+          <a href="#help">Help</a>
+        </div>
+      </nav>
+      <div class="hero-copy">
+        <p class="eyebrow">Firmware flasher</p>
+        <h1>Put your radio on the mesh.</h1>
+        <p class="lede">
+          One firmware, four boards. Flash the ESP32-S3 tracker directly from this page, or copy a
+          UF2 file to an nRF52 board's bootloader drive. No toolchain required.
+        </p>
+        <div id="support-banner" class="banner" role="status" aria-live="polite"></div>
+      </div>
+    </header>
+
+    <main>
+      <section id="boards" class="section">
+        <div class="section-head">
+          <h2>Supported boards</h2>
+          <p class="muted" id="release-line">Loading release information…</p>
+        </div>
+        <div id="board-grid" class="grid" aria-busy="true"></div>
+      </section>
+
+      <section id="linux" class="section">
+        <div class="section-head">
+          <h2>Flash from Linux (Fedora / any distro)</h2>
+          <p class="muted">
+            The CLI works with Python 3 only, no root, and resolves the latest release for you.
+          </p>
+        </div>
+        <div class="code-card">
+          <div class="code-head"><span>tools/flash/openmesh-flash</span><button class="copy" data-copy="cli-snippet">Copy</button></div>
+          <pre id="cli-snippet"><code># list supported boards and USB ids
+./tools/flash/openmesh-flash --list
+
+# detect the board and flash it (UF2 copy for nRF52, esptool for ESP32-S3)
+./tools/flash/openmesh-flash --board auto
+
+# dry run first: verify the download and print what would happen
+./tools/flash/openmesh-flash --board t1000e --dry-run</code></pre>
+        </div>
+        <div class="two-col">
+          <article class="info-card">
+            <h3>Fedora udev + dialout</h3>
+            <pre class="snippet"><code>sudo usermod -aG dialout "$USER"
+# log out and back in, then:
+ls -l /dev/ttyACM*
+# nRF52 UF2 drives mount automatically; no udev rule needed
+./tools/flash/openmesh-flash --list</code></pre>
+          </article>
+          <article class="info-card">
+            <h3>ESP32-S3 permissions</h3>
+            <pre class="snippet"><code># if /dev/ttyACM0 is missing after plugging in:
+sudo dnf install -y esp-idf  # provides esptool (or: pip install esptool)
+# Fedora ships a uaccess rule for Espressif VID 303a;
+# for CH340/CP210x adapters install the vendor rule:
+# tools/flash/README.md → "udev rules"</code></pre>
+          </article>
+        </div>
+      </section>
+
+      <section id="help" class="section">
+        <div class="section-head"><h2>Before you flash</h2></div>
+        <div class="three-col">
+          <article class="info-card">
+            <h3>1. Back up nothing, lose nothing</h3>
+            <p>
+              Flashing replaces the factory firmware. Your OpenMesh identity seed is generated on
+              first boot and stored encrypted in flash; flashing again erases it. Copy messages
+              and settings you care about before switching.
+            </p>
+          </article>
+          <article class="info-card">
+            <h3>2. Antenna first</h3>
+            <p>
+              Never transmit without an antenna attached — the SX1262/LR1110 power amplifier can be
+              damaged. Use the correct band for your region (EU868, US915, AU915 or AS923).
+            </p>
+          </article>
+          <article class="info-card">
+            <h3>3. After flashing</h3>
+            <p>
+              Open the OpenMesh web client or bridge, connect over USB/BLE, and the radio appears as
+              a companion device. Repeaters run standalone: no app required after one USB
+              configuration pass.
+            </p>
+          </article>
+        </div>
+      </section>
+    </main>
+
+    <footer class="footer">
+      <p>
+        OpenMesh is AGPL-3.0-or-later · hardware docs:
+        <a href="../../docs/hardware/boards.md">docs/hardware/boards.md</a> ·
+        firmware docs:
+        <a href="../../firmware/README.md">firmware/README.md</a>
+      </p>
+      <p class="muted small">
+        WebSerial flashing uses <a href="https://esphome.github.io/esp-web-tools/">esp-web-tools</a>.
+        UF2 files are copied by your operating system's mass-storage driver — this page never
+        touches a serial port for nRF52 boards.
+      </p>
+    </footer>
+
+    <!-- Fallback board data (also used when the page is opened from file:// where fetch() is blocked). -->
+    <script src="js/boards-data.js"></script>
+    <script src="js/app.js"></script>
+    <script
+      type="module"
+      src="https://unpkg.com/esp-web-tools@10.1.0/dist/web/install-button.js?module"
+    ></script>
+  </body>
+</html>

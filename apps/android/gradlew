@@ -1,0 +1,19 @@
+#!/bin/sh
+# Minimal Gradle wrapper launcher for OpenMesh Android.
+# Uses the checked-in gradle/wrapper/gradle-wrapper.jar; falls back to a system
+# `gradle` when the jar is absent (e.g. a shallow export without binaries).
+APP_HOME=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+CLASSPATH="$APP_HOME/gradle/wrapper/gradle-wrapper.jar"
+if [ -n "$JAVA_HOME" ]; then
+    JAVACMD="$JAVA_HOME/bin/java"
+else
+    JAVACMD=java
+fi
+if [ -f "$CLASSPATH" ]; then
+    exec "$JAVACMD" $DEFAULT_JVM_OPTS $JAVA_OPTS $GRADLE_OPTS \
+        -Dorg.gradle.appname=gradlew \
+        -classpath "$CLASSPATH" org.gradle.wrapper.GradleWrapperMain "$@"
+else
+    echo "warning: gradle-wrapper.jar missing; falling back to system gradle" >&2
+    exec gradle "$@"
+fi

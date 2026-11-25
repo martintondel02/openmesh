@@ -31,20 +31,23 @@ pub mod routing;
 pub mod services;
 pub mod store;
 pub mod util;
+pub mod vectors;
 pub mod wire;
 
 pub use crypto::{ChannelKey, Identity, PublicIdentity};
 pub use engine::{
-    engine_from_seed, Engine, EngineConfig, Event, LinkId, LinkInfo, NodeInfo, Outbound,
-    Processed, ReceivedGroupMessage, ReceivedMessage, RelayConfig, Role, SendMode, StateSnapshot,
-    Stats, Target,
+    Engine, EngineConfig, Event, LinkId, LinkInfo, NodeInfo, Outbound, Processed,
+    ReceivedGroupMessage, ReceivedMessage, RelayConfig, Role, SendMode, StateSnapshot, Stats,
+    Target, engine_from_seed,
 };
 pub use error::{Error, Result};
 pub use services::{
     Ack, AckKind, Announce, AppMessage, AttachmentRef, MessageKind, NodeClass, Position,
     ResourceKind, ResourceManifest, Telemetry,
 };
-pub use wire::{Flags, Frame, FrameType, NodeId, BROADCAST, HEADER_LEN, MAX_BODY, MTU, PROTO_VERSION};
+pub use wire::{
+    BROADCAST, Flags, Frame, FrameType, HEADER_LEN, MAX_BODY, MTU, NodeId, PROTO_VERSION,
+};
 
 /// Protocol version string used in announces, companion handshakes and the API.
 pub const VERSION_STR: &str = concat!("omp/", "1");

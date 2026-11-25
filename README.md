@@ -11,6 +11,8 @@ No accounts. No cell towers. No cloud. Just radios, repeaters and your people.
 [![Status: alpha](https://img.shields.io/badge/status-alpha-orange.svg)](docs/ROADMAP.md)
 [![Rust 1.85+](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](rust-toolchain.toml)
 
+![OpenMesh web client — encrypted group chat over LoRa](docs/assets/screenshots/chats.jpg)
+
 **Docs:** [Architecture](docs/architecture/ARCHITECTURE.md) ·
 [Protocol spec](docs/architecture/PROTOCOL.md) ·
 [Bridge API](docs/architecture/WEBSOCKET-API.md) ·
@@ -50,6 +52,19 @@ sharing and node telemetry.
    └────────────────────────────────┘
 ```
 
+### The client
+
+| Map | Nodes |
+| --- | --- |
+| ![Mesh map with node positions, roles and relay links](docs/assets/screenshots/map.jpg) | ![Node list with roles, capabilities, hops, signal and battery](docs/assets/screenshots/nodes.jpg) |
+
+| Contacts | Settings | Mobile |
+| --- | --- | --- |
+| ![Contacts with openmesh:// invites and QR codes](docs/assets/screenshots/contacts.jpg) | ![Radio profile, region duty cycle and airtime caps](docs/assets/screenshots/settings.jpg) | ![Mobile chat thread](docs/assets/screenshots/mobile-thread.jpg) |
+
+Every screenshot is the real client in demo mode (`?demo=1`), no mockups:
+`pnpm --dir apps/web dev` then visit `http://localhost:5173/?demo=1`.
+
 ## Why another mesh protocol?
 
 | | Meshtastic | MeshCore | Reticulum / Ratspeak | **OpenMesh** |
@@ -78,11 +93,11 @@ per message, and client stacks nobody wants to use. Details and trade-offs:
 | Position sharing + map | ✅ |
 | Repeater store-and-forward | ✅ protocol + firmware |
 | Bridge daemon (WS/REST, redb persistence, attachments) | ✅ |
-| Web / PWA client | ✅ |
-| Desktop packaging (Tauri) | ✅ config, needs system webkit deps to build |
-| Firmware: 4 reference boards | ✅ code complete, build matrix in CI |
+| Web / PWA client (chat, groups, map, voice, images, demo mode) | ✅ |
+| Desktop packaging (Tauri 2, Linux/macOS/Windows) | ✅ config; build needs system webkit2gtk/WebView deps |
+| Firmware: 4 reference boards + golden-vector conformance | ✅ code complete, build matrix in CI |
 | Web + CLI flashers | ✅ |
-| Native Android app | 🚧 scaffold (Compose, BLE/USB companion) |
+| Native Android app | 🚧 full Compose scaffold + BLE/USB companion client (CI-built) |
 | OMP/2: forward secrecy, voice calls, directed routing | 🗺️ [roadmap](docs/ROADMAP.md) |
 | NomadNet / Reticulum gateway | 🗺️ [design](docs/research/nomadnet-bridge.md) |
 
@@ -118,7 +133,12 @@ pnpm --dir apps/web dev            # http://localhost:5173
 
 # 4. Web client in pure demo mode (no backend at all)
 pnpm --dir apps/web dev           # works standalone with seeded data
+#    deep links: /?demo=1&screen=map|nodes|contacts|settings  ·  &thread=familien|anne|lars
 ```
+
+What is green today: **96 protocol-core tests**, **66 bridge/sim/CLI tests** (including a real
+WebSocket → mesh → ACK round-trip), **119 web-client tests**, and **44 firmware host test cases
+(3 421 assertions) replaying the cross-language golden vectors** byte-for-byte.
 
 Build environment note: this repository is developed on a Fedora box without a system C
 compiler; `scripts/dev-env.sh` wires `zig` in as `cc` for Rust builds. On a normal machine with

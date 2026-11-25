@@ -1,0 +1,120 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to release (e.g. v0.1.0)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  binaries:
+    name: rust-${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu, artifact: linux-x86_64 }
+          - { os: macos-latest, target: aarch64-apple-darwin, artifact: macos-arm64 }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc, artifact: windows-x86_64 }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
+      - name: Build bridge + cli
+        run: cargo build --release --target ${{ matrix.target }} -p openmesh-bridge -p openmesh-cli
+      - name: Package
+        shell: bash
+        run: |
+          set -euo pipefail
+          out="openmesh-${GITHUB_REF_NAME}-${{ matrix.artifact }}"
+          mkdir -p "$out"
+          ext=""
+          if [[ "${{ matrix.target }}" == *windows* ]]; then ext=".exe"; fi
+          cp "target/${{ matrix.target }}/release/openmesh-bridge${ext}" "$out/" || true
+          cp "target/${{ matrix.target }}/release/openmesh-cli${ext}" "$out/" || true
+          cp LICENSE NOTICE README.md "$out/"
+          tar -czf "$out.tar.gz" "$out"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: openmesh-${{ matrix.artifact }}
+          path: openmesh-*.tar.gz
+
+  firmware:
+    name: firmware-${{ matrix.env }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        env: [t1000e, rak4631_solar, seeed_solar, heltec_tracker]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install PlatformIO
+        run: pip install platformio
+      - name: Build
+        run: pio run -d firmware -e ${{ matrix.env }}
+      - name: Package images
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          cp firmware/.pio/build/${{ matrix.env }}/*.bin out/ 2>/dev/null || true
+          cp firmware/.pio/build/${{ matrix.env }}/*.uf2 out/ 2>/dev/null || true
+          cp firmware/.pio/build/${{ matrix.env }}/*.zip out/ 2>/dev/null || true
+          (cd out && sha256sum * > SHA256SUMS.txt 2>/dev/null || true)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: openmesh-firmware-${{ matrix.env }}
+          path: out/*
+
+  web:
+    name: web-bundle
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with: { version: 10 }
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: pnpm, cache-dependency-path: apps/web/pnpm-lock.yaml }
+      - run: pnpm --dir apps/web install --frozen-lockfile
+      - run: pnpm --dir apps/web build
+      - run: tar -czf openmesh-web-${GITHUB_REF_NAME}.tar.gz -C apps/web dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: openmesh-web
+          path: openmesh-web-*.tar.gz
+
+  publish:
+    name: publish-release
+    needs: [binaries, firmware, web]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Collect and checksum
+        run: |
+          set -euo pipefail
+          mkdir -p release
+          find artifacts -type f \( -name '*.tar.gz' -o -name '*.uf2' -o -name '*.bin' -o -name '*.zip' \) -exec cp {} release/ \;
+          (cd release && sha256sum * > SHA256SUMS.txt)
+          ls -la release
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          generate_release_notes: true
+          fail_on_unmatched_files: false
+          files: release/*

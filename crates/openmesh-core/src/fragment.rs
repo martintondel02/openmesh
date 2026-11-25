@@ -28,6 +28,7 @@ pub struct Reassembler {
 }
 
 impl Reassembler {
+    /// Create a reassembler for `total_len` bytes split into `chunk_bytes` chunks.
     pub fn new(total_len: u32, chunk_bytes: usize) -> Result<Self> {
         if chunk_bytes == 0 || chunk_bytes > 1024 {
             return Err(Error::Config("invalid chunk size"));
@@ -48,14 +49,39 @@ impl Reassembler {
         })
     }
 
+    /// Number of chunks the message is split into.
     pub fn total_chunks(&self) -> u16 {
         self.total_chunks
     }
 
+    /// Number of distinct chunks received so far.
     pub fn received_chunks(&self) -> u16 {
         self.received
     }
 
+    /// Whether the chunk at `index` has been received.
+    pub fn has(&self, index: u16) -> bool {
+        self.chunks.contains_key(&index)
+    }
+
+    /// All missing chunk indices in ascending order.
+    pub fn missing(&self) -> Vec<u16> {
+        (0..self.total_chunks)
+            .filter(|i| !self.chunks.contains_key(i))
+            .collect()
+    }
+
+    /// Configured chunk size in bytes.
+    pub fn chunk_bytes(&self) -> usize {
+        self.chunk_bytes
+    }
+
+    /// Expected on-wire length of one chunk (the last chunk may be shorter).
+    pub fn chunk_len_for(&self, index: u16) -> usize {
+        self.chunk_len(index)
+    }
+
+    /// Whether every chunk is present.
     pub fn is_complete(&self) -> bool {
         self.received == self.total_chunks
     }

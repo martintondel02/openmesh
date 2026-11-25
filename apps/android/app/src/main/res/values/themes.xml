@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Compose owns the real theme; this is only the window/splash background. -->
+    <style name="Theme.OpenMesh" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/openmesh_background</item>
+        <item name="android:statusBarColor">@color/openmesh_background</item>
+        <item name="android:navigationBarColor">@color/openmesh_background</item>
+        <item name="android:windowLightStatusBar">false</item>
+    </style>
+</resources>

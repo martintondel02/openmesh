@@ -37,6 +37,14 @@ Every WebSocket message (both directions) is a JSON object with:
 ```
 
 * `v`: protocol version, currently `1`.
+* Capability representation: `hello.node.caps` is a **u16 bitmask** (wire form);
+  `node` events use a **string array** (`["gps","relay"]`) for readability. Clients must accept
+  both forms wherever caps appear.
+* `hello.node.public_key` is the bridge node's own 72-byte public identity (base64) or `null` if
+  the bridge does not expose it. When null, clients cannot render their own contact QR and must
+  degrade gracefully (v1 bridge behaviour).
+* Own-identity reset is intentionally not an API operation: it requires restarting the bridge
+  with `--reset-identity` so all derived state is regenerated atomically.
 * `type`: discriminator (see tables).
 * `id`: optional client-generated string; the server echoes it in the response for
   request/response commands. Server-pushed events omit it.
@@ -65,7 +73,8 @@ Sent once when the connection is accepted.
 { "v":1, "type":"hello", "data": {
   "bridge_version": "0.1.0",
   "protocol": "omp/1",
-  "node": { "node_id": "ab12…", "name": "martin-phone", "class": "client", "caps": 81 },
+  "node": { "node_id": "ab12…", "name": "martin-phone", "class": "client", "caps": 81,
+            "public_key": null },
   "radios": [ { "id": "sim0", "kind": "sim", "label": "Simulator", "connected": true,
                 "profile": "MEDIUM_FAST", "region": "EU868" } ],
   "features": ["images","voice","map","groups","store_forward"],
@@ -134,6 +143,11 @@ A direct message, incoming or an echo of a locally-sent one (echoes carry `outgo
 
 * `attachment.progress` is 0..1 while a resource is transferring and 1.0 when complete.
   The bridge emits a `message_update` event with the same `msg_id` when progress changes.
+* `message_update` carries **only changed fields plus `msg_id`**; clients merge it into the
+  existing message. A failed send stays failed until a `delivered`/`read` ack arrives or the
+  client retries.
+* Channel read state (`mark_group_read`) is client-side only in v1: there is no per-member read
+  receipt for groups, because group frames are broadcast and ack-free.
 
 ### 3.5 `message_update`
 
@@ -250,8 +264,8 @@ The server replies with a sequence of `node`, `message`, `group_message`, `confi
 
 | type | data |
 | --- | --- |
-| `create_channel` | `{ "name": "...", "psk": "<base64 32B>" }` (generates PSK if absent) → `channel_created` with id + PSK **once** |
-| `join_channel` | `{ "name": "...", "psk": "<base64 32B>" }` |
+| `create_channel` | `{ "name": "...", "psk": "<base64 32B>" }` (generates PSK if absent) → `channel_created` `{ "channel_id": "...", "name": "...", "psk": "<base64>" }` (PSK returned **once**, never again) |
+| `join_channel` | `{ "name": "...", "psk": "<base64 32B>" }` → `channel_created` (same shape, `psk` omitted) and/or a `channels` event; clients should accept both |
 | `leave_channel` | `{ "channel_id": "..." }` |
 | `get_channels` | `{}` → `channels` event |
 | `channel_invite` | `{ "channel_id": "..." }` → `channel_url` (`openmesh://channel?...`) |

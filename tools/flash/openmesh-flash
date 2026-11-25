@@ -1,0 +1,701 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: AGPL-3.0-or-later
+"""openmesh-flash — flash OpenMesh firmware to supported LoRa boards from Linux.
+
+Supports:
+  * nRF52 boards with the Adafruit UF2 bootloader (Seeed T1000-E, RAK4631 solar,
+    Seeed SenseCAP Solar Node P1): download the .uf2 and copy it to the mounted drive.
+  * ESP32-S3 boards (Heltec Wireless Tracker): download the merged .bin and flash it with
+    esptool over USB.
+
+Design goals: Python 3.8+ standard library only, no root, no udev rules beyond the distro
+defaults, friendly errors, and an explicit --dry-run that prints exactly what would happen.
+
+Examples:
+  openmesh-flash --list
+  openmesh-flash --board auto --dry-run
+  openmesh-flash --board t1000e
+  openmesh-flash --board heltec_tracker --port /dev/ttyACM0
+  openmesh-flash --board seeed_solar --file ./openmesh-seeed_solar.uf2 --sha256 <hex>
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+import urllib.error
+import urllib.request
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
+
+VERSION = "0.1.0"
+USER_AGENT = f"openmesh-flash/{VERSION} (+https://github.com/martintondel02/openmesh)"
+
+DEFAULT_REPO = "martintondel02/openmesh"
+DEFAULT_RELEASE_TAG = "v0.1.0"
+CACHE_DIR = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "openmesh-flash"
+
+
+# --------------------------------------------------------------------------------------------
+# Board catalogue (kept in sync with apps/flasher/boards.json and docs/hardware/boards.md)
+# --------------------------------------------------------------------------------------------
+@dataclass
+class Board:
+    key: str
+    name: str
+    flash: str  # "uf2" or "esptool"
+    artifact: str
+    usb_vid_pid: List[Tuple[int, int]] = field(default_factory=list)
+    uf2_labels: List[str] = field(default_factory=list)
+    chip: str = ""
+    role: str = ""
+    notes: str = ""
+
+
+BOARDS: Dict[str, Board] = {
+    "t1000e": Board(
+        key="t1000e",
+        name="Seeed SenseCAP T1000-E",
+        flash="uf2",
+        artifact="openmesh-t1000e.uf2",
+        usb_vid_pid=[(0x2886, 0x0056), (0x2886, 0x8045), (0x239A, 0x00B3)],
+        uf2_labels=["T1000E", "T1000-E", "TRACKER-T1000-E"],
+        role="tracker/client",
+        notes="nRF52840 + LR1110; double-tap side button for the UF2 bootloader.",
+    ),
+    "rak4631_solar": Board(
+        key="rak4631_solar",
+        name="RAK WisBlock 4631 solar node",
+        flash="uf2",
+        artifact="openmesh-rak4631_solar.uf2",
+        usb_vid_pid=[(0x239A, 0x8029), (0x239A, 0x00B3), (0x0483, 0x5740)],
+        uf2_labels=["RAK4631", "RAK4630", "RAKWIRELESS"],
+        role="repeater",
+        notes="nRF52840 + SX1262; Adafruit UF2 bootloader required (most RAK solar builds ship one).",
+    ),
+    "seeed_solar": Board(
+        key="seeed_solar",
+        name="Seeed SenseCAP Solar Node P1",
+        flash="uf2",
+        artifact="openmesh-seeed_solar.uf2",
+        usb_vid_pid=[(0x2886, 0x0056), (0x239A, 0x00B3), (0x2886, 0x0045)],
+        uf2_labels=["SEEEDSOLAR", "SOLAR", "XIAO-SENSE"],
+        role="repeater/gateway",
+        notes="nRF52840 + SX1262 + L76KB; double reset for the UF2 bootloader.",
+    ),
+    "heltec_tracker": Board(
+        key="heltec_tracker",
+        name="Heltec Wireless Tracker",
+        flash="esptool",
+        artifact="openmesh-heltec_tracker-full.bin",  # merged image for offset 0x0
+        usb_vid_pid=[(0x303A, 0x1001), (0x1A86, 0x7523), (0x10C4, 0xEA60)],
+        chip="esp32s3",
+        role="tracker/client",
+        notes="ESP32-S3 + SX1262 + GNSS; flashing replaces the Heltec factory firmware.",
+    ),
+}
+
+ALIASES = {
+    "t1000-e": "t1000e",
+    "t1000": "t1000e",
+    "rak": "rak4631_solar",
+    "rak4631": "rak4631_solar",
+    "solar": "seeed_solar",
+    "seeed": "seeed_solar",
+    "seeedsolar": "seeed_solar",
+    "heltec": "heltec_tracker",
+    "tracker": "heltec_tracker",
+}
+
+
+class FlashError(Exception):
+    """A user-facing failure with a friendly explanation."""
+
+    def __init__(self, message: str, exit_code: int = 1):
+        super().__init__(message)
+        self.exit_code = exit_code
+
+
+# --------------------------------------------------------------------------------------------
+# USB detection without pyusb (sysfs only, works for any Linux kernel with usbdevfs)
+# --------------------------------------------------------------------------------------------
+def _read(path: Path, default: str = "") -> str:
+    try:
+        return path.read_text(encoding="utf-8", errors="replace").strip()
+    except OSError:
+        return default
+
+
+@dataclass
+class UsbDevice:
+    vid: int
+    pid: int
+    product: str
+    serial: str
+    tty: Optional[str] = None
+
+
+def enumerate_usb() -> List[UsbDevice]:
+    devices: List[UsbDevice] = []
+    sys_bus = Path("/sys/bus/usb/devices")
+    if not sys_bus.exists():
+        return devices
+    for entry in sorted(sys_bus.iterdir()):
+        vid_text = _read(entry / "idVendor")
+        pid_text = _read(entry / "idProduct")
+        if not vid_text or not pid_text:
+            continue
+        try:
+            vid, pid = int(vid_text, 16), int(pid_text, 16)
+        except ValueError:
+            continue
+        tty = None
+        # Look for a child tty device (interface node has a tty subdirectory).
+        for tty_dir in entry.glob("**/tty"):
+            for candidate in tty_dir.iterdir():
+                if candidate.name.startswith("tty"):
+                    tty = "/dev/" + candidate.name
+                    break
+            if tty:
+                break
+        devices.append(
+            UsbDevice(
+                vid=vid,
+                pid=pid,
+                product=_read(entry / "product"),
+                serial=_read(entry / "serial"),
+                tty=tty,
+            )
+        )
+    return devices
+
+
+def board_for_usb(device: UsbDevice) -> Optional[Board]:
+    for board in BOARDS.values():
+        if (device.vid, device.pid) in board.usb_vid_pid:
+            return board
+    return None
+
+
+# --------------------------------------------------------------------------------------------
+# UF2 mounts
+# --------------------------------------------------------------------------------------------
+def find_uf2_mount(labels: List[str]) -> Optional[Path]:
+    """Finds a mounted FAT volume whose label or INFO_UF2.TXT matches one of `labels`."""
+    candidates: List[Path] = []
+    try:
+        with open("/proc/mounts", "r", encoding="utf-8") as handle:
+            for line in handle:
+                parts = line.split()
+                if len(parts) < 3:
+                    continue
+                if parts[2] not in ("vfat", "msdos", "exfat"):
+                    continue
+                mount = Path(parts[1].replace("\\040", " "))
+                if any(label.lower() in parts[1].lower() for label in labels):
+                    candidates.append(mount)
+    except OSError:
+        pass
+    # Also scan common media roots for UF2 info files, catching labels /proc/mounts misses.
+    for root in (Path("/run/media"), Path("/media"), Path("/mnt")):
+        if not root.exists():
+            continue
+        for mount in root.glob("*/*"):
+            if not mount.is_dir():
+                continue
+            info = mount / "INFO_UF2.TXT"
+            if info.exists():
+                text = _read(info).lower()
+                if any(label.lower() in text for label in labels) or any(
+                    label.lower() in mount.name.lower() for label in labels
+                ):
+                    candidates.append(mount)
+    for mount in candidates:
+        if mount.is_dir() and (mount / "INFO_UF2.TXT").exists():
+            return mount
+    return candidates[0] if candidates else None
+
+
+# --------------------------------------------------------------------------------------------
+# Release resolution and download with sha256 verification
+# --------------------------------------------------------------------------------------------
+def _urlopen(url: str, timeout: int = 30):
+    request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+    return urllib.request.urlopen(request, timeout=timeout)
+
+
+def resolve_artifact(
+    board: Board,
+    release: str,
+    base_url: Optional[str],
+    explicit_file: Optional[Path],
+) -> Tuple[Path, str]:
+    """Returns (local_path, expected_sha256_or_empty)."""
+    if explicit_file is not None:
+        path = explicit_file.expanduser().resolve()
+        if not path.exists():
+            raise FlashError(f"local firmware file not found: {path}", 4)
+        return path, ""
+
+    if base_url is not None and not base_url.startswith(("http://", "https://", "file://")):
+        # Local release directory: useful for offline flashing / CI artefacts.
+        local_base = Path(base_url).expanduser().resolve()
+        local_image = local_base / board.artifact
+        if not local_image.exists():
+            raise FlashError(
+                f"firmware image not found: {local_image}\n"
+                f"  expected {board.artifact} in {local_base}",
+                4,
+            )
+        expected = ""
+        checksum_file = local_image.with_suffix(local_image.suffix + ".sha256")
+        if checksum_file.exists():
+            expected = checksum_file.read_text(encoding="utf-8").split()[0].lower()
+            actual = sha256_of(local_image)
+            if actual != expected:
+                raise FlashError(
+                    f"sha256 mismatch for {local_image}\n  expected {expected}\n  actual   {actual}",
+                    4,
+                )
+            print(f"  sha256 verified: {actual}")
+        return local_image, expected
+
+    if base_url is None:
+        if release == "latest":
+            try:
+                with _urlopen(
+                    f"https://api.github.com/repos/{DEFAULT_REPO}/releases/latest"
+                ) as response:
+                    payload = json.load(response)
+                release = payload.get("tag_name") or DEFAULT_RELEASE_TAG
+            except (urllib.error.URLError, ValueError):
+                release = DEFAULT_RELEASE_TAG
+                print(f"  note: GitHub release lookup failed, using pinned {release}", file=sys.stderr)
+        base_url = f"https://github.com/{DEFAULT_REPO}/releases/download/{release}"
+
+    cache = CACHE_DIR / board.key
+    cache.mkdir(parents=True, exist_ok=True)
+    target = cache / board.artifact
+    url = base_url.rstrip("/") + "/" + board.artifact
+    checksum_url = url + ".sha256"
+
+    expected = ""
+    try:
+        with _urlopen(checksum_url) as response:
+            expected = response.read().decode("utf-8", "replace").split()[0].lower()
+    except (urllib.error.URLError, IndexError, ValueError):
+        expected = ""
+
+    if not target.exists():
+        print(f"  downloading {url}")
+        try:
+            with _urlopen(url) as response, open(target, "wb") as out:
+                shutil.copyfileobj(response, out)
+        except urllib.error.HTTPError as exc:
+            raise FlashError(
+                f"download failed: HTTP {exc.code} for {url}\n"
+                "  Point --release/--base-url at an existing release or use --file.",
+                4,
+            ) from exc
+        except urllib.error.URLError as exc:
+            raise FlashError(f"download failed: {exc.reason}", 4) from exc
+    else:
+        print(f"  using cached {target}")
+
+    if expected:
+        actual = sha256_of(target)
+        if actual != expected:
+            target.unlink(missing_ok=True)
+            raise FlashError(
+                f"sha256 mismatch for {board.artifact}\n  expected {expected}\n  actual   {actual}",
+                4,
+            )
+        print(f"  sha256 verified: {actual}")
+    else:
+        print(f"  warning: no .sha256 published; checksum = {sha256_of(target)}")
+    return target, expected
+
+
+def sha256_of(path: Path) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+# --------------------------------------------------------------------------------------------
+# Flashing
+# --------------------------------------------------------------------------------------------
+def _ensure_dialout() -> None:
+    if os.geteuid() == 0:
+        return
+    try:
+        import grp
+
+        groups = [grp.getgrgid(g).gr_name for g in os.getgroups()]
+    except (ImportError, KeyError):
+        return
+    if "dialout" not in groups and "uucp" not in groups:
+        print(
+            "  warning: you are not in the dialout group; serial access may fail.\n"
+            "           Run: sudo usermod -aG dialout \"$USER\"  (then log out and back in)",
+            file=sys.stderr,
+        )
+
+
+def flash_uf2(board: Board, image: Path, dry_run: bool) -> None:
+    mount = find_uf2_mount(board.uf2_labels)
+    if mount is None and dry_run:
+        print(f"  no UF2 bootloader drive detected (dry run): would copy {image.name} to the")
+        print("  bootloader mass-storage drive once the board is in bootloader mode.")
+        return
+    if mount is None:
+        raise FlashError(
+            "No UF2 bootloader drive found.\n"
+            "  1. Connect the board over USB.\n"
+            "  2. Put it in bootloader mode (double-tap reset, or double-tap the side button on\n"
+            "     the T1000-E) until a USB drive appears.\n"
+            "  3. Re-run this command; `--list` shows detected USB devices.",
+            3,
+        )
+    destination = mount / image.name
+    target = mount / "CURRENT.UF2"
+    print(f"  UF2 drive : {mount}")
+    print(f"  copy       : {image.name} -> {destination}")
+    if dry_run:
+        print("  dry run: skipping copy")
+        return
+    shutil.copyfile(image, destination)
+    # The bootloader reads the file and reboots; give it a moment, then confirm it left.
+    for _ in range(40):
+        time.sleep(0.25)
+        if not (mount / "INFO_UF2.TXT").exists():
+            print(f"  board rebooted after writing {image.name} ({target.name} consumed)")
+            return
+    print(
+        "  warning: the bootloader drive did not disappear; the board may need a manual reset.\n"
+        "           If nothing happens, re-enter the bootloader and retry."
+    )
+
+
+def find_esptool_command() -> List[str]:
+    candidates = [
+        [sys.executable, "-m", "esptool"],
+        [sys.executable, "-m", "esptool.py"],
+        ["esptool.py"],
+        ["esptool"],
+    ]
+    for candidate in candidates:
+        try:
+            result = subprocess.run(
+                candidate + ["version"], capture_output=True, text=True, timeout=20
+            )
+            if result.returncode == 0:
+                return candidate
+        except (OSError, subprocess.SubprocessError):
+            continue
+    raise FlashError(
+        "esptool is not installed. Install it with one of:\n"
+        "  python3 -m pip install --user esptool\n"
+        "  sudo dnf install python3-esptool   # Fedora\n"
+        "Then re-run this command.",
+        1,
+    )
+
+
+def auto_port(board: Board, explicit_port: Optional[str]) -> str:
+    if explicit_port:
+        return explicit_port
+    devices = enumerate_usb()
+    candidates = []
+    for device in devices:
+        if board_for_usb(device) is board and device.tty:
+            candidates.append(device.tty)
+    if not candidates:
+        # Fall back to any ttyACM/ttyUSB device: many boards share VID/PID with debug probes.
+        candidates = sorted(
+            str(p) for p in list(Path("/dev").glob("ttyACM*")) + list(Path("/dev").glob("ttyUSB*"))
+        )
+    if not candidates:
+        raise FlashError(
+            "No serial port found for the ESP32-S3 board.\n"
+            "  Check the USB cable (some are power-only) and that the board is in download\n"
+            "  mode: hold BOOT, tap RESET, release BOOT. Then re-run with --port /dev/ttyACM0.",
+            3,
+        )
+    # Prefer the ESP32-S3 native USB (303a:1001) tty.
+    for device in devices:
+        if device.vid == 0x303A and device.tty:
+            return device.tty
+    return candidates[0]
+
+
+def flash_esptool(
+    board: Board, image: Path, port: Optional[str], dry_run: bool, erase: bool
+) -> None:
+    _ensure_dialout()
+    try:
+        esptool = find_esptool_command()
+    except FlashError:
+        if not dry_run:
+            raise
+        esptool = ["esptool.py"]
+        print("  note: esptool not found; dry run shows the command that would be used")
+    try:
+        resolved_port = auto_port(board, port)
+    except FlashError:
+        if not dry_run:
+            raise
+        resolved_port = port or "/dev/ttyACM0"
+        print(f"  note: no serial port auto-detected; would use {resolved_port}")
+    if not dry_run and not Path(resolved_port).exists():
+        raise FlashError(
+            f"serial port {resolved_port} does not exist.\n"
+            "  Plug the board in and check `openmesh-flash --list`.",
+            3,
+        )
+    if not os.access(resolved_port, os.R_OK | os.W_OK):
+        raise FlashError(
+            f"no permission to open {resolved_port}.\n"
+            "  Run: sudo usermod -aG dialout \"$USER\"  then log out and back in.\n"
+            "  (Fedora also installs a uaccess rule for Espressif VID 303a.)",
+            1,
+        )
+    chip = board.chip or "esp32s3"
+    command = esptool + [
+        "--chip",
+        chip,
+        "--port",
+        resolved_port,
+        "--baud",
+        "921600",
+        "--before",
+        "default-reset",
+        "--after",
+        "hard-reset",
+        "write_flash",
+        "-z",
+        "--flash-mode",
+        "dio",
+        "--flash-freq",
+        "80m",
+        "--flash-size",
+        "8MB",
+        "0x0",
+        str(image),
+    ]
+    print(f"  port       : {resolved_port}")
+    print(f"  command    : {' '.join(command)}")
+    if dry_run:
+        print("  dry run: not invoking esptool")
+        return
+    if erase:
+        erase_command = esptool + [
+            "--chip", chip, "--port", resolved_port, "erase_flash",
+        ]
+        print(f"  erasing    : {' '.join(erase_command)}")
+        subprocess.run(erase_command, check=False)
+    result = subprocess.run(command)
+    if result.returncode != 0:
+        raise FlashError(
+            "esptool failed.\n"
+            "  Tips: hold BOOT while tapping RESET to force download mode; try a different\n"
+            "  USB cable/port; add --port /dev/ttyACM0 explicitly.",
+            1,
+        )
+    print("  done: the board reboots into OpenMesh.")
+
+
+# --------------------------------------------------------------------------------------------
+# CLI
+# --------------------------------------------------------------------------------------------
+def list_boards(as_json: bool) -> None:
+    devices = enumerate_usb()
+    if as_json:
+        print(
+            json.dumps(
+                {
+                    "boards": [
+                        {
+                            "key": b.key,
+                            "name": b.name,
+                            "flash": b.flash,
+                            "artifact": b.artifact,
+                            "role": b.role,
+                            "notes": b.notes,
+                        }
+                        for b in BOARDS.values()
+                    ],
+                    "usb_devices": [
+                        {
+                            "vid": f"0x{d.vid:04x}",
+                            "pid": f"0x{d.pid:04x}",
+                            "product": d.product,
+                            "serial": d.serial,
+                            "tty": d.tty,
+                        }
+                        for d in devices
+                    ],
+                },
+                indent=2,
+            )
+        )
+        return
+    print("Supported boards:\n")
+    for board in BOARDS.values():
+        print(f"  {board.key:16s} {board.name}")
+        print(f"  {'':16s} role={board.role:16s} flash={board.flash:8s} artifact={board.artifact}")
+        if board.uf2_labels:
+            print(f"  {'':16s} UF2 drive labels: {', '.join(board.uf2_labels)}")
+        if board.usb_vid_pid:
+            ids = ", ".join(f"{v:04x}:{p:04x}" for v, p in board.usb_vid_pid)
+            print(f"  {'':16s} USB VID:PID: {ids}")
+        print()
+    if devices:
+        print("USB devices currently attached:\n")
+        for device in devices:
+            board = board_for_usb(device)
+            board_name = board.key if board else "unknown"
+            print(
+                f"  {device.vid:04x}:{device.pid:04x}  {device.product or '(no product string)':40s}"
+                f" {('-> ' + board_name) if board else ''}"
+            )
+            if device.tty:
+                print(f"              tty: {device.tty}")
+    else:
+        print("No USB devices detected (is the board connected?).")
+    mounts = [b for b in BOARDS.values() if b.flash == "uf2"]
+    for board in mounts:
+        mount = find_uf2_mount(board.uf2_labels)
+        if mount:
+            print(f"\nUF2 bootloader drive for {board.key}: {mount}")
+    print("\nRun `openmesh-flash --board auto --dry-run` to see the flashing plan.")
+
+
+def resolve_board(name: str) -> Board:
+    key = name.strip().lower()
+    key = ALIASES.get(key, key)
+    if key == "auto":
+        return detect_board()
+    if key not in BOARDS:
+        raise FlashError(
+            f"unknown board '{name}'. Supported: {', '.join(BOARDS)} (or 'auto')", 2
+        )
+    return BOARDS[key]
+
+
+def detect_board() -> Board:
+    # 1) A UF2 bootloader drive is the strongest signal (nRF52 boards).
+    for board in BOARDS.values():
+        if board.flash == "uf2" and find_uf2_mount(board.uf2_labels) is not None:
+            print(f"  detected UF2 bootloader drive for {board.key}")
+            return board
+    # 2) USB VID/PID match.
+    matches: List[Board] = []
+    for device in enumerate_usb():
+        board = board_for_usb(device)
+        if board is not None and board not in matches:
+            matches.append(board)
+    if len(matches) == 1:
+        print(f"  detected {matches[0].key} by USB id")
+        return matches[0]
+    if len(matches) > 1:
+        keys = ", ".join(b.key for b in matches)
+        raise FlashError(
+            f"several boards are attached ({keys}); pass --board <key> instead.", 3
+        )
+    raise FlashError(
+        "could not auto-detect a board.\n"
+        "  * nRF52 boards: enter the UF2 bootloader (double reset) so a drive appears.\n"
+        "  * ESP32 boards: connect USB; `--list` shows what was detected.\n"
+        "  * Or pass --board t1000e|rak4631_solar|seeed_solar|heltec_tracker.",
+        3,
+    )
+
+
+def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog="openmesh-flash",
+        description="Flash OpenMesh firmware to supported LoRa boards (UF2 copy or esptool).",
+        epilog="Run `openmesh-flash --list` to see supported boards and attached USB devices.",
+    )
+    parser.add_argument("--version", action="version", version=f"%(prog)s {VERSION}")
+    parser.add_argument("--list", action="store_true", help="list supported boards and USB devices")
+    parser.add_argument("--list-json", action="store_true", help="machine-readable --list output")
+    parser.add_argument(
+        "--board",
+        default=None,
+        help="board key (t1000e, rak4631_solar, seeed_solar, heltec_tracker) or 'auto'",
+    )
+    parser.add_argument("--port", help="serial port for esptool (e.g. /dev/ttyACM0)")
+    parser.add_argument("--file", type=Path, help="use a local firmware artefact instead of downloading")
+    parser.add_argument(
+        "--release",
+        default="latest",
+        help="GitHub release tag to download from (default: latest, falls back to v0.1.0)",
+    )
+    parser.add_argument(
+        "--base-url",
+        help="override the release base URL (a local directory works: file:///path or /path)",
+    )
+    parser.add_argument("--sha256", help="expected sha256 for --file / --base-url artefacts")
+    parser.add_argument("--erase", action="store_true", help="erase the whole flash first (ESP32 only)")
+    parser.add_argument("--dry-run", action="store_true", help="print the plan without flashing")
+    parser.add_argument("--yes", "-y", action="store_true", help="skip the confirmation prompt")
+    parser.add_argument("--verbose", "-v", action="store_true")
+    return parser.parse_args(argv)
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    args = parse_args(argv)
+    try:
+        if args.list or args.list_json:
+            list_boards(as_json=args.list_json)
+            return 0
+        if not args.board:
+            raise FlashError("no board given. Try `openmesh-flash --list` or --board auto.", 2)
+        board = resolve_board(args.board)
+        print(f"Board: {board.name} ({board.key}) — {board.role}")
+        print(f"Flash method: {'UF2 mass-storage copy' if board.flash == 'uf2' else 'esptool over USB'}")
+        image, expected = resolve_artifact(board, args.release, args.base_url, args.file)
+        actual = sha256_of(image)
+        if args.sha256 and actual.lower() != args.sha256.lower():
+            raise FlashError(
+                f"sha256 mismatch for {image}\n  expected {args.sha256}\n  actual   {actual}", 4
+            )
+        print(f"Image: {image}")
+        print(f"sha256: {actual}")
+        if not args.dry_run and not args.yes:
+            answer = input("Write this firmware to the board? [y/N] ").strip().lower()
+            if answer not in ("y", "yes"):
+                print("Aborted.")
+                return 1
+        if board.flash == "uf2":
+            flash_uf2(board, image, args.dry_run)
+        else:
+            flash_esptool(board, image, args.port, args.dry_run, args.erase)
+        if args.dry_run:
+            print("\nDry run complete; nothing was written.")
+        else:
+            print("\nDone. See docs/hardware/boards.md for first-boot and companion setup.")
+        return 0
+    except FlashError as exc:
+        print(f"\nopenmesh-flash: {exc}", file=sys.stderr)
+        return exc.exit_code
+    except KeyboardInterrupt:
+        print("\nInterrupted.", file=sys.stderr)
+        return 130
+
+
+if __name__ == "__main__":
+    sys.exit(main())

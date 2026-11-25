@@ -8,34 +8,81 @@
 /// LoRa modem configuration.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LoraProfile {
+    /// Human-readable name.
     pub name: &'static str,
+    /// Spreading factor (7..=12).
     pub sf: u8,
+    /// Bandwidth in kHz.
     pub bw_khz: u16,
+    /// Coding rate denominator (5..=8, i.e. 4/5 .. 4/8).
     pub coding_rate: u8,
+    /// Preamble length in symbols.
     pub preamble_symbols: u16,
+    /// Whether the LoRa packet uses an explicit header.
     pub explicit_header: bool,
+    /// Whether the LoRa packet carries a CRC.
     pub crc: bool,
 }
 
 /// Common presets. Names follow the de-facto convention used by Meshtastic so users can
 /// compare, but OpenMesh defaults to `MEDIUM_FAST` for a better speed/range balance.
-pub const LONG_SLOW: LoraProfile =
-    LoraProfile { name: "LONG_SLOW", sf: 12, bw_khz: 125, coding_rate: 8, preamble_symbols: 16, explicit_header: true, crc: true };
-pub const LONG_FAST: LoraProfile =
-    LoraProfile { name: "LONG_FAST", sf: 11, bw_khz: 250, coding_rate: 5, preamble_symbols: 16, explicit_header: true, crc: true };
-pub const MEDIUM_FAST: LoraProfile =
-    LoraProfile { name: "MEDIUM_FAST", sf: 9, bw_khz: 250, coding_rate: 5, preamble_symbols: 16, explicit_header: true, crc: true };
-pub const SHORT_FAST: LoraProfile =
-    LoraProfile { name: "SHORT_FAST", sf: 7, bw_khz: 250, coding_rate: 5, preamble_symbols: 16, explicit_header: true, crc: true };
-pub const SHORT_TURBO: LoraProfile =
-    LoraProfile { name: "SHORT_TURBO", sf: 7, bw_khz: 500, coding_rate: 5, preamble_symbols: 16, explicit_header: true, crc: true };
+pub const LONG_SLOW: LoraProfile = LoraProfile {
+    name: "LONG_SLOW",
+    sf: 12,
+    bw_khz: 125,
+    coding_rate: 8,
+    preamble_symbols: 16,
+    explicit_header: true,
+    crc: true,
+};
+/// Long-range preset (SF11 / 250 kHz).
+pub const LONG_FAST: LoraProfile = LoraProfile {
+    name: "LONG_FAST",
+    sf: 11,
+    bw_khz: 250,
+    coding_rate: 5,
+    preamble_symbols: 16,
+    explicit_header: true,
+    crc: true,
+};
+/// Default OpenMesh preset (SF9 / 250 kHz).
+pub const MEDIUM_FAST: LoraProfile = LoraProfile {
+    name: "MEDIUM_FAST",
+    sf: 9,
+    bw_khz: 250,
+    coding_rate: 5,
+    preamble_symbols: 16,
+    explicit_header: true,
+    crc: true,
+};
+/// Short-range, fast preset (SF7 / 250 kHz).
+pub const SHORT_FAST: LoraProfile = LoraProfile {
+    name: "SHORT_FAST",
+    sf: 7,
+    bw_khz: 250,
+    coding_rate: 5,
+    preamble_symbols: 16,
+    explicit_header: true,
+    crc: true,
+};
+/// Fastest preset (SF7 / 500 kHz).
+pub const SHORT_TURBO: LoraProfile = LoraProfile {
+    name: "SHORT_TURBO",
+    sf: 7,
+    bw_khz: 500,
+    coding_rate: 5,
+    preamble_symbols: 16,
+    explicit_header: true,
+    crc: true,
+};
 
-pub const PROFILES: &[LoraProfile] =
-    &[LONG_SLOW, LONG_FAST, MEDIUM_FAST, SHORT_FAST, SHORT_TURBO];
+/// All built-in profiles.
+pub const PROFILES: &[LoraProfile] = &[LONG_SLOW, LONG_FAST, MEDIUM_FAST, SHORT_FAST, SHORT_TURBO];
 
 /// Regulatory region profile.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Region {
+    /// Human-readable name.
     pub name: &'static str,
     /// Centre frequency in kHz.
     pub freq_khz: u32,
@@ -47,13 +94,50 @@ pub struct Region {
     pub bw_khz: u16,
 }
 
+/// All built-in regulatory region profiles.
 pub const REGIONS: &[Region] = &[
-    Region { name: "EU868", freq_khz: 869_525, max_power_dbm: 14, duty_cycle_pct: Some(1), bw_khz: 250 },
-    Region { name: "US915", freq_khz: 915_000, max_power_dbm: 20, duty_cycle_pct: None, bw_khz: 250 },
-    Region { name: "AU915", freq_khz: 915_000, max_power_dbm: 20, duty_cycle_pct: None, bw_khz: 250 },
-    Region { name: "IN865", freq_khz: 865_000, max_power_dbm: 20, duty_cycle_pct: None, bw_khz: 250 },
-    Region { name: "KR920", freq_khz: 920_000, max_power_dbm: 14, duty_cycle_pct: None, bw_khz: 250 },
-    Region { name: "AS923", freq_khz: 923_200, max_power_dbm: 14, duty_cycle_pct: Some(1), bw_khz: 250 },
+    Region {
+        name: "EU868",
+        freq_khz: 869_525,
+        max_power_dbm: 14,
+        duty_cycle_pct: Some(1),
+        bw_khz: 250,
+    },
+    Region {
+        name: "US915",
+        freq_khz: 915_000,
+        max_power_dbm: 20,
+        duty_cycle_pct: None,
+        bw_khz: 250,
+    },
+    Region {
+        name: "AU915",
+        freq_khz: 915_000,
+        max_power_dbm: 20,
+        duty_cycle_pct: None,
+        bw_khz: 250,
+    },
+    Region {
+        name: "IN865",
+        freq_khz: 865_000,
+        max_power_dbm: 20,
+        duty_cycle_pct: None,
+        bw_khz: 250,
+    },
+    Region {
+        name: "KR920",
+        freq_khz: 920_000,
+        max_power_dbm: 14,
+        duty_cycle_pct: None,
+        bw_khz: 250,
+    },
+    Region {
+        name: "AS923",
+        freq_khz: 923_200,
+        max_power_dbm: 14,
+        duty_cycle_pct: Some(1),
+        bw_khz: 250,
+    },
 ];
 
 /// On-air time of a LoRa frame in milliseconds, including preamble and header overhead.
@@ -72,7 +156,11 @@ pub fn lora_airtime_ms(profile: &LoraProfile, payload_len: usize) -> u32 {
     // low-data-rate optimisation (SF11/SF12 at 125 kHz); CR = 1..4 for 4/5..4/8.
     let pl = payload_len as f64 + if profile.crc { 2.0 } else { 0.0 };
     let ih = if profile.explicit_header { 0.0 } else { 1.0 };
-    let de = if profile.sf >= 11 && profile.bw_khz == 125 { 1.0 } else { 0.0 };
+    let de = if profile.sf >= 11 && profile.bw_khz == 125 {
+        1.0
+    } else {
+        0.0
+    };
     let cr = (profile.coding_rate.saturating_sub(4).clamp(1, 4)) as f64;
     let num = 8.0 * pl - 4.0 * sf + 28.0 - 20.0 * ih;
     let den = 4.0 * (sf - 2.0 * de);
@@ -84,12 +172,29 @@ pub fn lora_airtime_ms(profile: &LoraProfile, payload_len: usize) -> u32 {
 }
 
 /// Maximum attachment size recommended for a given profile and duty-cycle region.
+///
+/// Takes the smaller of the PROTOCOL.md §9.4 default cap for the profile and a 90 s airtime
+/// budget, so a `LONG_SLOW` link never queues more than a couple of minutes of channel time.
 pub fn max_attachment_bytes(profile: &LoraProfile, region: &Region) -> usize {
-    let _ = (profile, region);
+    let cap = match profile.name {
+        "SHORT_TURBO" | "SHORT_FAST" => 24 * 1024,
+        "MEDIUM_FAST" => 12 * 1024,
+        "LONG_FAST" => 6 * 1024,
+        "LONG_SLOW" => 1_536,
+        _ => 12 * 1024,
+    };
     // 90 s of airtime at the profile's rate, leaving headroom for ACKs and retries.
     let airtime_per_frame = lora_airtime_ms(profile, 240).max(1) as f64;
     let frames = (90_000.0 / airtime_per_frame) as usize;
-    (frames * 180).max(512)
+    let budget = (frames * 180).max(512);
+    let mut limit = cap.min(budget);
+    // Duty-cycle regions additionally clamp to one hour's worth of airtime.
+    if let Some(pct) = region.duty_cycle_pct {
+        let airtime_ms = 3_600_000u64 * pct as u64 / 100;
+        let frames = (airtime_ms as f64 / airtime_per_frame) as usize;
+        limit = limit.min((frames * 180).max(512));
+    }
+    limit
 }
 
 /// Current Unix time in milliseconds (host-side convenience).

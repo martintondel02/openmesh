@@ -1,0 +1,43 @@
+{
+  "name": "openmesh",
+  "version": "0.1.0",
+  "description": "Portable OMP/1 protocol library: frame codec, announce, AEAD envelopes, dedup, managed flood, store-and-forward, companion link, GPS, power and duty-cycle budgeting. Arduino-free; HAL is injected by the embedder.",
+  "keywords": [
+    "openmesh",
+    "lora",
+    "mesh",
+    "protocol",
+    "ed25519",
+    "x25519"
+  ],
+  "license": "AGPL-3.0-or-later",
+  "frameworks": "*",
+  "platforms": "*",
+  "build": {
+    "flags": [
+      "-std=gnu++17"
+    ],
+    "unflags": [
+      "-std=gnu++11"
+    ],
+    "srcDir": ".",
+    "srcFilter": [
+      "+<src/**/*>",
+      "+<third_party/**/*>"
+    ]
+  },
+  "headers": [
+    "openmesh/om_types.h",
+    "openmesh/om_cbor.h",
+    "openmesh/om_sha256.h",
+    "openmesh/om_identity.h",
+    "openmesh/om_messages.h",
+    "openmesh/om_dedup.h",
+    "openmesh/om_region.h",
+    "openmesh/om_store.h",
+    "openmesh/om_companion.h",
+    "openmesh/om_gps.h",
+    "openmesh/om_power.h",
+    "openmesh/om_engine.h"
+  ]
+}

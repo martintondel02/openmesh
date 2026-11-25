@@ -28,7 +28,10 @@ magic(2) = b"OM" | type(u8) | len(u16 LE) | payload(len) | crc16/payload-crc
 ```
 
 * `len` is the payload length, max 1024.
-* CRC-16/CCITT-FALSE over `type || len || payload`; frames with a bad CRC are dropped and counted.
+* CRC-16/CCITT-FALSE (polynomial 0x1021, initial value 0xFFFF, no reflection, no final XOR)
+  computed over `type || len || payload` and transmitted as a **little-endian u16** immediately
+  after the payload. Frames with a bad CRC are dropped and counted. Reference check value:
+  CRC-16/CCITT-FALSE of ASCII `"123456789"` is `0x29B1`.
 * BLE uses the same framing; the BLE characteristic is a Nordic-UART-like service with RX/TX
   characteristics and notifications. MTU fragments are reassembled by the framing layer.
 

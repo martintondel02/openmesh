@@ -45,26 +45,42 @@ impl NodeId {
     /// All-zero id used as "unset".
     pub const ZERO: NodeId = NodeId([0; 8]);
 
+    /// Construct from raw bytes.
     pub const fn new(bytes: [u8; 8]) -> Self {
         Self(bytes)
     }
 
+    /// Raw address bytes.
     pub const fn as_bytes(&self) -> &[u8; 8] {
         &self.0
     }
 
+    /// True for the reserved all-ones broadcast address.
     pub fn is_broadcast(&self) -> bool {
         self.0 == [0xFF; 8]
     }
 
+    /// True for the all-zero address used as "unset".
     pub fn is_zero(&self) -> bool {
         self.0 == [0; 8]
     }
 
+    /// True for a channel address (high bit of byte 0 set, PROTOCOL.md §3).
+    pub fn is_channel(&self) -> bool {
+        !self.is_broadcast() && self.0[0] & 0x80 != 0
+    }
+
+    /// True for a unicast node address (high bit of byte 0 clear).
+    pub fn is_unicast(&self) -> bool {
+        self.0[0] & 0x80 == 0
+    }
+
+    /// Lowercase hex representation.
     pub fn to_hex(&self) -> String {
         hex::encode(self.0)
     }
 
+    /// Parse a hex address (an optional `0x` prefix is accepted).
     pub fn from_hex(s: &str) -> Result<Self> {
         let s = s.trim().trim_start_matches("0x");
         let bytes = hex::decode(s).map_err(|_| Error::Malformed("node id is not valid hex"))?;
@@ -145,6 +161,7 @@ pub enum FrameType {
 }
 
 impl FrameType {
+    /// Parse the five-bit wire discriminator.
     pub fn from_u8(v: u8) -> Result<Self> {
         Ok(match v {
             0 => Self::Announce,
@@ -205,29 +222,36 @@ impl Flags {
     pub const ACK_REQUESTED: u8 = 0x02;
     /// Sender marks this frame as time-sensitive (voice, acks, path replies).
     pub const PRIORITY: u8 = 0x04;
-    /// Frame was replayed from a relay's store-and-forward queue.
-    pub const FROM_STORE: u8 = 0x08;
+    /// Reserved. Relays must not set it: flags are authenticated, and store replay is
+    /// handled out-of-band by the offer/want handshake (see PROTOCOL.md §10).
+    pub const RESERVED_BIT3: u8 = 0x08;
 
+    /// No flags set.
     pub const fn empty() -> Self {
         Self(0)
     }
 
+    /// Build from raw bits; the high nibble is masked off.
     pub const fn from_bits(bits: u8) -> Self {
         Self(bits & 0x0F)
     }
 
+    /// Raw flag bits.
     pub const fn bits(self) -> u8 {
         self.0
     }
 
+    /// Whether `flag` (one or more bits) is set.
     pub const fn contains(self, flag: u8) -> bool {
         self.0 & flag != 0
     }
 
+    /// Set the given flag bits.
     pub fn insert(&mut self, flag: u8) {
         self.0 |= flag & 0x0F;
     }
 
+    /// Clear the given flag bits.
     pub fn remove(&mut self, flag: u8) {
         self.0 &= !(flag & 0x0F);
     }
@@ -245,8 +269,8 @@ impl fmt::Debug for Flags {
         if self.contains(Self::PRIORITY) {
             parts.push("prio");
         }
-        if self.contains(Self::FROM_STORE) {
-            parts.push("store");
+        if self.contains(Self::RESERVED_BIT3) {
+            parts.push("reserved");
         }
         write!(f, "Flags({})", parts.join(","))
     }
@@ -255,31 +279,51 @@ impl fmt::Debug for Flags {
 /// A single OMP/1 frame: fixed header plus opaque body.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Frame {
+    /// Frame type discriminator.
     pub typ: FrameType,
+    /// Header flags (low nibble of byte 1).
     pub flags: Flags,
     /// Remaining hop budget. A relay decrements and re-emits while `ttl > 0`.
     pub ttl: u8,
+    /// Originating node address.
     pub src: NodeId,
+    /// Destination node, channel or [`BROADCAST`].
     pub dst: NodeId,
     /// Per-sender sequence number; used for duplicate suppression and replay protection.
     pub seq: u32,
+    /// Opaque body, at most [`MAX_BODY`] bytes.
     pub body: Vec<u8>,
 }
 
 impl Frame {
+    /// Maximum body length for one frame.
     pub const MAX_BODY: usize = MAX_BODY;
 
+    /// Create a frame with empty flags and TTL 0.
     pub fn new(typ: FrameType, src: NodeId, dst: NodeId, seq: u32, body: Vec<u8>) -> Result<Self> {
         if body.len() > MAX_BODY {
-            return Err(Error::PayloadTooLarge { size: body.len(), max: MAX_BODY });
+            return Err(Error::PayloadTooLarge {
+                size: body.len(),
+                max: MAX_BODY,
+            });
         }
-        Ok(Self { typ, flags: Flags::empty(), ttl: 0, src, dst, seq, body })
+        Ok(Self {
+            typ,
+            flags: Flags::empty(),
+            ttl: 0,
+            src,
+            dst,
+            seq,
+            body,
+        })
     }
 
+    /// True for the reserved all-ones broadcast address.
     pub fn is_broadcast(&self) -> bool {
         self.dst.is_broadcast()
     }
 
+    /// Whether the frame is addressed to `node` (or broadcast).
     pub fn is_for(&self, node: NodeId) -> bool {
         self.dst == node || self.is_broadcast()
     }
@@ -294,7 +338,10 @@ impl Frame {
     /// Encode into an existing buffer (appending).
     pub fn encode_into(&self, out: &mut Vec<u8>) -> Result<()> {
         if self.body.len() > MAX_BODY {
-            return Err(Error::PayloadTooLarge { size: self.body.len(), max: MAX_BODY });
+            return Err(Error::PayloadTooLarge {
+                size: self.body.len(),
+                max: MAX_BODY,
+            });
         }
         if self.ttl > 0x0F {
             return Err(Error::Malformed("ttl exceeds 4-bit field"));
@@ -311,10 +358,16 @@ impl Frame {
     /// Parse a frame from a full transport payload.
     pub fn decode(buf: &[u8]) -> Result<Self> {
         if buf.len() < HEADER_LEN {
-            return Err(Error::BufferTooSmall { need: HEADER_LEN, have: buf.len() });
+            return Err(Error::BufferTooSmall {
+                need: HEADER_LEN,
+                have: buf.len(),
+            });
         }
         if buf.len() > MTU {
-            return Err(Error::PayloadTooLarge { size: buf.len(), max: MTU });
+            return Err(Error::PayloadTooLarge {
+                size: buf.len(),
+                max: MTU,
+            });
         }
         let version = buf[0] >> 5;
         if version != PROTO_VERSION {
@@ -329,14 +382,26 @@ impl Frame {
         dst.copy_from_slice(&buf[10..18]);
         let seq = u32::from_be_bytes([buf[18], buf[19], buf[20], buf[21]]);
         let body = buf[HEADER_LEN..].to_vec();
-        Ok(Self { typ, flags, ttl, src: NodeId(src), dst: NodeId(dst), seq, body })
+        Ok(Self {
+            typ,
+            flags,
+            ttl,
+            src: NodeId(src),
+            dst: NodeId(dst),
+            seq,
+            body,
+        })
     }
 
     /// Header bytes as used in AEAD associated data.
+    ///
+    /// The TTL nibble is **cleared** because every relay decrements it in flight; including it
+    /// would make the ciphertext undecryptable after the first hop. Everything else (version,
+    /// type, flags, source, destination, sequence) is authenticated.
     pub fn aad(&self) -> [u8; HEADER_LEN] {
         let mut aad = [0u8; HEADER_LEN];
         aad[0] = (PROTO_VERSION << 5) | (self.typ as u8 & 0x1F);
-        aad[1] = (self.ttl << 4) | self.flags.bits();
+        aad[1] = self.flags.bits(); // high nibble (TTL) zeroed
         aad[2..10].copy_from_slice(&self.src.0);
         aad[10..18].copy_from_slice(&self.dst.0);
         aad[18..22].copy_from_slice(&self.seq.to_be_bytes());
@@ -386,7 +451,10 @@ mod tests {
         assert_eq!(encoded[0], (PROTO_VERSION << 5) | 1);
         assert_eq!(encoded[1], (5 << 4) | 0x03);
         assert_eq!(&encoded[2..10], &[1, 2, 3, 4, 5, 6, 7, 8]);
-        assert_eq!(&encoded[10..18], &[0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18]);
+        assert_eq!(
+            &encoded[10..18],
+            &[0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18]
+        );
         assert_eq!(&encoded[18..22], &0xDEAD_BEEFu32.to_be_bytes());
     }
 
@@ -394,8 +462,14 @@ mod tests {
     fn rejects_bad_version_and_short_buffers() {
         let mut encoded = sample().encode().unwrap();
         encoded[0] = 2 << 5;
-        assert!(matches!(Frame::decode(&encoded), Err(Error::UnsupportedVersion(2))));
-        assert!(matches!(Frame::decode(&[0u8; 4]), Err(Error::BufferTooSmall { .. })));
+        assert!(matches!(
+            Frame::decode(&encoded),
+            Err(Error::UnsupportedVersion(2))
+        ));
+        assert!(matches!(
+            Frame::decode(&[0u8; 4]),
+            Err(Error::BufferTooSmall { .. })
+        ));
     }
 
     #[test]
@@ -412,5 +486,26 @@ mod tests {
         let id = NodeId::from_hex("0xAABBCCDDEEFF0011").unwrap();
         assert_eq!(id.to_hex(), "aabbccddeeff0011");
         assert_eq!(id.to_string().parse::<NodeId>().unwrap(), id);
+    }
+
+    #[test]
+    fn aad_ignores_ttl_so_relays_do_not_break_encryption() {
+        let f = sample();
+        let mut relayed = f.clone();
+        relayed.ttl = 1;
+        assert_eq!(f.aad(), relayed.aad());
+        // ...but flags are authenticated.
+        let mut tampered = f.clone();
+        tampered.flags.insert(Flags::PRIORITY);
+        assert_ne!(f.aad(), tampered.aad());
+    }
+
+    #[test]
+    fn address_class_bits() {
+        let node = NodeId::from_hex("7f01020304050607").unwrap();
+        let chan = NodeId::from_hex("8001020304050607").unwrap();
+        assert!(node.is_unicast() && !node.is_channel());
+        assert!(chan.is_channel() && !chan.is_unicast());
+        assert!(!BROADCAST.is_channel() && !BROADCAST.is_unicast());
     }
 }

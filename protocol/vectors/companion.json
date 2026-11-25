@@ -1,0 +1,214 @@
+{
+  "cases": [
+    {
+      "frame_hex": "4f4d013900a36570726f746f016b6170705f76657273696f6e766f70656e6d6573682d616e64726f69642f302e312e306c77616e74735f6576656e7473f5f4fb",
+      "name": "hello",
+      "payload": {
+        "app_version": "openmesh-android/0.1.0",
+        "proto": 1,
+        "wants_events": true
+      },
+      "payload_cbor_hex": "a36570726f746f016b6170705f76657273696f6e766f70656e6d6573682d616e64726f69642f302e312e306c77616e74735f6576656e7473f5",
+      "slip_hex": "c04f4d013900a36570726f746f016b6170705f76657273696f6e766f70656e6d6573682d616e64726f69642f302e312e306c77616e74735f6576656e7473f5f4fbc0",
+      "type": 1
+    },
+    {
+      "frame_hex": "4f4d025d00a76570726f746f016a66775f76657273696f6e65302e312e30676e6f64655f6964481122334455667788696d61785f6672616d6518f064636170730966726567696f6e6545553836386770726f66696c656b4d454449554d5f46415354bc1d",
+      "name": "hello_ack",
+      "payload": {
+        "caps": 9,
+        "fw_version": "0.1.0",
+        "max_frame": 240,
+        "node_id_hex": "1122334455667788",
+        "profile": "MEDIUM_FAST",
+        "proto": 1,
+        "region": "EU868"
+      },
+      "payload_cbor_hex": "a76570726f746f016a66775f76657273696f6e65302e312e30676e6f64655f6964481122334455667788696d61785f6672616d6518f064636170730966726567696f6e6545553836386770726f66696c656b4d454449554d5f46415354",
+      "slip_hex": "c04f4d025d00a76570726f746f016a66775f76657273696f6e65302e312e30676e6f64655f6964481122334455667788696d61785f6672616d6518f064636170730966726567696f6e6545553836386770726f66696c656b4d454449554d5f46415354bc1dc0",
+      "type": 2
+    },
+    {
+      "frame_hex": "4f4d030100a0c69d",
+      "name": "config_get",
+      "payload": {},
+      "payload_cbor_hex": "a0",
+      "slip_hex": "c04f4d030100a0c69dc0",
+      "type": 3
+    },
+    {
+      "frame_hex": "4f4d042100a2636b6579696e6f64652e6e616d656576616c75656b736f6c61722d72696467659e88",
+      "name": "config_set",
+      "payload": {
+        "key": "node.name",
+        "value": "solar-ridge"
+      },
+      "payload_cbor_hex": "a2636b6579696e6f64652e6e616d656576616c75656b736f6c61722d7269646765",
+      "slip_hex": "c04f4d042100a2636b6579696e6f64652e6e616d656576616c75656b736f6c61722d72696467659e88c0",
+      "type": 4
+    },
+    {
+      "frame_hex": "4f4d052d00a167656e74726965738282696e6f64652e6e616d656b736f6c61722d726964676582686d6573682e74746c6135d3ff",
+      "name": "config",
+      "payload": {
+        "entries": [
+          [
+            "node.name",
+            "solar-ridge"
+          ],
+          [
+            "mesh.ttl",
+            "5"
+          ]
+        ]
+      },
+      "payload_cbor_hex": "a167656e74726965738282696e6f64652e6e616d656b736f6c61722d726964676582686d6573682e74746c6135",
+      "slip_hex": "c04f4d052d00a167656e74726965738282696e6f64652e6e616d656b736f6c61722d726964676582686d6573682e74746c6135d3ffc0",
+      "type": 5
+    },
+    {
+      "frame_hex": "4f4d061e00a1656672616d655630f62980337c4ee5ad37362003d28ff4461e74ad34bd20c6",
+      "name": "tx",
+      "payload": {
+        "frame_hex": "30f62980337c4ee5ad37362003d28ff4461e74ad34bd"
+      },
+      "payload_cbor_hex": "a1656672616d655630f62980337c4ee5ad37362003d28ff4461e74ad34bd",
+      "slip_hex": "c04f4d061e00a1656672616d655630f62980337c4ee5ad37362003d28ff4461e74ad34bd20c6c0",
+      "type": 6
+    },
+    {
+      "frame_hex": "4f4d074400a5656672616d6556dcce8c21d8afc7028f212465d1930314803e598f60456472737369386463736e72181a646c696e6b646c6f72616561745f6d731b00000199c82cc00011e1",
+      "name": "rx",
+      "payload": {
+        "at_ms": 1760000000000,
+        "frame_hex": "dcce8c21d8afc7028f212465d1930314803e598f6045",
+        "link": "lora",
+        "rssi": -101,
+        "snr": 26
+      },
+      "payload_cbor_hex": "a5656672616d6556dcce8c21d8afc7028f212465d1930314803e598f60456472737369386463736e72181a646c696e6b646c6f72616561745f6d731b00000199c82cc000",
+      "slip_hex": "c04f4d074400a5656672616d6556dcce8c21d8afc7028f212465d1930314803e598f60456472737369386463736e72181a646c696e6b646c6f72616561745f6d731b00000199c82cdbdc0011e1c0",
+      "type": 7
+    },
+    {
+      "frame_hex": "4f4d080100a0d983",
+      "name": "stats_get",
+      "payload": {},
+      "payload_cbor_hex": "a0",
+      "slip_hex": "c04f4d080100a0d983c0",
+      "type": 8
+    },
+    {
+      "frame_hex": "4f4d093100a167656e747269657383826974785f6672616d65731878826972785f6672616d657318f08269666f72776172646564181fdf5e",
+      "name": "stats",
+      "payload": {
+        "entries": [
+          [
+            "tx_frames",
+            120
+          ],
+          [
+            "rx_frames",
+            240
+          ],
+          [
+            "forwarded",
+            31
+          ]
+        ]
+      },
+      "payload_cbor_hex": "a167656e747269657383826974785f6672616d65731878826972785f6672616d657318f08269666f72776172646564181f",
+      "slip_hex": "c04f4d093100a167656e747269657383826974785f6672616d65731878826972785f6672616d657318f08269666f72776172646564181fdf5ec0",
+      "type": 9
+    },
+    {
+      "frame_hex": "4f4d0a0c00a1656e6f6e63651adeadbeef5d62",
+      "name": "ping",
+      "payload": {
+        "nonce": 3735928559
+      },
+      "payload_cbor_hex": "a1656e6f6e63651adeadbeef",
+      "slip_hex": "c04f4d0a0c00a1656e6f6e63651adeadbeef5d62c0",
+      "type": 10
+    },
+    {
+      "frame_hex": "4f4d0b0c00a1656e6f6e63651adeadbeefa1cc",
+      "name": "pong",
+      "payload": {
+        "nonce": 3735928559
+      },
+      "payload_cbor_hex": "a1656e6f6e63651adeadbeef",
+      "slip_hex": "c04f4d0b0c00a1656e6f6e63651adeadbeefa1ccc0",
+      "type": 11
+    },
+    {
+      "frame_hex": "4f4d0c3000a2646b696e646d73746f72655f64656c697665726664657461696c747265706c61796564203220656e76656c6f7065731902",
+      "name": "event",
+      "payload": {
+        "detail": "replayed 2 envelopes",
+        "kind": "store_deliver"
+      },
+      "payload_cbor_hex": "a2646b696e646d73746f72655f64656c697665726664657461696c747265706c61796564203220656e76656c6f706573",
+      "slip_hex": "c04f4d0c3000a2646b696e646d73746f72655f64656c697665726664657461696c747265706c61796564203220656e76656c6f7065731902c0",
+      "type": 12
+    },
+    {
+      "frame_hex": "4f4d0d0100a09c3f",
+      "name": "reset",
+      "payload": {},
+      "payload_cbor_hex": "a0",
+      "slip_hex": "c04f4d0d0100a09c3fc0",
+      "type": 13
+    }
+  ],
+  "comment": "docs/architecture/COMPANION-API.md §1: chunk = \"OM\" | type(u8) | len(u16 LE) | CBOR payload | crc16(u16 LE). CRC-16/CCITT-FALSE (poly 0x1021, init 0xFFFF, xorout 0) over type||len||payload. SLIP: 0xC0 delimiters, 0xC0 -> 0xDB 0xDC, 0xDB -> 0xDB 0xDD.",
+  "crc16_ccitt_false": [
+    {
+      "crc16": 10673,
+      "input_ascii": "123456789"
+    },
+    {
+      "crc16": 65535,
+      "input_hex": ""
+    }
+  ],
+  "crc_len": 2,
+  "error_cases": [
+    {
+      "error": "BufferTooSmall",
+      "frame_hex": "4f4d",
+      "name": "short_header"
+    },
+    {
+      "error": "Malformed",
+      "frame_hex": "584d0d0100a09c3f",
+      "name": "bad_magic"
+    },
+    {
+      "error": "Malformed",
+      "frame_hex": "4f4d630100a09c3f",
+      "name": "unknown_type"
+    },
+    {
+      "error": "Malformed",
+      "frame_hex": "4f4d0a0800a1656e6f6e6365012d16",
+      "name": "bad_crc"
+    },
+    {
+      "error": "PayloadTooLarge",
+      "frame_hex": "4f4d0d0104a09c3f",
+      "name": "payload_too_large"
+    },
+    {
+      "error": "BufferTooSmall",
+      "frame_hex": "4f4d0a0800a1",
+      "name": "partial_frame"
+    }
+  ],
+  "generated_by": "openmesh-core",
+  "header_len": 5,
+  "magic_hex": "4f4d",
+  "max_payload": 1024,
+  "spec": "omp/1",
+  "version": 1
+}

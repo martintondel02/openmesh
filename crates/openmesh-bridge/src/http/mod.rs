@@ -1,0 +1,785 @@
+//! Loopback HTTP + WebSocket server.
+//!
+//! Hand-rolled on tokio + httparse: the bridge only needs GET/POST/OPTIONS on a trusted
+//! loopback socket, a WebSocket upgrade, raw attachment uploads and static file serving, so a
+//! full web framework would add dependency surface without buying anything. The WebSocket
+//! protocol itself is handled by tokio-tungstenite.
+
+pub mod ws;
+
+use std::collections::HashMap;
+use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::watch;
+
+use crate::attachments::MAX_ATTACHMENT_BYTES;
+use crate::json::{b64, error_json, event_json, parse_node_id};
+use crate::runtime::{self, Shared};
+use crate::store::Store;
+
+/// Maximum HTTP header block we accept.
+const MAX_HEADER_BYTES: usize = 64 * 1024;
+/// Maximum body for non-attachment endpoints.
+const MAX_JSON_BODY: usize = 1024 * 1024;
+
+/// Everything a connection needs.
+pub struct HttpState {
+    pub token: Arc<String>,
+    pub shared: Arc<Shared>,
+    pub web_root: Option<PathBuf>,
+    pub shutdown: watch::Receiver<bool>,
+}
+
+/// Parsed request head plus body.
+pub struct HttpRequest {
+    pub method: String,
+    pub path: String,
+    pub query: HashMap<String, String>,
+    pub headers: HashMap<String, String>,
+    pub body: Vec<u8>,
+}
+
+impl HttpRequest {
+    pub fn header(&self, name: &str) -> Option<&str> {
+        self.headers
+            .get(&name.to_ascii_lowercase())
+            .map(|s| s.as_str())
+    }
+
+    pub fn query_param(&self, name: &str) -> Option<&str> {
+        self.query.get(name).map(|s| s.as_str())
+    }
+}
+
+pub struct HttpResponse {
+    pub status: u16,
+    pub content_type: String,
+    pub body: Vec<u8>,
+    pub extra_headers: Vec<(String, String)>,
+}
+
+impl HttpResponse {
+    pub fn json(status: u16, value: serde_json::Value) -> Self {
+        Self {
+            status,
+            content_type: "application/json".to_string(),
+            body: value.to_string().into_bytes(),
+            extra_headers: Vec::new(),
+        }
+    }
+
+    pub fn raw_json(status: u16, body: String) -> Self {
+        Self {
+            status,
+            content_type: "application/json".to_string(),
+            body: body.into_bytes(),
+            extra_headers: Vec::new(),
+        }
+    }
+
+    pub fn text(status: u16, body: impl Into<String>) -> Self {
+        Self {
+            status,
+            content_type: "text/plain; charset=utf-8".to_string(),
+            body: body.into().into_bytes(),
+            extra_headers: Vec::new(),
+        }
+    }
+
+    pub fn bytes(status: u16, content_type: impl Into<String>, body: Vec<u8>) -> Self {
+        Self {
+            status,
+            content_type: content_type.into(),
+            body,
+            extra_headers: Vec::new(),
+        }
+    }
+
+    fn error(status: u16, code: &str) -> Self {
+        Self::json(status, serde_json::json!({ "error": code }))
+    }
+}
+
+fn reason_phrase(status: u16) -> &'static str {
+    match status {
+        200 => "OK",
+        204 => "No Content",
+        400 => "Bad Request",
+        401 => "Unauthorized",
+        404 => "Not Found",
+        405 => "Method Not Allowed",
+        413 => "Payload Too Large",
+        426 => "Upgrade Required",
+        431 => "Request Header Fields Too Large",
+        500 => "Internal Server Error",
+        501 => "Not Implemented",
+        503 => "Service Unavailable",
+        _ => "Unknown",
+    }
+}
+
+enum ReadError {
+    Malformed(String),
+    TooLarge,
+    Io,
+}
+
+/// Serve HTTP/WS on an already-bound listener until shutdown.
+pub async fn serve(listener: TcpListener, state: Arc<HttpState>) -> anyhow::Result<()> {
+    let mut shutdown = state.shutdown.clone();
+    loop {
+        tokio::select! {
+            _ = shutdown.changed() => break,
+            accepted = listener.accept() => {
+                let Ok((stream, peer)) = accepted else { continue };
+                let state = state.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = handle_connection(stream, peer, state).await {
+                        tracing::debug!(%peer, error = %e, "http connection error");
+                    }
+                });
+            }
+        }
+    }
+    tracing::debug!("http server stopped");
+    Ok(())
+}
+
+async fn handle_connection(
+    mut stream: TcpStream,
+    peer: SocketAddr,
+    state: Arc<HttpState>,
+) -> std::io::Result<()> {
+    let _ = stream.set_nodelay(true);
+    let request = match read_request(
+        &mut stream,
+        MAX_HEADER_BYTES + MAX_ATTACHMENT_BYTES + MAX_JSON_BODY,
+    )
+    .await
+    {
+        Ok(Some(request)) => request,
+        Ok(None) => return Ok(()),
+        Err(ReadError::TooLarge) => {
+            let resp = HttpResponse::error(413, "too_large");
+            return write_response(&mut stream, resp).await;
+        }
+        Err(ReadError::Malformed(message)) => {
+            tracing::debug!(%peer, message, "rejected malformed HTTP request");
+            let resp = HttpResponse::error(400, "bad_request");
+            return write_response(&mut stream, resp).await;
+        }
+        Err(ReadError::Io) => return Ok(()),
+    };
+
+    // WebSocket upgrade and SSE are streaming endpoints, handled before the JSON router.
+    if request.path == "/api/ws" {
+        if request.method != "GET" {
+            return write_response(&mut stream, HttpResponse::error(405, "method_not_allowed"))
+                .await;
+        }
+        return ws::upgrade(stream, request, state).await;
+    }
+    if request.path == "/api/events" && request.method == "GET" {
+        if !authorized(&request, &state.token) {
+            return write_response(&mut stream, HttpResponse::error(401, "unauthorized")).await;
+        }
+        return stream_sse(stream, state).await;
+    }
+
+    let response = route(&request, &state).await;
+    write_response(&mut stream, response).await
+}
+
+/// Token check for REST + WS: `Authorization: Bearer <token>` or `?token=<token>`.
+pub fn authorized(request: &HttpRequest, token: &str) -> bool {
+    if let Some(header) = request.header("authorization") {
+        let header = header.trim();
+        if let Some(bearer) = header
+            .strip_prefix("Bearer ")
+            .or_else(|| header.strip_prefix("bearer "))
+        {
+            if constant_time_eq(bearer.trim().as_bytes(), token.as_bytes()) {
+                return true;
+            }
+        }
+    }
+    if let Some(query_token) = request.query_param("token") {
+        return constant_time_eq(query_token.as_bytes(), token.as_bytes());
+    }
+    false
+}
+
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
+async fn route(request: &HttpRequest, state: &Arc<HttpState>) -> HttpResponse {
+    let path = request.path.as_str();
+
+    // CORS preflight for the dev-mode web client.
+    if request.method == "OPTIONS" {
+        return HttpResponse {
+            status: 204,
+            content_type: "text/plain".to_string(),
+            body: Vec::new(),
+            extra_headers: vec![
+                (
+                    "Access-Control-Allow-Methods".into(),
+                    "GET, POST, OPTIONS".into(),
+                ),
+                (
+                    "Access-Control-Allow-Headers".into(),
+                    "Authorization, Content-Type, X-OpenMesh-Filename, X-OpenMesh-Duration-Ms"
+                        .into(),
+                ),
+                ("Access-Control-Max-Age".into(), "86400".into()),
+            ],
+        };
+    }
+
+    if path == "/api/health" {
+        return HttpResponse::json(
+            200,
+            serde_json::json!({ "ok": true, "version": openmesh_core::CRATE_VERSION }),
+        );
+    }
+    if path.starts_with("/api/") && !authorized(request, &state.token) {
+        return HttpResponse::error(401, "unauthorized");
+    }
+
+    match (request.method.as_str(), path) {
+        ("GET", "/api/status") => {
+            let snapshot = state.shared.snapshot.read().await;
+            HttpResponse::json(200, crate::json::json_value(&snapshot.status))
+        }
+        ("GET", "/api/config") => {
+            let snapshot = state.shared.snapshot.read().await;
+            HttpResponse::json(200, crate::json::json_value(&snapshot.config))
+        }
+        ("GET", "/api/nodes") => {
+            let snapshot = state.shared.snapshot.read().await;
+            HttpResponse::json(
+                200,
+                serde_json::to_value(&snapshot.nodes).unwrap_or_default(),
+            )
+        }
+        ("GET", "/api/contacts") => match runtime::contacts_json(&state.shared.store) {
+            Ok(contacts) => HttpResponse::json(200, crate::json::json_value(&contacts)),
+            Err(e) => internal_error(e),
+        },
+        ("GET", "/api/channels") => match runtime::channels_json(&state.shared.store) {
+            Ok(channels) => HttpResponse::json(200, crate::json::json_value(&channels)),
+            Err(e) => internal_error(e),
+        },
+        ("GET", "/api/messages") => {
+            let peer = request.query_param("peer");
+            let limit = request
+                .query_param("limit")
+                .and_then(|v| v.parse::<usize>().ok())
+                .unwrap_or(100);
+            let before_ms = request
+                .query_param("before_ms")
+                .and_then(|v| v.parse::<u64>().ok());
+            match runtime::messages_payload(&state.shared.store, peer, None, before_ms, limit) {
+                Ok(payload) => HttpResponse::json(200, payload),
+                Err(e) => HttpResponse::error(400, &format!("{e}")),
+            }
+        }
+        ("POST", "/api/attachments") => upload_attachment(request, state).await,
+        ("GET", "/") => serve_static(request, state).await,
+        ("GET", _) if path.starts_with("/api/nodes/") => {
+            let id = &path["/api/nodes/".len()..];
+            let snapshot = state.shared.snapshot.read().await;
+            match snapshot.nodes.iter().find(|n| n.node_id == id) {
+                Some(node) => HttpResponse::json(200, crate::json::json_value(node)),
+                None => HttpResponse::error(404, "not_found"),
+            }
+        }
+        ("GET", _) if path.starts_with("/api/messages/channel/") => {
+            let channel = &path["/api/messages/channel/".len()..];
+            let limit = request
+                .query_param("limit")
+                .and_then(|v| v.parse::<usize>().ok())
+                .unwrap_or(100);
+            let before_ms = request
+                .query_param("before_ms")
+                .and_then(|v| v.parse::<u64>().ok());
+            match runtime::messages_payload(
+                &state.shared.store,
+                None,
+                Some(channel),
+                before_ms,
+                limit,
+            ) {
+                Ok(payload) => HttpResponse::json(200, payload),
+                Err(e) => HttpResponse::error(400, &format!("{e}")),
+            }
+        }
+        ("GET", _) if path.starts_with("/api/attachments/") => {
+            let id = &path["/api/attachments/".len()..];
+            match state.shared.attachments.read(id).await {
+                Ok(Some((meta, bytes))) => HttpResponse::bytes(200, meta.mime, bytes),
+                Ok(None) => HttpResponse::error(404, "not_found"),
+                Err(e) => internal_error(e),
+            }
+        }
+        ("GET", _) if path.starts_with("/api/") => HttpResponse::error(404, "not_found"),
+        ("GET", _) | ("HEAD", _) => serve_static(request, state).await,
+        _ if path.starts_with("/api/") => HttpResponse::error(405, "method_not_allowed"),
+        _ => HttpResponse::error(404, "not_found"),
+    }
+}
+
+fn internal_error(error: anyhow::Error) -> HttpResponse {
+    tracing::warn!(%error, "request failed");
+    HttpResponse::json(
+        500,
+        serde_json::json!({ "error": "internal", "message": error.to_string() }),
+    )
+}
+
+async fn upload_attachment(request: &HttpRequest, state: &Arc<HttpState>) -> HttpResponse {
+    if request.body.len() > MAX_ATTACHMENT_BYTES {
+        return HttpResponse::error(413, "too_large");
+    }
+    let Some(content_type) = request.header("content-type") else {
+        return HttpResponse::json(
+            400,
+            serde_json::json!({ "error": "bad_request", "message": "Content-Type required" }),
+        );
+    };
+    let content_type = content_type
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if content_type.is_empty() {
+        return HttpResponse::json(
+            400,
+            serde_json::json!({ "error": "bad_request", "message": "Content-Type required" }),
+        );
+    }
+    let filename = request.header("x-openmesh-filename").map(|s| s.to_string());
+    let duration_ms = request
+        .header("x-openmesh-duration-ms")
+        .and_then(|v| v.parse::<u32>().ok());
+    match state
+        .shared
+        .attachments
+        .put(
+            &content_type,
+            filename.as_deref(),
+            duration_ms,
+            &request.body,
+        )
+        .await
+    {
+        Ok(meta) => HttpResponse::json(
+            200,
+            serde_json::json!({ "id": meta.id, "size": meta.size, "sha256": meta.sha256 }),
+        ),
+        Err(e) => internal_error(e),
+    }
+}
+
+async fn serve_static(request: &HttpRequest, state: &Arc<HttpState>) -> HttpResponse {
+    let Some(root) = state.web_root.as_ref() else {
+        if request.path == "/" {
+            return HttpResponse::text(
+                200,
+                format!(
+                    "OpenMesh bridge {} — API at /api/health. Build apps/web and restart with \
+                     --serve-web apps/web/dist to serve the UI.\n",
+                    openmesh_core::CRATE_VERSION
+                ),
+            );
+        }
+        return HttpResponse::error(404, "not_found");
+    };
+    let decoded = percent_decode(request.path.trim_start_matches('/'));
+    let mut relative = PathBuf::new();
+    for component in Path::new(&decoded).components() {
+        match component {
+            std::path::Component::Normal(part) => relative.push(part),
+            std::path::Component::CurDir => {}
+            _ => return HttpResponse::error(400, "bad_request"),
+        }
+    }
+    let direct = root.join(&relative);
+    let candidate = if direct.is_file() {
+        Some(direct)
+    } else {
+        // SPA fallback: unknown routes serve index.html when it exists.
+        let index = root.join("index.html");
+        index.is_file().then_some(index)
+    };
+    let Some(path) = candidate else {
+        return HttpResponse::error(404, "not_found");
+    };
+    match tokio::fs::read(&path).await {
+        Ok(bytes) => HttpResponse::bytes(200, mime_for(&path), bytes),
+        Err(e) => {
+            tracing::debug!(path = %path.display(), error = %e, "static file read failed");
+            HttpResponse::error(404, "not_found")
+        }
+    }
+}
+
+fn mime_for(path: &Path) -> &'static str {
+    match path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "html" | "htm" => "text/html; charset=utf-8",
+        "js" | "mjs" => "text/javascript; charset=utf-8",
+        "css" => "text/css; charset=utf-8",
+        "json" | "webmanifest" => "application/json",
+        "map" => "application/json",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "svg" => "image/svg+xml",
+        "webp" => "image/webp",
+        "ico" => "image/x-icon",
+        "woff" => "font/woff",
+        "woff2" => "font/woff2",
+        "ttf" => "font/ttf",
+        "wasm" => "application/wasm",
+        "txt" => "text/plain; charset=utf-8",
+        "mp3" => "audio/mpeg",
+        "ogg" | "opus" => "audio/ogg",
+        "wav" => "audio/wav",
+        _ => "application/octet-stream",
+    }
+}
+
+async fn stream_sse(mut stream: TcpStream, state: Arc<HttpState>) -> std::io::Result<()> {
+    let header = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: keep-alive\r\nX-Accel-Buffering: no\r\n\r\n";
+    stream.write_all(header.as_bytes()).await?;
+    let mut events = state.shared.events.subscribe();
+    let mut shutdown = state.shutdown.clone();
+    loop {
+        tokio::select! {
+            _ = shutdown.changed() => break,
+            event = events.recv() => match event {
+                Ok(json) => {
+                    if stream.write_all(format!("data: {json}\n\n").as_bytes()).await.is_err() {
+                        break;
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(_) => break,
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn write_response(stream: &mut TcpStream, response: HttpResponse) -> std::io::Result<()> {
+    let mut head = format!(
+        "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\
+         Access-Control-Allow-Origin: *\r\nX-Content-Type-Options: nosniff\r\n",
+        response.status,
+        reason_phrase(response.status),
+        response.content_type,
+        response.body.len()
+    );
+    for (name, value) in &response.extra_headers {
+        head.push_str(&format!("{name}: {value}\r\n"));
+    }
+    head.push_str("\r\n");
+    stream.write_all(head.as_bytes()).await?;
+    if response.status != 204 && !response.body.is_empty() {
+        stream.write_all(&response.body).await?;
+    }
+    stream.flush().await
+}
+
+/// Parsed HTTP request head, before the body is read.
+struct RequestHead {
+    consumed: usize,
+    method: String,
+    target: String,
+    headers: HashMap<String, String>,
+    content_length: usize,
+}
+
+/// Read one HTTP request (headers + body) from a connection.
+async fn read_request(
+    stream: &mut TcpStream,
+    max_total: usize,
+) -> Result<Option<HttpRequest>, ReadError> {
+    let mut buf: Vec<u8> = Vec::with_capacity(8192);
+    let mut read_buf = [0u8; 8192];
+    let mut head: Option<RequestHead> = None;
+
+    loop {
+        if head.is_none() {
+            let mut header_objs = [httparse::EMPTY_HEADER; 64];
+            let mut parsed = httparse::Request::new(&mut header_objs);
+            match parsed.parse(&buf) {
+                Ok(httparse::Status::Complete(consumed)) => {
+                    let method = parsed.method.unwrap_or("GET").to_string();
+                    let target = parsed.path.unwrap_or("/").to_string();
+                    let mut headers = HashMap::new();
+                    for header in parsed.headers {
+                        headers.insert(
+                            header.name.to_ascii_lowercase(),
+                            String::from_utf8_lossy(header.value).trim().to_string(),
+                        );
+                    }
+                    let content_length = headers
+                        .get("content-length")
+                        .and_then(|v| v.parse::<usize>().ok())
+                        .unwrap_or(0);
+                    if content_length > max_total || consumed + content_length > max_total {
+                        return Err(ReadError::TooLarge);
+                    }
+                    head = Some(RequestHead {
+                        consumed,
+                        method,
+                        target,
+                        headers,
+                        content_length,
+                    });
+                }
+                Ok(httparse::Status::Partial) => {
+                    if buf.len() > MAX_HEADER_BYTES {
+                        return Err(ReadError::TooLarge);
+                    }
+                }
+                Err(_) => return Err(ReadError::Malformed("invalid HTTP request".into())),
+            }
+        }
+        if let Some(head) = &head {
+            if buf.len() >= head.consumed + head.content_length {
+                break;
+            }
+        }
+        let read = stream
+            .read(&mut read_buf)
+            .await
+            .map_err(|_| ReadError::Io)?;
+        if read == 0 {
+            return if buf.is_empty() {
+                Ok(None)
+            } else {
+                Err(ReadError::Malformed("truncated request".into()))
+            };
+        }
+        buf.extend_from_slice(&read_buf[..read]);
+    }
+
+    let RequestHead {
+        consumed,
+        method,
+        target,
+        headers,
+        content_length,
+    } = head.ok_or_else(|| ReadError::Malformed("no request head".into()))?;
+    let body = buf[consumed..consumed + content_length].to_vec();
+    let (raw_path, query) = match target.split_once('?') {
+        Some((path, query)) => (path.to_string(), query.to_string()),
+        None => (target, String::new()),
+    };
+    let path = percent_decode(&raw_path);
+    Ok(Some(HttpRequest {
+        method,
+        path,
+        query: parse_query(&query),
+        headers,
+        body,
+    }))
+}
+
+fn parse_query(query: &str) -> HashMap<String, String> {
+    let mut out = HashMap::new();
+    for pair in query.split('&').filter(|p| !p.is_empty()) {
+        let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+        out.insert(percent_decode(key), percent_decode(value));
+    }
+    out
+}
+
+fn percent_decode(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let (Some(hi), Some(lo)) = (hex_val(bytes[i + 1]), hex_val(bytes[i + 2])) {
+                out.push(hi * 16 + lo);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn hex_val(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
+/// Resolve the web root: explicit flag, else `apps/web/dist` when the workspace is present.
+pub fn resolve_web_root(explicit: Option<PathBuf>) -> Option<PathBuf> {
+    if let Some(root) = explicit {
+        return root.is_dir().then_some(root);
+    }
+    for candidate in ["apps/web/dist", "../apps/web/dist", "../../apps/web/dist"] {
+        let path = PathBuf::from(candidate);
+        if path.join("index.html").is_file() {
+            return Some(path);
+        }
+    }
+    None
+}
+
+/// Build the small JSON response used when a client probes an unknown API path.
+pub fn api_not_found() -> HttpResponse {
+    HttpResponse::json(404, serde_json::json!({ "error": "not_found" }))
+}
+
+/// Utility used by tests and the SSE layer to create a status event envelope.
+pub fn static_event(typ: &str, data: serde_json::Value) -> String {
+    event_json(typ, Some(data))
+}
+
+/// Utility used by tests: base64 encoding of an identity as used in contact records.
+pub fn encode_identity(ident: &openmesh_core::PublicIdentity) -> String {
+    b64(&ident.to_bytes())
+}
+
+/// Utility used by tests: parse a node id from hex.
+pub fn parse_id(hex: &str) -> Option<openmesh_core::NodeId> {
+    parse_node_id(hex)
+}
+
+/// Utility used by tests and diagnostics: attach a DB path to a store.
+pub fn store_path(store: &Store) -> PathBuf {
+    store.path().to_path_buf()
+}
+
+/// Utility used by tests: produce a JSON error envelope.
+pub fn error_envelope(id: Option<&str>, code: &str, message: &str) -> String {
+    error_json(id, code, message)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn query_parsing_and_percent_decoding() {
+        let q = parse_query("peer=aabb&limit=50&name=hello%20world&token=abc");
+        assert_eq!(q.get("peer").map(|s| s.as_str()), Some("aabb"));
+        assert_eq!(q.get("limit").map(|s| s.as_str()), Some("50"));
+        assert_eq!(q.get("name").map(|s| s.as_str()), Some("hello world"));
+    }
+
+    #[test]
+    fn percent_decode_handles_utf8() {
+        assert_eq!(percent_decode("a%2Fb%3Dc"), "a/b=c");
+        assert_eq!(percent_decode("caf%C3%A9"), "café");
+        assert_eq!(percent_decode("100%"), "100%");
+    }
+
+    #[test]
+    fn constant_time_eq_matches_semantics() {
+        assert!(constant_time_eq(b"abc", b"abc"));
+        assert!(!constant_time_eq(b"abc", b"abd"));
+        assert!(!constant_time_eq(b"abc", b"ab"));
+    }
+
+    #[test]
+    fn mime_types_are_assigned() {
+        assert_eq!(
+            mime_for(Path::new("index.html")),
+            "text/html; charset=utf-8"
+        );
+        assert_eq!(
+            mime_for(Path::new("app.js")),
+            "text/javascript; charset=utf-8"
+        );
+        assert_eq!(mime_for(Path::new("x.unknown")), "application/octet-stream");
+    }
+
+    #[tokio::test]
+    async fn parses_http_get_with_query() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client = tokio::spawn(async move {
+            let mut stream = TcpStream::connect(addr).await.unwrap();
+            stream
+                .write_all(b"GET /api/status?x=1 HTTP/1.1\r\nHost: localhost\r\n\r\n")
+                .await
+                .unwrap();
+            let mut buf = Vec::new();
+            stream.read_to_end(&mut buf).await.unwrap();
+            buf
+        });
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let request = read_request(&mut socket, 1024 * 1024)
+            .await
+            .ok()
+            .flatten()
+            .unwrap();
+        assert_eq!(request.method, "GET");
+        assert_eq!(request.path, "/api/status");
+        assert_eq!(request.query.get("x").map(|s| s.as_str()), Some("1"));
+        drop(socket);
+        let response = client.await.unwrap();
+        assert!(response.is_empty());
+    }
+
+    #[tokio::test]
+    async fn parses_post_body() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let mut stream = TcpStream::connect(addr).await.unwrap();
+            stream
+                .write_all(
+                    b"POST /api/attachments HTTP/1.1\r\nHost: x\r\nContent-Type: text/plain\r\nContent-Length: 5\r\n\r\nhello",
+                )
+                .await
+                .unwrap();
+        });
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let request = read_request(&mut socket, 1024 * 1024)
+            .await
+            .ok()
+            .flatten()
+            .unwrap();
+        assert_eq!(request.method, "POST");
+        assert_eq!(request.body, b"hello");
+        assert_eq!(request.header("content-type"), Some("text/plain"));
+    }
+
+    #[test]
+    fn web_root_resolution_handles_missing() {
+        assert!(resolve_web_root(Some(PathBuf::from("/definitely/missing"))).is_none());
+    }
+}

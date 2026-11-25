@@ -1,0 +1,14 @@
+{
+  "name": "OpenMesh Heltec Wireless Tracker",
+  "version": "0.1.0",
+  "new_install_prompt_erase": true,
+  "builds": [
+    {
+      "chipFamily": "ESP32-S3",
+      "improv": false,
+      "parts": [
+        { "path": "openmesh-heltec_tracker-full.bin", "offset": 0 }
+      ]
+    }
+  ]
+}

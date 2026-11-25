@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">OpenMesh</string>
+    <string name="service_description">Keeps the OpenMesh radio companion link connected</string>
+    <string name="notification_channel_link">Radio link</string>
+    <string name="notification_channel_messages">Messages</string>
+</resources>

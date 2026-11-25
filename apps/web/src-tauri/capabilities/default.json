@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Minimal capability set for the OpenMesh desktop shell. The client talks to the local bridge over loopback HTTP/WebSocket, which does not require Tauri IPC permissions.",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}

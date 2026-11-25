@@ -8,24 +8,41 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 
+[lib]
+name = "openmesh_bridge"
+path = "src/lib.rs"
+
+[[bin]]
+name = "openmesh-bridge"
+path = "src/main.rs"
+
 [dependencies]
 openmesh-core = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-ciborium = { workspace = true }
 hex = { workspace = true }
 base64 = { workspace = true }
 tokio = { workspace = true }
 tokio-tungstenite = { workspace = true }
 futures-util = { workspace = true }
-bytes = { workspace = true }
 redb = { workspace = true }
 clap = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
-humantime = { workspace = true }
-thiserror = { workspace = true }
 anyhow = { workspace = true }
 rand = { workspace = true }
-serialport = { workspace = true }
-tokio-util = { workspace = true }
+# HTTP parsing for the hand-rolled loopback server (pure Rust; already transitively present).
+http = "1"
+httparse = "1"
+sha2 = { workspace = true }
+# SO_REUSEADDR/SO_REUSEPORT for the LAN transport (pure Rust).
+socket2 = "0.6"
+# Hardware serial transport: opt-in only so the default build needs no libudev.
+serialport = { workspace = true, optional = true }
+
+[features]
+default = []
+real-serial = ["dep:serialport"]
+
+[dev-dependencies]
+tempfile = "3"

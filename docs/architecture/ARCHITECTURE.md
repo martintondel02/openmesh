@@ -120,18 +120,18 @@ how the system is put together, why it is built this way, and what is deliberate
 
 ## 4. Key decisions
 
-The full records live in `docs/adr/`. Summary:
+The full records live in [`docs/adr/`](../adr/) (MADR format). Summary:
 
 | # | Decision | Why |
 | --- | --- | --- |
-| 1 | Build our own OMP protocol instead of speaking Reticulum | Reticulum is excellent but its link/resource machinery is heavy on MCUs, its client ecosystem is the pain point, and we need store-and-forward with tight LoRa airtime budgets. A bridge to Reticulum/LXMF is planned instead of forced compatibility. |
-| 2 | Managed flooding, not routing tables | Proven at Meshtastic scale on single-channel LoRa; zero convergence time; repeaters are trivial. Directed routing is reserved for OMP/2. |
-| 3 | Static ECDH for v1, ratchet later | One-frame DMs, no handshake, tiny overhead. Forward secrecy is scheduled for OMP/2 (needed for calls). |
-| 4 | Rust protocol core + C++ firmware + golden vectors | Rust gives memory safety, testability and the simulator; C++/PlatformIO gives reliable Arduino support for ESP32 and nRF52 and a single codebase for all boards. Vectors keep them honest. |
-| 5 | Companion-radio architecture | Apps own UI, storage, crypto for their own traffic; radios only relay/announce/store. Repeaters are cheap and battery-friendly; apps can be updated without reflashing. |
-| 6 | Web-first clients (React + Tauri) | One codebase covers web, Linux, macOS and Windows; MapLibre and MediaRecorder give maps and voice without native work. Android is native Compose for BLE/USB quality. |
-| 7 | Opus for voice, Codec2 optional | Opus is universally decodable in browsers/phones and ~7 kbps for voice is acceptable on a 1–5 kbps mesh with chunking; Codec2 700C is available for the smallest presets. |
-| 8 | AGPL-3.0 | Network copyleft keeps the mesh and every client fork open; compatible with the GPL-3.0 references we studied. |
+| 1 | [Build our own OMP protocol instead of speaking Reticulum](../adr/0001-own-protocol-vs-reticulum.md) | Reticulum is excellent but its link/resource machinery is heavy on MCUs, its client ecosystem is the pain point, and we need store-and-forward with tight LoRa airtime budgets. A bridge to Reticulum/LXMF is planned instead of forced compatibility. |
+| 2 | [Managed flooding, not routing tables](../adr/0002-managed-flooding.md) | Proven at Meshtastic scale on single-channel LoRa; zero convergence time; repeaters are trivial. Directed routing is reserved for OMP/2. |
+| 3 | [Static ECDH for v1, ratchet later](../adr/0003-static-ecdh-then-ratchet.md) | One-frame DMs, no handshake, tiny overhead. Forward secrecy is scheduled for OMP/2 (needed for calls). |
+| 4 | [Rust protocol core + C++ firmware + golden vectors](../adr/0004-rust-core-cpp-firmware-golden-vectors.md) | Rust gives memory safety, testability and the simulator; C++/PlatformIO gives reliable Arduino support for ESP32 and nRF52 and a single codebase for all boards. Vectors keep them honest. |
+| 5 | [Companion-radio architecture](../adr/0005-companion-radio-architecture.md) | Apps own UI, storage, crypto for their own traffic; radios only relay/announce/store. Repeaters are cheap and battery-friendly; apps can be updated without reflashing. |
+| 6 | [Web-first clients (React + Tauri)](../adr/0006-web-first-clients-tauri-native-android.md) | One codebase covers web, Linux, macOS and Windows; MapLibre and MediaRecorder give maps and voice without native work. Android is native Compose for BLE/USB quality. |
+| 7 | [Opus for voice, Codec2 optional](../adr/0007-media-pipeline.md) | Opus is universally decodable in browsers/phones and ~7 kbps for voice is acceptable on a 1–5 kbps mesh with chunking; Codec2 700C is available for the smallest presets. |
+| 8 | [AGPL-3.0](../adr/0008-agpl-3-0-licensing.md) | Network copyleft keeps the mesh and every client fork open; compatible with the GPL-3.0 references we studied. |
 
 ---
 

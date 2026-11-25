@@ -1,0 +1,70 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# GitHub Actions workflow for the OpenMesh firmware. Copy to .github/workflows/firmware.yml when
+# merging (kept under firmware/ci/ so the firmware workstream stays self-contained).
+#
+# Jobs:
+#   host-tests : protocol unit tests + golden-vector replay on a Linux runner (no hardware)
+#   build      : PlatformIO matrix for the four reference boards
+#   releases   : on tags, publish .uf2/.bin artefacts consumed by apps/flasher/boards.json
+name: firmware
+
+on:
+  push:
+    paths: ["firmware/**", "protocol/vectors/**", ".github/workflows/firmware.yml"]
+  pull_request:
+    paths: ["firmware/**", "protocol/vectors/**"]
+  workflow_dispatch:
+
+jobs:
+  host-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Host protocol tests (codec, crypto, engine, vectors)
+        run: ./firmware/ci/host_tests.sh
+      - name: PlatformIO native test environment
+        run: |
+          python -m pip install -U platformio
+          pio test -d firmware -e native
+      - name: Upload test log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: host-test-log
+          path: firmware/.pio/build/native/**/*.log
+          if-no-files-found: ignore
+
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        env: [t1000e, rak4631_solar, seeed_solar, heltec_tracker]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Cache PlatformIO
+        uses: actions/cache@v4
+        with:
+          path: ~/.platformio
+          key: pio-${{ matrix.env }}-${{ hashFiles('firmware/platformio.ini') }}
+      - name: Install PlatformIO
+        run: python -m pip install -U platformio
+      - name: Build ${{ matrix.env }}
+        run: pio run -d firmware -e ${{ matrix.env }}
+      - name: Collect artefacts
+        run: |
+          mkdir -p dist
+          find firmware/.pio/build/${{ matrix.env }} -maxdepth 1 \
+            \( -name '*.bin' -o -name '*.hex' -o -name '*.uf2' -o -name 'firmware.elf' \) \
+            -exec cp {} dist/ \;
+          ls -la dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: firmware-${{ matrix.env }}
+          path: dist/

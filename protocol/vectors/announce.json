@@ -1,0 +1,138 @@
+{
+  "cases": [
+    {
+      "announce": {
+        "caps": 5,
+        "class": "client",
+        "class_u8": 0,
+        "hops_ui_only": 0,
+        "ident": {
+          "dh_pk_hex": "c10b900e1af41bbebe7265d96cb321ae2f829afad42809b5c2fb35c703083b5d",
+          "node_id_hex": "64a0f52274a2ccb4",
+          "public_identity_hex": "64a0f52274a2ccb4d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737c10b900e1af41bbebe7265d96cb321ae2f829afad42809b5c2fb35c703083b5d",
+          "sign_pk_hex": "d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737"
+        },
+        "interval_s": 1800,
+        "name": "alice",
+        "timestamp_ms": 1700000000000,
+        "version": 1
+      },
+      "body_hex": "01000005000507080000018bcfe5680064a0f52274a2ccb4d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737c10b900e1af41bbebe7265d96cb321ae2f829afad42809b5c2fb35c703083b5d616c6963653b3e576bc9ee91f36a78b5fab55f633d23acd8c79525a66a2e01da27a711e6b526a49455452b5c4101c3d76479c1e22bc557c09569316cc8abdbd0f589243e09",
+      "body_len": 157,
+      "body_without_signature_hex": "01000005000507080000018bcfe5680064a0f52274a2ccb4d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737c10b900e1af41bbebe7265d96cb321ae2f829afad42809b5c2fb35c703083b5d616c696365",
+      "body_without_signature_len": 93,
+      "frame_ttl8_hex": "208064a0f52274a2ccb4ffffffffffffffff0000002a01000005000507080000018bcfe5680064a0f52274a2ccb4d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737c10b900e1af41bbebe7265d96cb321ae2f829afad42809b5c2fb35c703083b5d616c6963653b3e576bc9ee91f36a78b5fab55f633d23acd8c79525a66a2e01da27a711e6b526a49455452b5c4101c3d76479c1e22bc557c09569316cc8abdbd0f589243e09",
+      "name": "alice_client",
+      "relayed_ttl7": {
+        "frame_hex": "207064a0f52274a2ccb4ffffffffffffffff0000002a01000005000507080000018bcfe5680064a0f52274a2ccb4d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737c10b900e1af41bbebe7265d96cb321ae2f829afad42809b5c2fb35c703083b5d616c6963653b3e576bc9ee91f36a78b5fab55f633d23acd8c79525a66a2e01da27a711e6b526a49455452b5c4101c3d76479c1e22bc557c09569316cc8abdbd0f589243e09",
+        "hops_derived": 1,
+        "note": "hop count = ANNOUNCE_TTL(8) - frame.ttl; relays never modify the signed body."
+      },
+      "seq": 42,
+      "signature_hex": "3b3e576bc9ee91f36a78b5fab55f633d23acd8c79525a66a2e01da27a711e6b526a49455452b5c4101c3d76479c1e22bc557c09569316cc8abdbd0f589243e09",
+      "src_hex": "64a0f52274a2ccb4"
+    },
+    {
+      "announce": {
+        "caps": 515,
+        "class": "repeater",
+        "class_u8": 1,
+        "hops_ui_only": 0,
+        "ident": {
+          "dh_pk_hex": "8a47d0da1bf2299af777986956f3e529541fef11348a42ab884a366cae59b325",
+          "node_id_hex": "1d7bf3da583cced4",
+          "public_identity_hex": "1d7bf3da583cced4204040e364c10f2bec9c1fe500a1cd4c247c89d650a01ed7e82caba867877c218a47d0da1bf2299af777986956f3e529541fef11348a42ab884a366cae59b325",
+          "sign_pk_hex": "204040e364c10f2bec9c1fe500a1cd4c247c89d650a01ed7e82caba867877c21"
+        },
+        "interval_s": 3600,
+        "name": "solar-ridge",
+        "timestamp_ms": 1700000123456,
+        "version": 1
+      },
+      "body_hex": "01010203000b0e100000018bcfe74a401d7bf3da583cced4204040e364c10f2bec9c1fe500a1cd4c247c89d650a01ed7e82caba867877c218a47d0da1bf2299af777986956f3e529541fef11348a42ab884a366cae59b325736f6c61722d7269646765f2b4aa360328151268a5d903977541751831b3fff8799585be79f15204a04b5225eed429aff23aa9d691f958dc3725a6fc28c3242bbd5495e621d8740fa35f0c",
+      "body_len": 163,
+      "body_without_signature_hex": "01010203000b0e100000018bcfe74a401d7bf3da583cced4204040e364c10f2bec9c1fe500a1cd4c247c89d650a01ed7e82caba867877c218a47d0da1bf2299af777986956f3e529541fef11348a42ab884a366cae59b325736f6c61722d7269646765",
+      "body_without_signature_len": 99,
+      "frame_ttl8_hex": "20801d7bf3da583cced4ffffffffffffffff0000002b01010203000b0e100000018bcfe74a401d7bf3da583cced4204040e364c10f2bec9c1fe500a1cd4c247c89d650a01ed7e82caba867877c218a47d0da1bf2299af777986956f3e529541fef11348a42ab884a366cae59b325736f6c61722d7269646765f2b4aa360328151268a5d903977541751831b3fff8799585be79f15204a04b5225eed429aff23aa9d691f958dc3725a6fc28c3242bbd5495e621d8740fa35f0c",
+      "name": "solar_ridge_repeater",
+      "relayed_ttl7": {
+        "frame_hex": "20701d7bf3da583cced4ffffffffffffffff0000002b01010203000b0e100000018bcfe74a401d7bf3da583cced4204040e364c10f2bec9c1fe500a1cd4c247c89d650a01ed7e82caba867877c218a47d0da1bf2299af777986956f3e529541fef11348a42ab884a366cae59b325736f6c61722d7269646765f2b4aa360328151268a5d903977541751831b3fff8799585be79f15204a04b5225eed429aff23aa9d691f958dc3725a6fc28c3242bbd5495e621d8740fa35f0c",
+        "hops_derived": 1,
+        "note": "hop count = ANNOUNCE_TTL(8) - frame.ttl; relays never modify the signed body."
+      },
+      "seq": 43,
+      "signature_hex": "f2b4aa360328151268a5d903977541751831b3fff8799585be79f15204a04b5225eed429aff23aa9d691f958dc3725a6fc28c3242bbd5495e621d8740fa35f0c",
+      "src_hex": "1d7bf3da583cced4"
+    },
+    {
+      "announce": {
+        "caps": 4,
+        "class": "tracker",
+        "class_u8": 4,
+        "hops_ui_only": 0,
+        "ident": {
+          "dh_pk_hex": "75a37a4166176efcf054717076a6a55d3a537c35bdca753a590e498b396d0f0d",
+          "node_id_hex": "77f10103d66b7ce0",
+          "public_identity_hex": "77f10103d66b7ce066cd608b928b88e50e0efeaa33faf1c43cefe07294b0b87e9fe0aba6a3cf763375a37a4166176efcf054717076a6a55d3a537c35bdca753a590e498b396d0f0d",
+          "sign_pk_hex": "66cd608b928b88e50e0efeaa33faf1c43cefe07294b0b87e9fe0aba6a3cf7633"
+        },
+        "interval_s": 1800,
+        "name": "",
+        "timestamp_ms": 1,
+        "version": 1
+      },
+      "body_hex": "0104000400000708000000000000000177f10103d66b7ce066cd608b928b88e50e0efeaa33faf1c43cefe07294b0b87e9fe0aba6a3cf763375a37a4166176efcf054717076a6a55d3a537c35bdca753a590e498b396d0f0d1f28f45de351b4cb2dee7871227ea85b9692087e28488e5aefb7354a7d9ec7e9d114f4927b010fd12e79e6e295c1af6aafb80e6c47c0508ed85464cfb95ea100",
+      "body_len": 152,
+      "body_without_signature_hex": "0104000400000708000000000000000177f10103d66b7ce066cd608b928b88e50e0efeaa33faf1c43cefe07294b0b87e9fe0aba6a3cf763375a37a4166176efcf054717076a6a55d3a537c35bdca753a590e498b396d0f0d",
+      "body_without_signature_len": 88,
+      "frame_ttl8_hex": "208077f10103d66b7ce0ffffffffffffffff000000010104000400000708000000000000000177f10103d66b7ce066cd608b928b88e50e0efeaa33faf1c43cefe07294b0b87e9fe0aba6a3cf763375a37a4166176efcf054717076a6a55d3a537c35bdca753a590e498b396d0f0d1f28f45de351b4cb2dee7871227ea85b9692087e28488e5aefb7354a7d9ec7e9d114f4927b010fd12e79e6e295c1af6aafb80e6c47c0508ed85464cfb95ea100",
+      "name": "empty_name_tracker",
+      "relayed_ttl7": {
+        "frame_hex": "207077f10103d66b7ce0ffffffffffffffff000000010104000400000708000000000000000177f10103d66b7ce066cd608b928b88e50e0efeaa33faf1c43cefe07294b0b87e9fe0aba6a3cf763375a37a4166176efcf054717076a6a55d3a537c35bdca753a590e498b396d0f0d1f28f45de351b4cb2dee7871227ea85b9692087e28488e5aefb7354a7d9ec7e9d114f4927b010fd12e79e6e295c1af6aafb80e6c47c0508ed85464cfb95ea100",
+        "hops_derived": 1,
+        "note": "hop count = ANNOUNCE_TTL(8) - frame.ttl; relays never modify the signed body."
+      },
+      "seq": 1,
+      "signature_hex": "1f28f45de351b4cb2dee7871227ea85b9692087e28488e5aefb7354a7d9ec7e9d114f4927b010fd12e79e6e295c1af6aafb80e6c47c0508ed85464cfb95ea100",
+      "src_hex": "77f10103d66b7ce0"
+    }
+  ],
+  "comment": "PROTOCOL.md §6 binary announce. signature = Ed25519(sk, \"openmesh/v1/announce\" || src(8) || seq(4 BE) || body_without_signature). `hops` is NOT on the wire (offset 4 is reserved zero); receivers derive hops = 8 - frame.ttl.",
+  "generated_by": "openmesh-core",
+  "max_body_len": 184,
+  "name_max": 32,
+  "prefix_len": 88,
+  "reject_cases": [
+    {
+      "body_hex": "01000005000507080000018bcfe5680064a0f52274a2ccb4d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737c10b900e1af41bbebe7265d96cb321ae2f829afad42809b5c2fb35c703083b5d616c6963653a3e576bc9ee91f36a78b5fab55f633d23acd8c79525a66a2e01da27a711e6b526a49455452b5c4101c3d76479c1e22bc557c09569316cc8abdbd0f589243e09",
+      "error": "Signature",
+      "name": "tampered_signature",
+      "seq": 42,
+      "src_hex": "64a0f52274a2ccb4"
+    },
+    {
+      "body_hex": "01000005010507080000018bcfe5680064a0f52274a2ccb4d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737c10b900e1af41bbebe7265d96cb321ae2f829afad42809b5c2fb35c703083b5d616c6963653b3e576bc9ee91f36a78b5fab55f633d23acd8c79525a66a2e01da27a711e6b526a49455452b5c4101c3d76479c1e22bc557c09569316cc8abdbd0f589243e09",
+      "error": "Malformed",
+      "name": "reserved_byte_nonzero",
+      "seq": 42,
+      "src_hex": "64a0f52274a2ccb4"
+    },
+    {
+      "body_hex": "01000005000507080000018bcfe5680064a0f52274a2ccb4d04ab232742bb4ab3a1368bd4615e4e6",
+      "error": "BufferTooSmall",
+      "name": "truncated",
+      "seq": 42,
+      "src_hex": "64a0f52274a2ccb4"
+    },
+    {
+      "body_hex": "02000005000507080000018bcfe5680064a0f52274a2ccb4d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737c10b900e1af41bbebe7265d96cb321ae2f829afad42809b5c2fb35c703083b5d616c6963653b3e576bc9ee91f36a78b5fab55f633d23acd8c79525a66a2e01da27a711e6b526a49455452b5c4101c3d76479c1e22bc557c09569316cc8abdbd0f589243e09",
+      "error": "UnsupportedVersion",
+      "name": "wrong_version",
+      "seq": 42,
+      "src_hex": "64a0f52274a2ccb4"
+    }
+  ],
+  "signature_len": 64,
+  "spec": "omp/1",
+  "version": 1
+}

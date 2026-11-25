@@ -18,8 +18,13 @@ pub struct DedupCache {
 }
 
 impl DedupCache {
+    /// Create a cache holding at most `capacity` entries for `ttl_ms` milliseconds.
     pub fn new(capacity: usize, ttl_ms: u64) -> Self {
-        Self { capacity, ttl_ms, entries: HashMap::with_capacity(capacity) }
+        Self {
+            capacity,
+            ttl_ms,
+            entries: HashMap::with_capacity(capacity),
+        }
     }
 
     /// Insert `(src, seq)`. Returns `true` when the frame is new (i.e. should be processed).
@@ -42,15 +47,19 @@ impl DedupCache {
         true
     }
 
+    /// Drop entries that have not been seen within the configured TTL.
     pub fn prune(&mut self, now_ms: u64) {
         let ttl = self.ttl_ms;
-        self.entries.retain(|_, seen| now_ms.saturating_sub(*seen) <= ttl);
+        self.entries
+            .retain(|_, seen| now_ms.saturating_sub(*seen) <= ttl);
     }
 
+    /// Number of cached entries.
     pub fn len(&self) -> usize {
         self.entries.len()
     }
 
+    /// Whether the container is empty.
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
@@ -66,6 +75,7 @@ pub struct AirtimeBudget {
 }
 
 impl AirtimeBudget {
+    /// Create a budget that refills `refill_per_min_ms` milliseconds of airtime per minute.
     pub fn new(refill_per_min_ms: u32) -> Self {
         Self {
             capacity_ms: refill_per_min_ms,
@@ -94,6 +104,7 @@ impl AirtimeBudget {
         }
     }
 
+    /// Remaining airtime budget in milliseconds after refilling to `now_ms`.
     pub fn available_ms(&mut self, now_ms: u64) -> f64 {
         self.refill(now_ms);
         self.tokens_ms
@@ -105,6 +116,7 @@ impl AirtimeBudget {
 pub struct RouteTable;
 
 impl RouteTable {
+    /// Whether the container is empty.
     pub fn is_empty(&self) -> bool {
         true
     }

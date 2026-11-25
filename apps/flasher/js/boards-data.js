@@ -1,0 +1,83 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Offline fallback copy of boards.json. Keep the two in sync; the CI/static-serve path fetches
+// boards.json so release URLs can be updated without rebuilding the page.
+window.OPENMESH_BOARDS = {
+  schema: 1,
+  release: {
+    tag: "v0.1.0",
+    base_url: "https://github.com/martintondel02/openmesh/releases/download/v0.1.0",
+    notes:
+      "Firmware artefacts are produced by the firmware CI matrix (firmware/ci/build.yml) and attached to GitHub releases. Point base_url at your own release or a local directory when testing."
+  },
+  boards: [
+    {
+      id: "t1000e",
+      name: "Seeed SenseCAP T1000-E",
+      tagline: "Credit-card GPS tracker for the mesh",
+      mcu: "nRF52840",
+      radio: "LR1110",
+      gnss: "Airoha GNSS",
+      flash_mb: 1,
+      battery: "700 mAh LiPo",
+      antenna: "internal",
+      role: "Tracker / client",
+      role_class: "tracker",
+      flash: "uf2",
+      uf2: "openmesh-t1000e.uf2",
+      features: ["GNSS position sharing", "BLE + USB companion", "IP65, no screen"],
+      notes: "Double-tap the side button to enter the Adafruit UF2 bootloader; the drive appears as T1000E."
+    },
+    {
+      id: "rak4631_solar",
+      name: "RAK WisBlock 4631 solar node",
+      tagline: "Ridge-top repeater with months of autonomy",
+      mcu: "nRF52840",
+      radio: "SX1262",
+      gnss: "optional (RAK1910)",
+      flash_mb: 1,
+      battery: "solar + 18650 / LiPo pack",
+      antenna: "external (SMA/IPEX)",
+      role: "Repeater",
+      role_class: "repeater",
+      flash: "uf2",
+      uf2: "openmesh-rak4631_solar.uf2",
+      features: ["Managed flood relay", "Store-and-forward queue", "Solar enclosure"],
+      notes: "Flash with the Adafruit UF2 bootloader (double reset). For a bare RAK4631 without a UF2 bootloader use nrfutil or a J-Link — see docs/hardware/boards.md."
+    },
+    {
+      id: "seeed_solar",
+      name: "Seeed SenseCAP Solar Node P1",
+      tagline: "Solar gateway for long-range coverage",
+      mcu: "nRF52840",
+      radio: "SX1262",
+      gnss: "L76KB",
+      flash_mb: 2,
+      battery: "solar + internal pack",
+      antenna: "IPX external",
+      role: "Repeater / gateway",
+      role_class: "repeater",
+      flash: "uf2",
+      uf2: "openmesh-seeed_solar.uf2",
+      features: ["Solar + GNSS", "Store-and-forward", "IP66 enclosure"],
+      notes: "Double reset to enter UF2 bootloader (drive SEEEDSOLAR)."
+    },
+    {
+      id: "heltec_tracker",
+      name: "Heltec Wireless Tracker",
+      tagline: "ESP32-S3 tracker with screen and WiFi",
+      mcu: "ESP32-S3",
+      radio: "SX1262",
+      gnss: "L76K / UC6580",
+      flash_mb: 8,
+      battery: "USB / LiPo",
+      antenna: "IPEX external",
+      role: "Tracker / client",
+      role_class: "tracker",
+      flash: "web-serial",
+      manifest: "manifests/heltec_tracker.json",
+      chip_family: "ESP32-S3",
+      features: ['WebSerial flashing', '0.96" TFT', "WiFi + BLE"],
+      notes: "Flashing replaces the Heltec factory firmware. Hold BOOT while plugging in if the page cannot connect."
+    }
+  ]
+};

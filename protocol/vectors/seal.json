@@ -1,0 +1,91 @@
+{
+  "body_layouts": [
+    {
+      "body_hex": "011122334464a0f52274a2ccb4d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737c10b900e1af41bbebe7265d96cb321ae2f829afad42809b5c2fb35c703083b5d000102030405060708090a0b9d0cb569153543c4636200bde5ff6324efac337d891d788eb5cb",
+      "identity_hex": "64a0f52274a2ccb4d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737c10b900e1af41bbebe7265d96cb321ae2f829afad42809b5c2fb35c703083b5d",
+      "msg_ref": 287454020,
+      "name": "data_with_identity_hint",
+      "payload_flags": 1,
+      "sealed_hex": "000102030405060708090a0b9d0cb569153543c4636200bde5ff6324efac337d891d788eb5cb"
+    },
+    {
+      "body_hex": "0011223344000102030405060708090a0b9d0cb569153543c4636200bde5ff6324efac337d891d788eb5cb",
+      "msg_ref": 287454020,
+      "name": "data_without_identity",
+      "payload_flags": 0,
+      "sealed_hex": "000102030405060708090a0b9d0cb569153543c4636200bde5ff6324efac337d891d788eb5cb"
+    },
+    {
+      "body_hex": "02deadbeef000102030405060708090a0b9d0cb569153543c4636200bde5ff6324efac337d891d788eb5cb",
+      "msg_ref": 3735928559,
+      "name": "ack_body",
+      "payload_flags": 2,
+      "sealed_hex": "000102030405060708090a0b9d0cb569153543c4636200bde5ff6324efac337d891d788eb5cb"
+    },
+    {
+      "body_hex": "0401020304000102030405060708090a0b9d0cb569153543c4636200bde5ff6324efac337d891d788eb5cb",
+      "msg_ref": 16909060,
+      "name": "manifest_body",
+      "payload_flags": 4,
+      "sealed_hex": "000102030405060708090a0b9d0cb569153543c4636200bde5ff6324efac337d891d788eb5cb"
+    }
+  ],
+  "channel": [
+    {
+      "aad_hex": "210164a0f52274a2ccb4ccae429b5963124500000008",
+      "channel_id_hex": "ccae429b59631245",
+      "channel_name": "family",
+      "expect_open_ok": true,
+      "name": "family_group_plaintext",
+      "nonce_prefix_hex": "000102030405060708090a0b",
+      "plaintext_hex": "67726f757020706c61696e74657874",
+      "psk_hex": "2121212121212121212121212121212121212121212121212121212121212121",
+      "sealed_hex": "000102030405060708090a0b3f0247385a7e223d9b002764f1b5fd7fa99330c705e1b94adeddb5415cca1f"
+    }
+  ],
+  "comment": "PROTOCOL.md §5. nonce = nonce_prefix(12) || 0^12; AAD = 22-byte header with the TTL nibble cleared. Sealed payload = nonce_prefix || ct || tag. Fixed nonce prefixes are TEST-ONLY.",
+  "dm": [
+    {
+      "aad_hex": "210364a0f52274a2ccb41d7bf3da583cced400000007",
+      "expect_open_ok": true,
+      "frame_header": {
+        "dst_hex": "1d7bf3da583cced4",
+        "flags": 3,
+        "seq": 7,
+        "src_hex": "64a0f52274a2ccb4",
+        "ttl": 5,
+        "type": 1
+      },
+      "name": "alice_to_bob_hello",
+      "nonce_prefix_hex": "000102030405060708090a0b",
+      "note": "aad_hex[1] has the TTL nibble cleared: flags byte only, here 0x03.",
+      "plaintext_hex": "68656c6c6f206d657368",
+      "public_identity_a_hex": "64a0f52274a2ccb4d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737c10b900e1af41bbebe7265d96cb321ae2f829afad42809b5c2fb35c703083b5d",
+      "public_identity_b_hex": "1d7bf3da583cced4204040e364c10f2bec9c1fe500a1cd4c247c89d650a01ed7e82caba867877c218a47d0da1bf2299af777986956f3e529541fef11348a42ab884a366cae59b325",
+      "sealed_hex": "000102030405060708090a0b9d0cb569153543c4636200bde5ff6324efac337d891d788eb5cb",
+      "seed_a_hex": "1111111111111111111111111111111111111111111111111111111111111111",
+      "seed_b_hex": "1212121212121212121212121212121212121212121212121212121212121212"
+    }
+  ],
+  "dm_empty_plaintext": [
+    {
+      "aad_hex": "210364a0f52274a2ccb41d7bf3da583cced400000007",
+      "expect_open_ok": true,
+      "name": "empty_payload",
+      "nonce_prefix_hex": "000102030405060708090a0b",
+      "plaintext_hex": "",
+      "sealed_hex": "000102030405060708090a0b0d825e71f2533a43612398e0e9cd4d23"
+    }
+  ],
+  "generated_by": "openmesh-core",
+  "negative": [
+    {
+      "aad_hex": "210364a0f52274a2ccb41d7bf3da583cced400000007",
+      "expect_open_error": "Decrypt",
+      "name": "tampered_ciphertext",
+      "sealed_hex": "000102030405060708090a0b9d0cb569153543c4636200bde5ff6324efac337d891d788eb534"
+    }
+  ],
+  "spec": "omp/1",
+  "version": 1
+}

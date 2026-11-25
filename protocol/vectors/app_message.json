@@ -1,0 +1,116 @@
+{
+  "ack": [
+    {
+      "ack": {
+        "kind": "delivered",
+        "msg_id": 42,
+        "timestamp_ms": 1700000100000
+      },
+      "cbor_hex": "a3646b696e646964656c697665726564666d73675f6964182a6c74696d657374616d705f6d731b0000018bcfe6eea0",
+      "name": "delivered"
+    },
+    {
+      "ack": {
+        "bitmap": 248,
+        "kind": "resource_window",
+        "msg_id": 42,
+        "next_expected": 3,
+        "res_id": 16909060,
+        "timestamp_ms": 1700000100000
+      },
+      "bitmap_note": "bit 0 = chunk next_expected+1 = chunk 4; bits 3..7 set means chunks 7,8,9,10,11 received.",
+      "cbor_hex": "a6646b696e646f7265736f757263655f77696e646f77666d73675f6964182a667265735f69641a010203046d6e6578745f657870656374656403666269746d617018f86c74696d657374616d705f6d731b0000018bcfe6eea0",
+      "name": "resource_window"
+    }
+  ],
+  "cases": [
+    {
+      "cbor_hex": "a5626964182a646b696e6464746578746a73656e745f61745f6d731b0000018bcfe5680064746578746a68656c6c6f206d657368687265706c795f746f1829",
+      "message": {
+        "id": 42,
+        "kind": "text",
+        "reply_to": 41,
+        "sent_at_ms": 1700000000000,
+        "text": "hello mesh"
+      },
+      "name": "text_with_reply"
+    },
+    {
+      "cbor_hex": "a462696407646b696e6468706f736974696f6e6a73656e745f61745f6d731b0000018bcfe569f468706f736974696f6ea7666c61745f65371a039235e4666c6f6e5f65371a00a410c865616c745f6d182d6a61636375726163795f6d086a73706565645f636d5f7318786b68656164696e675f64656718b46c74696d657374616d705f6d731b0000018bcfe56800",
+      "message": {
+        "id": 7,
+        "kind": "position",
+        "position": {
+          "accuracy_m": 8,
+          "alt_m": 45,
+          "heading_deg": 180,
+          "lat_e7": 59913700,
+          "lon_e7": 10752200,
+          "speed_cm_s": 120,
+          "timestamp_ms": 1700000000000
+        },
+        "sent_at_ms": 1700000000500
+      },
+      "name": "position"
+    },
+    {
+      "cbor_hex": "a462696408646b696e646974656c656d657472796a73656e745f61745f6d731b0000018bcfe56be86974656c656d65747279a96c74696d657374616d705f6d731b0000018bcfe56be86a626174746572795f6d76190f8c6b626174746572795f706374185268757074696d655f731a000151806f61697274696d655f757365645f6d7319a4106972785f6672616d657318f06974785f6672616d657318786d74656d70657261747572655f631568736f6c61725f6d761913ec",
+      "message": {
+        "id": 8,
+        "kind": "telemetry",
+        "sent_at_ms": 1700000001000,
+        "telemetry": {
+          "airtime_used_ms": 42000,
+          "battery_mv": 3980,
+          "battery_pct": 82,
+          "rx_frames": 240,
+          "solar_mv": 5100,
+          "temperature_c": 21,
+          "timestamp_ms": 1700000001000,
+          "tx_frames": 120,
+          "uptime_s": 86400
+        }
+      },
+      "name": "telemetry"
+    },
+    {
+      "cbor_hex": "a462696409646b696e646a6174746163686d656e746a73656e745f61745f6d731b0000018bcfe56fd06a6174746163686d656e74a8667265735f69641a01020304646d696d656a696d6167652f6a7065676473697a65191400667368613235365820ec40eca06082f8630d5caa939e6289d963b6a688f9664a8d32a51451359b00d16b6368756e6b5f627974657318b46b6368756e6b5f636f756e74181d6b6475726174696f6e5f6d73f6646e616d6569747261696c2e6a7067",
+      "message": {
+        "attachment": {
+          "chunk_bytes": 180,
+          "chunk_count": 29,
+          "mime": "image/jpeg",
+          "name": "trail.jpg",
+          "res_id": 16909060,
+          "sha256_hex": "ec40eca06082f8630d5caa939e6289d963b6a688f9664a8d32a51451359b00d1",
+          "size": 5120
+        },
+        "id": 9,
+        "kind": "attachment",
+        "sent_at_ms": 1700000002000
+      },
+      "name": "attachment_ref"
+    }
+  ],
+  "comment": "PROTOCOL.md §5.3/§7: CBOR maps with definite lengths; field names are the CBOR map keys. Byte fields are CBOR byte strings. Optional fields are omitted when absent.",
+  "decode_errors": [
+    {
+      "cbor_hex": "a2",
+      "error": "Codec",
+      "name": "truncated"
+    },
+    {
+      "cbor_hex": "a1626964182a",
+      "error": "Codec",
+      "name": "missing_required_fields"
+    },
+    {
+      "cbor_hex": "83010203",
+      "error": "Codec",
+      "name": "not_a_map"
+    }
+  ],
+  "generated_by": "openmesh-core",
+  "spec": "omp/1",
+  "version": 1
+}

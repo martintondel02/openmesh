@@ -1,0 +1,338 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    color-scheme: dark;
+    --sidebar-width: 15.5rem;
+  }
+
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  html {
+    -webkit-text-size-adjust: 100%;
+    text-rendering: optimizeLegibility;
+  }
+
+  body {
+    @apply bg-ink-950 text-slate-200 font-sans;
+    font-size: 14px;
+    font-feature-settings: 'cv02', 'cv03', 'cv04', 'cv11', 'ss01';
+    background-image:
+      radial-gradient(1100px 520px at 12% -8%, rgba(52, 211, 153, 0.055), transparent 70%),
+      radial-gradient(900px 520px at 108% 0%, rgba(56, 189, 248, 0.045), transparent 65%);
+    background-attachment: fixed;
+    overflow: hidden;
+    overscroll-behavior: none;
+  }
+
+  ::selection {
+    background: rgba(52, 211, 153, 0.28);
+    color: #ecfdf5;
+  }
+
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: rgba(148, 163, 184, 0.22) transparent;
+  }
+
+  *::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+
+  *::-webkit-scrollbar-thumb {
+    background-color: rgba(148, 163, 184, 0.18);
+    border-radius: 9999px;
+    border: 3px solid transparent;
+    background-clip: content-box;
+  }
+
+  *::-webkit-scrollbar-thumb:hover {
+    background-color: rgba(148, 163, 184, 0.34);
+  }
+
+  *::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  :focus-visible {
+    @apply outline-none ring-2 ring-accent/60 ring-offset-2 ring-offset-ink-950;
+  }
+
+  input,
+  textarea,
+  select,
+  button {
+    font: inherit;
+    color: inherit;
+  }
+
+  textarea {
+    field-sizing: content;
+  }
+
+  button {
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  [hidden] {
+    display: none !important;
+  }
+}
+
+@layer components {
+  /* Flat, slightly lifted surface used by most cards/panels. */
+  .surface {
+    @apply rounded-2xl border border-white/[0.06] bg-ink-875/80 shadow-panel backdrop-blur-sm;
+  }
+
+  .surface-muted {
+    @apply rounded-xl border border-white/[0.05] bg-white/[0.025];
+  }
+
+  .divider {
+    @apply border-white/[0.06];
+  }
+
+  .hairline {
+    border-color: rgba(148, 163, 184, 0.1);
+  }
+
+  /* Text input shell shared by input/textarea/select. */
+  .field-shell {
+    @apply w-full rounded-xl border border-white/[0.08] bg-ink-900/80 px-3 py-2 text-[13.5px] text-slate-100
+      placeholder:text-slate-500 transition-colors duration-150;
+  }
+
+  .field-shell:hover {
+    @apply border-white/[0.13];
+  }
+
+  .field-shell:focus {
+    @apply border-accent/50 bg-ink-900 outline-none ring-2 ring-accent/15;
+  }
+
+  .field-shell:disabled {
+    @apply cursor-not-allowed opacity-50;
+  }
+
+  .btn-base {
+    @apply inline-flex select-none items-center justify-center gap-1.5 whitespace-nowrap rounded-xl font-medium
+      transition-all duration-150 active:scale-[0.985] disabled:pointer-events-none disabled:opacity-45;
+  }
+
+  .kbd {
+    @apply inline-flex min-w-[1.35rem] items-center justify-center rounded-md border border-white/10 bg-white/[0.06]
+      px-1.5 py-0.5 font-mono text-3xs font-medium text-slate-400;
+  }
+
+  /* Focus ring that only shows for keyboard users where supported. */
+  .focus-ring {
+    @apply focus-visible:ring-2 focus-visible:ring-accent/60 focus-visible:ring-offset-0;
+  }
+
+  .glass {
+    background: rgba(11, 16, 23, 0.82);
+    backdrop-filter: blur(16px) saturate(1.2);
+  }
+
+  .scroll-fade-y {
+    mask-image: linear-gradient(to bottom, transparent 0, black 12px, black calc(100% - 12px), transparent 100%);
+  }
+
+  /* MapLibre theming: the fallback style has no remote assets. */
+  .maplibregl-canvas {
+    outline: none;
+  }
+
+  .maplibregl-ctrl-group {
+    background: rgba(14, 20, 28, 0.94) !important;
+    border: 1px solid rgba(148, 163, 184, 0.14) !important;
+    border-radius: 12px !important;
+    overflow: hidden;
+    box-shadow: 0 10px 30px -18px rgba(0, 0, 0, 0.9) !important;
+  }
+
+  .maplibregl-ctrl-group button {
+    width: 32px !important;
+    height: 32px !important;
+    background: transparent !important;
+  }
+
+  .maplibregl-ctrl-group button + button {
+    border-top: 1px solid rgba(148, 163, 184, 0.12) !important;
+  }
+
+  .maplibregl-ctrl-group button:hover {
+    background: rgba(52, 211, 153, 0.12) !important;
+  }
+
+  .maplibregl-ctrl-group button span {
+    filter: invert(1) brightness(0.85);
+  }
+
+  .maplibregl-ctrl-attrib {
+    background: rgba(8, 13, 19, 0.72) !important;
+    color: #64748b !important;
+    font-size: 9px !important;
+    border-radius: 6px 0 0 0;
+  }
+
+  .maplibregl-ctrl-attrib a {
+    color: #94a3b8 !important;
+  }
+
+  /* Node / place markers are plain DOM so they work with zero glyph/tile network. */
+  .map-node-marker {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    cursor: pointer;
+    will-change: transform;
+    transition: opacity 160ms ease;
+  }
+
+  .map-node-marker__dot {
+    position: relative;
+    display: grid;
+    place-items: center;
+    width: 14px;
+    height: 14px;
+    border-radius: 9999px;
+    border: 2px solid rgba(8, 13, 19, 0.9);
+    box-shadow: 0 0 0 3px rgba(52, 211, 153, 0.12), 0 2px 8px rgba(0, 0, 0, 0.5);
+  }
+
+  .map-node-marker__label {
+    opacity: 0;
+    transform: translateX(-3px);
+    transition:
+      opacity 140ms ease,
+      transform 140ms ease;
+    max-width: 148px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 10.5px;
+    font-weight: 500;
+    color: #cbd5e1;
+    background: rgba(8, 13, 19, 0.78);
+    border: 1px solid rgba(148, 163, 184, 0.14);
+    padding: 2px 6px;
+    border-radius: 6px;
+    backdrop-filter: blur(6px);
+  }
+
+  .map-node-marker:hover .map-node-marker__label,
+  .map-node-marker[data-selected='true'] .map-node-marker__label,
+  .map-node-marker[data-always-label='true'] .map-node-marker__label {
+    opacity: 1;
+    transform: translateX(0);
+  }
+
+  .map-node-marker[data-selected='true'] .map-node-marker__dot {
+    box-shadow:
+      0 0 0 4px rgba(52, 211, 153, 0.22),
+      0 0 22px rgba(52, 211, 153, 0.55);
+  }
+
+  .map-place-label {
+    font-size: 10px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: rgba(148, 163, 184, 0.55);
+    text-shadow: 0 1px 4px rgba(0, 0, 0, 0.9);
+    pointer-events: none;
+    white-space: nowrap;
+  }
+
+  .map-self-marker {
+    width: 18px;
+    height: 18px;
+    border-radius: 9999px;
+    background: #38bdf8;
+    border: 3px solid rgba(8, 13, 19, 0.95);
+    box-shadow: 0 0 0 6px rgba(56, 189, 248, 0.18), 0 0 22px rgba(56, 189, 248, 0.6);
+  }
+
+  .map-self-pulse {
+    position: absolute;
+    inset: -6px;
+    border-radius: 9999px;
+    border: 2px solid rgba(56, 189, 248, 0.5);
+    animation: ping-slow 2.8s cubic-bezier(0, 0, 0.2, 1) infinite;
+  }
+
+  /* range input used by the compression slider */
+  input[type='range'].slider {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 100%;
+    height: 4px;
+    border-radius: 9999px;
+    background: linear-gradient(
+      to right,
+      #34d399 0%,
+      #34d399 var(--slider-progress, 50%),
+      rgba(148, 163, 184, 0.18) var(--slider-progress, 50%),
+      rgba(148, 163, 184, 0.18) 100%
+    );
+    outline: none;
+  }
+
+  input[type='range'].slider::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 16px;
+    height: 16px;
+    border-radius: 9999px;
+    background: #ecfdf5;
+    border: 2px solid #059669;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.5);
+    cursor: pointer;
+  }
+
+  input[type='range'].slider::-moz-range-thumb {
+    width: 14px;
+    height: 14px;
+    border-radius: 9999px;
+    background: #ecfdf5;
+    border: 2px solid #059669;
+    cursor: pointer;
+  }
+}
+
+@layer utilities {
+  .safe-bottom {
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+  }
+
+  .tap-none {
+    touch-action: manipulation;
+  }
+
+  .no-scrollbar {
+    scrollbar-width: none;
+  }
+
+  .no-scrollbar::-webkit-scrollbar {
+    display: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

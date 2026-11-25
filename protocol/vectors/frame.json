@@ -1,0 +1,180 @@
+{
+  "broadcast_hex": "ffffffffffffffff",
+  "comment": "PROTOCOL.md §4: 22-byte header, big-endian, max 240 bytes. `aad_hex` is the header with the TTL nibble cleared. All byte strings are lowercase hex.",
+  "decode": [
+    {
+      "expect": {
+        "aad_hex": "210164a0f52274a2ccb41d7bf3da583cced411223344",
+        "body_hex": "090807",
+        "body_len": 3,
+        "dst_hex": "1d7bf3da583cced4",
+        "flag_names": [
+          "enc"
+        ],
+        "flags": 1,
+        "frame_hex": "213164a0f52274a2ccb41d7bf3da583cced411223344090807",
+        "seq": 287454020,
+        "src_hex": "64a0f52274a2ccb4",
+        "ttl": 3,
+        "type": 1,
+        "type_name": "data"
+      },
+      "frame_hex": "213164a0f52274a2ccb41d7bf3da583cced411223344090807",
+      "name": "data_ttl3"
+    },
+    {
+      "expect": {
+        "aad_hex": "200064a0f52274a2ccb4ffffffffffffffff00000002",
+        "body_hex": "",
+        "body_len": 0,
+        "dst_hex": "ffffffffffffffff",
+        "flag_names": [],
+        "flags": 0,
+        "frame_hex": "208064a0f52274a2ccb4ffffffffffffffff00000002",
+        "seq": 2,
+        "src_hex": "64a0f52274a2ccb4",
+        "ttl": 8,
+        "type": 0,
+        "type_name": "announce"
+      },
+      "frame_hex": "208064a0f52274a2ccb4ffffffffffffffff00000002",
+      "name": "announce_broadcast_empty_body"
+    },
+    {
+      "expect": {
+        "aad_hex": "22051d7bf3da583cced464a0f52274a2ccb400000003",
+        "body_hex": "42",
+        "body_len": 1,
+        "dst_hex": "64a0f52274a2ccb4",
+        "flag_names": [
+          "enc",
+          "priority"
+        ],
+        "flags": 5,
+        "frame_hex": "22551d7bf3da583cced464a0f52274a2ccb40000000342",
+        "seq": 3,
+        "src_hex": "1d7bf3da583cced4",
+        "ttl": 5,
+        "type": 2,
+        "type_name": "ack"
+      },
+      "frame_hex": "22551d7bf3da583cced464a0f52274a2ccb40000000342",
+      "name": "ack_priority"
+    }
+  ],
+  "decode_errors": [
+    {
+      "error": "BufferTooSmall",
+      "frame_hex": "",
+      "name": "empty"
+    },
+    {
+      "error": "BufferTooSmall",
+      "frame_hex": "0102030405",
+      "name": "short_header"
+    },
+    {
+      "error": "UnsupportedVersion",
+      "frame_hex": "405164a0f52274a2ccb41d7bf3da583cced40000000101",
+      "name": "bad_version"
+    },
+    {
+      "error": "Malformed",
+      "frame_hex": "2b5164a0f52274a2ccb41d7bf3da583cced40000000101",
+      "name": "unknown_reserved_type"
+    },
+    {
+      "error": "PayloadTooLarge",
+      "frame_hex": "215164a0f52274a2ccb41d7bf3da583cced400000001010000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "name": "oversize"
+    }
+  ],
+  "encode": [
+    {
+      "aad_hex": "210364a0f52274a2ccb41d7bf3da583cced4deadbeef",
+      "body_hex": "aabbccddee",
+      "body_len": 5,
+      "dst_hex": "1d7bf3da583cced4",
+      "flag_names": [
+        "enc",
+        "ack_req"
+      ],
+      "flags": 3,
+      "frame_hex": "215364a0f52274a2ccb41d7bf3da583cced4deadbeefaabbccddee",
+      "seq": 3735928559,
+      "src_hex": "64a0f52274a2ccb4",
+      "ttl": 5,
+      "type": 1,
+      "type_name": "data"
+    },
+    {
+      "aad_hex": "200064a0f52274a2ccb4ffffffffffffffff00000001",
+      "body_hex": "09d140e7d40da2bf0889b4d8819bf4b67a03cc429796b4491923653eca0d5787ddffb6cda1c91c2e3a77d27969c460cc5a54fdd0705258cf858d13b2ef0031a6eaabbc9e4d1c19fa1c807158e5a950d4ba30edf5828bde25d02775d8a472b3842924191295092645a0e7ce84675e6f0cfed26ba083ef3b539139e636733589fac8c71492bdaae5b72b648acacaf8fd91379f95d426cd1316",
+      "body_len": 152,
+      "dst_hex": "ffffffffffffffff",
+      "flag_names": [],
+      "flags": 0,
+      "frame_hex": "208064a0f52274a2ccb4ffffffffffffffff0000000109d140e7d40da2bf0889b4d8819bf4b67a03cc429796b4491923653eca0d5787ddffb6cda1c91c2e3a77d27969c460cc5a54fdd0705258cf858d13b2ef0031a6eaabbc9e4d1c19fa1c807158e5a950d4ba30edf5828bde25d02775d8a472b3842924191295092645a0e7ce84675e6f0cfed26ba083ef3b539139e636733589fac8c71492bdaae5b72b648acacaf8fd91379f95d426cd1316",
+      "seq": 1,
+      "src_hex": "64a0f52274a2ccb4",
+      "ttl": 8,
+      "type": 0,
+      "type_name": "announce"
+    },
+    {
+      "aad_hex": "230164a0f52274a2ccb41d7bf3da583cced40000002a",
+      "body_hex": "34bfd14a9781c5803ee28461867ac192ac52eb20c20994dfcc27c2121d20c7dcd1c70bc51b8e6374ca5afd8c72b730517877b07c11472ad19b3c5524f9e2cc4991167ead72ea7bc7cd7e32666f450d40ba6622a9b30a1d6b6a1fadfa1d87a44566c752a41e285dde51e77b9202b441969b1029376af45583e19ebfa35438a54f5fa35e58acff442f1fe835cf187d4ca26defcdb4148f89385b4f6ac50f6577146a95c4c909ff23e3d9492968a9492c1d18478caf8bf25e06076a533928e91989ac0743522df90486c8b012bfac4ed912893cd0b8c52ac0032139",
+      "body_len": 218,
+      "dst_hex": "1d7bf3da583cced4",
+      "flag_names": [
+        "enc"
+      ],
+      "flags": 1,
+      "frame_hex": "233164a0f52274a2ccb41d7bf3da583cced40000002a34bfd14a9781c5803ee28461867ac192ac52eb20c20994dfcc27c2121d20c7dcd1c70bc51b8e6374ca5afd8c72b730517877b07c11472ad19b3c5524f9e2cc4991167ead72ea7bc7cd7e32666f450d40ba6622a9b30a1d6b6a1fadfa1d87a44566c752a41e285dde51e77b9202b441969b1029376af45583e19ebfa35438a54f5fa35e58acff442f1fe835cf187d4ca26defcdb4148f89385b4f6ac50f6577146a95c4c909ff23e3d9492968a9492c1d18478caf8bf25e06076a533928e91989ac0743522df90486c8b012bfac4ed912893cd0b8c52ac0032139",
+      "seq": 42,
+      "src_hex": "64a0f52274a2ccb4",
+      "ttl": 3,
+      "type": 3,
+      "type_name": "resource"
+    },
+    {
+      "aad_hex": "22051d7bf3da583cced464a0f52274a2ccb400000007",
+      "body_hex": "0102",
+      "body_len": 2,
+      "dst_hex": "64a0f52274a2ccb4",
+      "flag_names": [
+        "enc",
+        "priority"
+      ],
+      "flags": 5,
+      "frame_hex": "22551d7bf3da583cced464a0f52274a2ccb4000000070102",
+      "seq": 7,
+      "src_hex": "1d7bf3da583cced4",
+      "ttl": 5,
+      "type": 2,
+      "type_name": "ack"
+    },
+    {
+      "aad_hex": "28041d7bf3da583cced464a0f52274a2ccb401020304",
+      "body_hex": "a263696473821a112233441a5566778865636f756e7402",
+      "body_len": 23,
+      "dst_hex": "64a0f52274a2ccb4",
+      "flag_names": [
+        "priority"
+      ],
+      "flags": 4,
+      "frame_hex": "28541d7bf3da583cced464a0f52274a2ccb401020304a263696473821a112233441a5566778865636f756e7402",
+      "seq": 16909060,
+      "src_hex": "1d7bf3da583cced4",
+      "ttl": 5,
+      "type": 8,
+      "type_name": "store_offer"
+    }
+  ],
+  "generated_by": "openmesh-core",
+  "header_len": 22,
+  "max_body": 218,
+  "mtu": 240,
+  "spec": "omp/1",
+  "version": 1
+}

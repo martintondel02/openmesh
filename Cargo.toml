@@ -15,7 +15,6 @@ rust-version = "1.85"
 license = "AGPL-3.0-or-later"
 authors = ["OpenMesh contributors"]
 repository = "https://github.com/martintondel02/openmesh"
-homepage = "https://github.com/martintondel02/openmesh"
 
 [workspace.dependencies]
 # serialization
@@ -37,9 +36,7 @@ rand = "0.8"
 # async / net
 tokio = { version = "1", features = ["full"] }
 tokio-tungstenite = "0.24"
-tokio-util = { version = "0.7", features = ["codec"] }
 futures-util = "0.3"
-bytes = "1"
 # storage / serial
 redb = "2"
 serialport = { version = "4", default-features = false }
@@ -47,7 +44,6 @@ serialport = { version = "4", default-features = false }
 clap = { version = "4", features = ["derive", "env"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-humantime = "2"
 # errors
 thiserror = "2"
 anyhow = "1"
