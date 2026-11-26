@@ -1,7 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
-import maplibregl from 'maplibre-gl';
-import type { GeoJSONSource, Map as MapLibreMap } from 'maplibre-gl';
+import { AttributionControl, Map as MapLibreMap, Marker, setWorkerUrl } from 'maplibre-gl';
+import type { GeoJSONSource } from 'maplibre-gl';
+// MapLibre GL JS v6 ships its worker as a separate ES module. Vite does not rewrite the
+// worker URL inside the prebuilt package for production, so point MapLibre at the bundled
+// asset explicitly (dev and prod both work).
+import maplibreWorkerUrl from 'maplibre-gl/dist/maplibre-gl-worker.mjs?url';
 import 'maplibre-gl/dist/maplibre-gl.css';
 import {
   BatteryMedium,
@@ -62,8 +66,8 @@ export function MapScreen() {
 
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<MapLibreMap | null>(null);
-  const markersRef = useRef<maplibregl.Marker[]>([]);
-  const placeMarkersRef = useRef<Array<{ marker: maplibregl.Marker; minZoom: number }>>([]);
+  const markersRef = useRef<Marker[]>([]);
+  const placeMarkersRef = useRef<Array<{ marker: Marker; minZoom: number }>>([]);
   const onlineRef = useRef(false);
   const [mapCreated, setMapCreated] = useState(false);
   const [mapReady, setMapReady] = useState(false);
@@ -87,11 +91,16 @@ export function MapScreen() {
   const selectedNode = selectedId ? nodes[selectedId] ?? null : null;
   const selectedIsSelf = selectedId === ownNodeId;
 
+  useEffect(() => {
+    setWorkerUrl(maplibreWorkerUrl);
+  }, []);
+
+
   /* ------------------------------ map instance ------------------------------ */
 
   useEffect(() => {
     if (!containerRef.current || mapRef.current) return;
-    const map = new maplibregl.Map({
+    const map = new MapLibreMap({
       container: containerRef.current,
       style: createOfflineMapStyle(),
       center: [10.73, 59.945],
@@ -108,7 +117,7 @@ export function MapScreen() {
     setMapCreated(true);
 
     map.addControl(
-      new maplibregl.AttributionControl({
+      new AttributionControl({
         compact: true,
         customAttribution: 'Offline schematic',
       }),
@@ -117,7 +126,7 @@ export function MapScreen() {
 
     map.on('load', () => setMapReady(true));
     map.on('click', () => setSelectedId(null));
-    map.on('error', (event) => {
+    map.on('error', (event: unknown) => {
       const sourceId = (event as unknown as { sourceId?: string }).sourceId;
       if (onlineRef.current && sourceId === 'osm-tiles') {
         onlineRef.current = false;
@@ -140,7 +149,7 @@ export function MapScreen() {
       element.className = 'map-place-label';
       element.textContent = place.name;
       element.setAttribute('aria-hidden', 'true');
-      const marker = new maplibregl.Marker({ element, anchor: 'center' }).setLngLat([place.lon, place.lat]).addTo(map);
+      const marker = new Marker({ element, anchor: 'center' }).setLngLat([place.lon, place.lat]).addTo(map);
       placeMarkersRef.current.push({ marker, minZoom: place.minZoom ?? 0 });
     }
     const updatePlaceVisibility = () => {
@@ -209,7 +218,7 @@ export function MapScreen() {
         event.stopPropagation();
         setSelectedId(node.node_id);
       });
-      const marker = new maplibregl.Marker({ element, anchor: 'left' })
+      const marker = new Marker({ element, anchor: 'left' })
         .setLngLat(toLngLat(node.position.lat, node.position.lon))
         .addTo(map);
       markersRef.current.push(marker);
@@ -225,7 +234,7 @@ export function MapScreen() {
         event.stopPropagation();
         setSelectedId(ownNodeId);
       });
-      const marker = new maplibregl.Marker({ element, anchor: 'center' })
+      const marker = new Marker({ element, anchor: 'center' })
         .setLngLat(toLngLat(ownPosition.lat, ownPosition.lon))
         .addTo(map);
       markersRef.current.push(marker);

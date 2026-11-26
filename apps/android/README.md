@@ -1,6 +1,6 @@
 # OpenMesh for Android
 
-Standalone Android client for OpenMesh v0.5.0 (regulatory maxima + emergency override). The Rust OMP/1 protocol engine runs
+Standalone Android client for OpenMesh v0.5.1 (regulatory maxima + emergency override). The Rust OMP/1 protocol engine runs
 **on the phone** through UniFFI; the LoRa radio is a dumb authenticated companion pipe over BLE or
 USB. No bridge, no server, no account.
 

@@ -5,6 +5,23 @@ All notable changes to this project are documented here. The format follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Protocol changes are called out
 explicitly.
 
+## [0.5.1] - 2026-11-26
+
+### Security
+- **Web map:** upgrade `maplibre-gl` 5.24.1 → **6.19.0** (GHSA-jrc7-96c5-q579, patched in 6.4.1
+  — XSS sanitizer bypass in `DOM.sanitize()`). Migrated to the v6 named exports and to an
+  explicit bundled worker URL (`setWorkerUrl`) so the ES-module worker loads in Vite dev and in
+  production builds; verified map rendering in both with zero console errors.
+- **Web test tooling:** upgrade `vitest` 3.2.7 → **5.1.1** (GHSA-82fw-gwwq-j7x9 path traversal
+  through `@vitest/mocker`; brings patched `@vitest/mocker` 5.1.1 and `tinypool` 2.2.0, covering
+  GHSA-5gmw-xhrv-c9v3 and GHSA-85c8-ppgw-ccpr prototype-pollution→RCE). Node 22/24 is supported
+  (CI uses Node 22); `tsconfig.app.json` now includes Node types for the test files that read
+  `content/help`.
+
+### Changed
+- Version 0.5.1 (workspace, web/Tauri, Android `versionName`/`versionCode` 6, firmware
+  `OM_FW_VERSION`). No protocol, wire-format, API or behaviour changes; golden vectors unchanged.
+
 ## [0.5.0] - 2026-11-26
 
 ### Added — legal-maximum defaults and a warning-gated regulatory override

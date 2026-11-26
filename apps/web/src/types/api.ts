@@ -1,7 +1,7 @@
 /**
  * Wire types for the OpenMesh Bridge API.
  *
- * Normative source: `docs/architecture/WEBSOCKET-API.md` (v0.5.0).
+ * Normative source: `docs/architecture/WEBSOCKET-API.md` (v0.5.1).
  * Field names here are copied verbatim from the spec — do not rename them.
  * Per spec §7, clients MUST ignore unknown event types and unknown fields.
  */

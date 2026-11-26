@@ -14,6 +14,11 @@ export default defineConfig({
     strictPort: false,
     host: '127.0.0.1',
   },
+  // MapLibre GL JS v6 loads its worker as an ES module; Vite's dep optimizer
+  // rewrites the worker URL and breaks it in dev, so keep maplibre out of it.
+  optimizeDeps: {
+    exclude: ['maplibre-gl'],
+  },
   build: {
     target: 'es2022',
     sourcemap: false,

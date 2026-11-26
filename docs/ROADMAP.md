@@ -1,6 +1,6 @@
 # OpenMesh roadmap
 
-**Status:** living document · v0.5.0 · **Last updated:** 2026-11-26
+**Status:** living document · v0.5.1 · **Last updated:** 2026-11-26
 **Calendar model:** one maintainer working with an AI agent team (DeepSeek Harness), roughly
 30–40 focused hours per week, with hardware available from M1 onward. Dates are *relative
 weeks from v0.1.0*, not promises; a 20 % buffer is included per milestone.

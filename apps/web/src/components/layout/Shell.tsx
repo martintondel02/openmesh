@@ -416,7 +416,7 @@ function Sidebar() {
           </div>
         </div>
         <p className="hidden px-1 text-center text-3xs leading-relaxed text-slate-600 xl:block">
-          OpenMesh v0.5.0
+          OpenMesh v0.5.1
           <br />
           AGPL-3.0-or-later
         </p>
