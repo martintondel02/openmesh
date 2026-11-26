@@ -96,6 +96,7 @@ async fn handle_incoming(manager: Arc<BackboneManager>, mut stream: TcpStream, a
             info.node_id,
             app.clone(),
             PeerDirection::Inbound,
+            None,
             remote_addr,
             info.auth.to_string(),
             app,

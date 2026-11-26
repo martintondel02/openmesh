@@ -200,6 +200,91 @@ fn clamp_chars(value: &str, max: usize) -> String {
     value.chars().take(max).collect()
 }
 
+// ---------------------------------------------------------------------------------------------
+// Multiple outbound links (`<data-dir>/backbone-links.json`, `remote-operations.md` §3)
+// ---------------------------------------------------------------------------------------------
+
+fn default_links_version() -> u32 {
+    1
+}
+
+/// One persisted outbound link. `url` embeds the bearer token, so the control API only ever
+/// returns it redacted.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LinkConfig {
+    pub name: String,
+    pub url: String,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+/// `<data-dir>/backbone-links.json` (mode 0600): the outbound link list.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LinksFile {
+    #[serde(default = "default_links_version")]
+    pub version: u32,
+    #[serde(default)]
+    pub links: Vec<LinkConfig>,
+}
+
+impl Default for LinksFile {
+    fn default() -> Self {
+        Self {
+            version: default_links_version(),
+            links: Vec::new(),
+        }
+    }
+}
+
+fn valid_link_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.chars().count() <= 32
+        && name
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '-' | '_' | '.'))
+}
+
+/// Replace the `token=...` query value of a connection string with `redacted`.
+pub fn redact_connection_string(url: &str) -> String {
+    let mut out = String::with_capacity(url.len());
+    for (index, part) in url.split('&').enumerate() {
+        if index > 0 {
+            out.push('&');
+        }
+        if part.starts_with("token=") {
+            out.push_str("token=redacted");
+        } else {
+            out.push_str(part);
+        }
+    }
+    out
+}
+
+/// One link entry as returned by `GET /api/backbone/links` / `backbone_status.links`.
+fn link_view(config: &LinkConfig, runtime: Option<&Arc<ClientLink>>) -> Value {
+    let connected = runtime.is_some_and(|link| link.is_connected());
+    let connected_at_ms = runtime.and_then(|link| link.connected_at_ms());
+    json!({
+        "name": config.name,
+        "mode": "client",
+        "enabled": config.enabled,
+        "running": runtime.is_some(),
+        "connected": connected,
+        "connected_at_ms": connected_at_ms,
+        "attempts": runtime.map(|link| link.attempts()).unwrap_or(0),
+        "last_error": runtime.and_then(|link| link.last_error()),
+        "url": redact_connection_string(&config.url),
+        "stats": {
+            "frames_in": runtime.map(|link| link.frames_in()).unwrap_or(0),
+            "frames_out": runtime.map(|link| link.frames_out()).unwrap_or(0),
+            "bytes_in": runtime.map(|link| link.bytes_in()).unwrap_or(0),
+            "bytes_out": runtime.map(|link| link.bytes_out()).unwrap_or(0),
+        },
+    })
+}
+
 /// CLI / startup overrides applied on top of the persisted configuration.
 #[derive(Clone, Debug, Default)]
 pub struct ConfigOverrides {
@@ -359,6 +444,8 @@ pub struct PeerSession {
     pub node_id: NodeId,
     pub name: String,
     pub direction: PeerDirection,
+    /// Outbound link name this session belongs to (`None` for server-side peers).
+    pub link: Option<String>,
     pub remote_addr: String,
     pub connected_at_ms: u64,
     pub auth: String,
@@ -382,6 +469,7 @@ impl PeerSession {
             "node_id": self.node_id.to_hex(),
             "name": self.name,
             "direction": self.direction.as_str(),
+            "link": self.link,
             "remote_addr": self.remote_addr,
             "connected_at_ms": self.connected_at_ms,
             "last_seen_ms": self.last_seen_ms.load(Ordering::Relaxed),
@@ -441,15 +529,119 @@ impl Totals {
     }
 }
 
+/// Live state for one enabled outbound backbone link (one reconnect loop).
+pub struct ClientLink {
+    pub name: String,
+    pub target: JoinTarget,
+    pub stop: Arc<AtomicBool>,
+    connected: AtomicBool,
+    connected_at_ms: AtomicU64,
+    attempts: AtomicU64,
+    frames_in: AtomicU64,
+    frames_out: AtomicU64,
+    bytes_in: AtomicU64,
+    bytes_out: AtomicU64,
+    last_error: std::sync::Mutex<Option<String>>,
+}
+
+impl ClientLink {
+    fn new(name: String, target: JoinTarget) -> Self {
+        Self {
+            name,
+            target,
+            stop: Arc::new(AtomicBool::new(false)),
+            connected: AtomicBool::new(false),
+            connected_at_ms: AtomicU64::new(0),
+            attempts: AtomicU64::new(0),
+            frames_in: AtomicU64::new(0),
+            frames_out: AtomicU64::new(0),
+            bytes_in: AtomicU64::new(0),
+            bytes_out: AtomicU64::new(0),
+            last_error: std::sync::Mutex::new(None),
+        }
+    }
+
+    pub fn is_connected(&self) -> bool {
+        self.connected.load(Ordering::Relaxed)
+    }
+
+    pub fn connected_at_ms(&self) -> Option<u64> {
+        let at = self.connected_at_ms.load(Ordering::Relaxed);
+        (at > 0).then_some(at)
+    }
+
+    pub fn attempts(&self) -> u64 {
+        self.attempts.load(Ordering::Relaxed)
+    }
+
+    pub fn frames_in(&self) -> u64 {
+        self.frames_in.load(Ordering::Relaxed)
+    }
+
+    pub fn frames_out(&self) -> u64 {
+        self.frames_out.load(Ordering::Relaxed)
+    }
+
+    pub fn bytes_in(&self) -> u64 {
+        self.bytes_in.load(Ordering::Relaxed)
+    }
+
+    pub fn bytes_out(&self) -> u64 {
+        self.bytes_out.load(Ordering::Relaxed)
+    }
+
+    pub fn last_error(&self) -> Option<String> {
+        self.last_error.lock().ok().and_then(|error| error.clone())
+    }
+
+    pub fn note_error(&self, message: impl Into<String>) {
+        if let Ok(mut error) = self.last_error.lock() {
+            *error = Some(message.into());
+        }
+    }
+
+    pub fn clear_error(&self) {
+        if let Ok(mut error) = self.last_error.lock() {
+            *error = None;
+        }
+    }
+
+    fn begin_attempt(&self) {
+        self.attempts.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn mark_connected(&self) {
+        self.connected.store(true, Ordering::Relaxed);
+        self.connected_at_ms
+            .store(util::now_ms(), Ordering::Relaxed);
+        self.clear_error();
+    }
+
+    fn mark_disconnected(&self) {
+        self.connected.store(false, Ordering::Relaxed);
+    }
+
+    fn add_tx(&self, bytes: u64) {
+        self.frames_out.fetch_add(1, Ordering::Relaxed);
+        self.bytes_out.fetch_add(bytes, Ordering::Relaxed);
+    }
+
+    fn add_rx(&self, bytes: u64) {
+        self.frames_in.fetch_add(1, Ordering::Relaxed);
+        self.bytes_in.fetch_add(bytes, Ordering::Relaxed);
+    }
+}
+
 struct Inner {
     config: BackboneConfig,
     configured: bool,
     server_running: bool,
     bound_port: u16,
     listener_stop: Option<watch::Sender<bool>>,
-    client_active: bool,
-    client_stop: Option<Arc<AtomicBool>>,
-    client_join: Option<JoinTarget>,
+    /// Persisted outbound links (enabled and disabled), in file order.
+    link_configs: Vec<LinkConfig>,
+    /// Live reconnect loops for enabled links, keyed by link name.
+    links: HashMap<String, Arc<ClientLink>>,
     peers: HashMap<NodeId, Arc<PeerSession>>,
     last_error: Option<String>,
     started_at_ms: Option<u64>,
@@ -460,7 +652,7 @@ struct Inner {
 
 impl Inner {
     fn mode(&self) -> &'static str {
-        match (self.server_running, self.client_active) {
+        match (self.server_running, !self.links.is_empty()) {
             (true, true) => "server+client",
             (true, false) => "server",
             (false, true) => "client",
@@ -469,7 +661,11 @@ impl Inner {
     }
 
     fn running(&self) -> bool {
-        self.server_running || self.client_active
+        self.server_running || !self.links.is_empty()
+    }
+
+    fn link_error(&self) -> Option<String> {
+        self.links.values().find_map(|link| link.last_error())
     }
 }
 
@@ -481,6 +677,7 @@ impl Inner {
 pub struct BackboneManager {
     data_dir: PathBuf,
     config_path: PathBuf,
+    links_path: PathBuf,
     own_node_id: NodeId,
     api_listen: SocketAddr,
     executable: PathBuf,
@@ -517,6 +714,7 @@ impl BackboneManager {
     ) -> Arc<Self> {
         let manager = Arc::new(Self {
             config_path: data_dir.join("backbone.json"),
+            links_path: data_dir.join("backbone-links.json"),
             data_dir,
             own_node_id,
             api_listen,
@@ -534,9 +732,8 @@ impl BackboneManager {
                 server_running: false,
                 bound_port: 0,
                 listener_stop: None,
-                client_active: false,
-                client_stop: None,
-                client_join: None,
+                link_configs: Vec::new(),
+                links: HashMap::new(),
                 peers: HashMap::new(),
                 last_error: None,
                 started_at_ms: None,
@@ -567,6 +764,10 @@ impl BackboneManager {
 
     pub fn config_path(&self) -> &Path {
         &self.config_path
+    }
+
+    pub fn links_path(&self) -> &Path {
+        &self.links_path
     }
 
     pub fn is_running(&self) -> bool {
@@ -616,8 +817,38 @@ impl BackboneManager {
             inner.configured = configured;
         }
         self.configured_flag.store(configured, Ordering::Relaxed);
+        // Outbound links: a saved backbone-links.json takes precedence; an explicit CLI `join`
+        // (the legacy single-link path) is imported/updated as the link named `default`.
+        let mut links = self.load_links();
+        let mut persist_links = !self.links_path.exists() && !links.links.is_empty();
         if let Some(join) = startup.join.clone() {
-            self.start_client(join).await?;
+            let url = format_connection_string(&join.connection);
+            match links.links.iter_mut().find(|link| link.name == "default") {
+                Some(link) => {
+                    link.url = url;
+                    link.enabled = true;
+                }
+                None => links.links.push(LinkConfig {
+                    name: "default".to_string(),
+                    url,
+                    enabled: true,
+                }),
+            }
+            persist_links = true;
+        }
+        if persist_links {
+            self.persist_links(&links)?;
+        }
+        let has_links = !links.links.is_empty();
+        self.install_links(links).await;
+        if has_links {
+            // Saved outbound links are a valid client configuration on their own.
+            configured = true;
+            {
+                let mut inner = self.inner.lock().await;
+                inner.configured = true;
+            }
+            self.configured_flag.store(true, Ordering::Relaxed);
         }
         if startup.enabled || (configured && config.enabled) {
             match self.start_server().await {
@@ -643,9 +874,10 @@ impl BackboneManager {
             if let Some(stop) = inner.listener_stop.take() {
                 let _ = stop.send(true);
             }
-            if let Some(stop) = inner.client_stop.take() {
-                stop.store(true, Ordering::Relaxed);
+            for link in inner.links.values() {
+                link.stop.store(true, Ordering::Relaxed);
             }
+            inner.links.clear();
         }
         let handles: Vec<tokio::task::JoinHandle<()>> = self
             .tasks
@@ -720,9 +952,9 @@ impl BackboneManager {
         if frame.link.is_some_and(|preferred| preferred != link) {
             return;
         }
-        let peers: Vec<Arc<PeerSession>> = {
+        let (peers, links): (Vec<Arc<PeerSession>>, HashMap<String, Arc<ClientLink>>) = {
             let inner = self.inner.lock().await;
-            inner.peers.values().cloned().collect()
+            (inner.peers.values().cloned().collect(), inner.links.clone())
         };
         let direct = match frame.mode {
             SendMode::Direct(node) => peers.iter().find(|p| p.node_id == node).cloned(),
@@ -742,6 +974,9 @@ impl BackboneManager {
                 if let Some(stats) = self.link_stats() {
                     stats.record_tx();
                 }
+                if let Some(link) = peer.link.as_ref().and_then(|name| links.get(name)) {
+                    link.add_tx(bytes.len() as u64);
+                }
             } else {
                 tracing::debug!(peer = %peer.node_id, "backbone peer queue full, dropping frame");
             }
@@ -752,6 +987,15 @@ impl BackboneManager {
         self.totals.add_rx(bytes.len() as u64, peer);
         if let Some(stats) = self.link_stats() {
             stats.record_rx(None, None);
+        }
+        if let Some(name) = peer.link.as_ref() {
+            let link = {
+                let inner = self.inner.lock().await;
+                inner.links.get(name).cloned()
+            };
+            if let Some(link) = link {
+                link.add_rx(bytes.len() as u64);
+            }
         }
         let link = self.link_id();
         let inbound = Inbound {
@@ -928,58 +1172,292 @@ impl BackboneManager {
         self.running_flag.store(running, Ordering::Relaxed);
     }
 
-    // --- client lifecycle -----------------------------------------------------------------
+    // --- outbound link lifecycle (`remote-operations.md` §3) ------------------------------
 
-    async fn start_client(self: &Arc<Self>, join: JoinTarget) -> Result<(), String> {
-        self.stop_client().await;
-        let stop = Arc::new(AtomicBool::new(false));
+    fn load_links(&self) -> LinksFile {
+        match std::fs::read_to_string(&self.links_path) {
+            Ok(text) => match serde_json::from_str::<LinksFile>(&text) {
+                Ok(mut file) => {
+                    file.version = default_links_version();
+                    let mut links = Vec::with_capacity(file.links.len());
+                    for mut link in file.links {
+                        if !valid_link_name(&link.name) {
+                            tracing::warn!(
+                                path = %self.links_path.display(),
+                                name = %link.name,
+                                "ignoring backbone link with invalid name"
+                            );
+                            continue;
+                        }
+                        if let Err(error) = JoinTarget::from_url(&link.url) {
+                            tracing::warn!(
+                                path = %self.links_path.display(),
+                                link = %link.name,
+                                error = %error,
+                                "ignoring backbone link with invalid URL"
+                            );
+                            continue;
+                        }
+                        if links
+                            .iter()
+                            .any(|existing: &LinkConfig| existing.name == link.name)
+                        {
+                            tracing::warn!(
+                                link = %link.name,
+                                "ignoring duplicate backbone link name"
+                            );
+                            continue;
+                        }
+                        link.url = link.url.trim().to_string();
+                        links.push(link);
+                    }
+                    file.links = links;
+                    file
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        path = %self.links_path.display(),
+                        error = %error,
+                        "ignoring invalid backbone-links.json"
+                    );
+                    LinksFile::default()
+                }
+            },
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => LinksFile::default(),
+            Err(error) => {
+                tracing::warn!(
+                    path = %self.links_path.display(),
+                    error = %error,
+                    "cannot read backbone-links.json"
+                );
+                LinksFile::default()
+            }
+        }
+    }
+
+    fn persist_links(&self, file: &LinksFile) -> Result<(), String> {
+        if let Some(parent) = self.links_path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| format!("creating data dir: {e}"))?;
+        }
+        let body = serde_json::to_vec_pretty(file)
+            .map_err(|e| format!("serializing backbone links: {e}"))?;
+        std::fs::write(&self.links_path, body)
+            .map_err(|e| format!("writing {}: {e}", self.links_path.display()))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ =
+                std::fs::set_permissions(&self.links_path, std::fs::Permissions::from_mode(0o600));
+        }
+        Ok(())
+    }
+
+    async fn install_links(self: &Arc<Self>, file: LinksFile) {
+        self.stop_links().await;
         {
             let mut inner = self.inner.lock().await;
-            inner.client_join = Some(join.clone());
-            inner.client_stop = Some(stop.clone());
-            inner.client_active = true;
-            inner.last_error = None;
+            inner.link_configs = file.links;
+        }
+        self.restart_links().await;
+    }
+
+    /// Start one reconnect loop per enabled link in the persisted list.
+    async fn restart_links(self: &Arc<Self>) {
+        let configs = {
+            let inner = self.inner.lock().await;
+            inner.link_configs.clone()
+        };
+        for config in configs {
+            if !config.enabled {
+                continue;
+            }
+            match JoinTarget::from_url(&config.url) {
+                Ok(target) => self.start_link(config.name, target).await,
+                Err(error) => tracing::warn!(
+                    link = %config.name,
+                    error = %error,
+                    "cannot start backbone link with invalid URL"
+                ),
+            }
+        }
+        self.refresh_running_flag().await;
+        self.broadcast_status().await;
+    }
+
+    async fn start_link(self: &Arc<Self>, name: String, target: JoinTarget) {
+        let link = Arc::new(ClientLink::new(name.clone(), target));
+        {
+            let mut inner = self.inner.lock().await;
+            if let Some(old) = inner.links.insert(name.clone(), link.clone()) {
+                old.stop.store(true, Ordering::Relaxed);
+                old.mark_disconnected();
+            }
             inner.started_at_ms.get_or_insert_with(util::now_ms);
         }
         let manager = self.clone();
         let shutdown = self.shutdown.clone();
         let handle = tokio::spawn(async move {
-            client::client_loop(manager, join, stop, shutdown).await;
+            client::client_loop(manager, link, shutdown).await;
         });
         self.tasks.lock().expect("backbone tasks").push(handle);
         self.refresh_running_flag().await;
         self.broadcast_status().await;
-        Ok(())
     }
 
-    async fn stop_client(&self) {
-        let (stop, join) = {
+    async fn stop_link(&self, name: &str) {
+        let (link, peers) = {
             let mut inner = self.inner.lock().await;
-            let stop = inner.client_stop.take();
-            let join = inner.client_join.take();
-            if let Some(stop) = &stop {
-                stop.store(true, Ordering::Relaxed);
-            }
-            inner.client_active = false;
-            (stop, join)
-        };
-        let _ = stop;
-        let outbound: Vec<Arc<PeerSession>> = {
-            let inner = self.inner.lock().await;
-            inner
+            let link = inner.links.remove(name);
+            let peers: Vec<Arc<PeerSession>> = inner
                 .peers
                 .values()
-                .filter(|p| p.direction == PeerDirection::Outbound)
+                .filter(|peer| peer.link.as_deref() == Some(name))
                 .cloned()
-                .collect()
+                .collect();
+            (link, peers)
         };
-        for peer in outbound {
-            peer.close("disconnected");
-        }
-        if join.is_some() {
-            tracing::info!("backbone outbound link stopped");
+        if let Some(link) = link {
+            link.stop.store(true, Ordering::Relaxed);
+            link.mark_disconnected();
+            // Closing the session lets `client_loop` observe the stop flag immediately instead of
+            // waiting for the backbone to hang up.
+            for peer in peers {
+                peer.close("link stopped");
+            }
+            tracing::info!(link = %name, "backbone outbound link stopped");
         }
         self.refresh_running_flag().await;
+        self.broadcast_status().await;
+    }
+
+    async fn stop_links(&self) {
+        let (links, peers) = {
+            let mut inner = self.inner.lock().await;
+            let links: Vec<Arc<ClientLink>> = inner.links.values().cloned().collect();
+            for link in &links {
+                link.stop.store(true, Ordering::Relaxed);
+                link.mark_disconnected();
+            }
+            inner.links.clear();
+            let peers: Vec<Arc<PeerSession>> = inner
+                .peers
+                .values()
+                .filter(|peer| peer.link.is_some())
+                .cloned()
+                .collect();
+            (links, peers)
+        };
+        let _ = links;
+        for peer in peers {
+            peer.close("link stopped");
+        }
+        self.refresh_running_flag().await;
+    }
+
+    /// `GET /api/backbone/links` payload: one entry per persisted link (tokens redacted).
+    pub async fn links_view(&self) -> Value {
+        let inner = self.inner.lock().await;
+        let items: Vec<Value> = inner
+            .link_configs
+            .iter()
+            .map(|config| link_view(config, inner.links.get(&config.name)))
+            .collect();
+        Value::Array(items)
+    }
+
+    async fn links_summary(&self) -> Value {
+        self.links_view().await
+    }
+
+    /// `PUT /api/backbone/links/{name}` — add/update one outbound link and (re)start its loop.
+    pub async fn upsert_link(self: &Arc<Self>, name: &str, body: &Value) -> Result<Value, String> {
+        if !valid_link_name(name) {
+            return Err(
+                "link name must be 1-32 lowercase letters, digits, '-', '_' or '.'".to_string(),
+            );
+        }
+        let Some(object) = body.as_object() else {
+            return Err("link config must be a JSON object".to_string());
+        };
+        let Some(url) = object.get("url").and_then(|value| value.as_str()) else {
+            return Err("link url is required".to_string());
+        };
+        let target = JoinTarget::from_url(url)?;
+        let enabled = object
+            .get("enabled")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(true);
+        let config = LinkConfig {
+            name: name.to_string(),
+            url: url.trim().to_string(),
+            enabled,
+        };
+        let mut configs = {
+            let inner = self.inner.lock().await;
+            inner.link_configs.clone()
+        };
+        match configs.iter_mut().find(|existing| existing.name == name) {
+            Some(existing) => *existing = config.clone(),
+            None => configs.push(config.clone()),
+        }
+        self.persist_links(&LinksFile {
+            version: default_links_version(),
+            links: configs.clone(),
+        })?;
+        {
+            let mut inner = self.inner.lock().await;
+            inner.link_configs = configs;
+            inner.configured = true;
+        }
+        self.configured_flag.store(true, Ordering::Relaxed);
+        self.stop_link(name).await;
+        if enabled {
+            self.start_link(config.name.clone(), target).await;
+        } else {
+            self.broadcast_status().await;
+        }
+        let inner = self.inner.lock().await;
+        Ok(link_view(&config, inner.links.get(name)))
+    }
+
+    /// `DELETE /api/backbone/links/{name}` — remove a persisted link and stop its loop.
+    pub async fn delete_link(self: &Arc<Self>, name: &str) -> Result<bool, String> {
+        let mut configs = {
+            let inner = self.inner.lock().await;
+            inner.link_configs.clone()
+        };
+        let before = configs.len();
+        configs.retain(|link| link.name != name);
+        if configs.len() == before {
+            return Ok(false);
+        }
+        self.persist_links(&LinksFile {
+            version: default_links_version(),
+            links: configs.clone(),
+        })?;
+        {
+            let mut inner = self.inner.lock().await;
+            inner.link_configs = configs;
+        }
+        self.stop_link(name).await;
+        Ok(true)
+    }
+
+    /// Called when one link's reconnect loop exits (stop flag or shutdown).
+    pub(crate) async fn on_link_loop_exit(&self, link: &Arc<ClientLink>) {
+        link.mark_disconnected();
+        {
+            let mut inner = self.inner.lock().await;
+            if inner
+                .links
+                .get(&link.name)
+                .is_some_and(|current| Arc::ptr_eq(current, link))
+            {
+                inner.links.remove(&link.name);
+            }
+        }
+        self.refresh_running_flag().await;
+        self.broadcast_status().await;
     }
 
     // --- status / control surface ---------------------------------------------------------
@@ -1032,12 +1510,13 @@ impl BackboneManager {
                 bytes_in,
                 bytes_out,
                 self.totals.auth_failures.load(Ordering::Relaxed),
-                inner.last_error.clone(),
+                inner.last_error.clone().or_else(|| inner.link_error()),
                 tin,
                 tout,
             )
         };
         let _ = server_running;
+        let links = self.links_summary().await;
         json!({
             "running": running,
             "peers": peers,
@@ -1051,6 +1530,7 @@ impl BackboneManager {
             "store_forward_envelopes": self.envelopes.load(Ordering::Relaxed),
             "auth_failures": auth_failures,
             "last_error": last_error,
+            "links": links,
         })
     }
 
@@ -1132,6 +1612,7 @@ impl BackboneManager {
                     "peers": peers,
                 }),
             );
+            object.insert("links".into(), self.links_summary().await);
         }
         view
     }
@@ -1160,7 +1641,10 @@ impl BackboneManager {
         let Some(object) = patch.as_object() else {
             return Err("config must be a JSON object".to_string());
         };
-        if !self.is_configured() && object.get("enabled").and_then(|v| v.as_bool()) != Some(true) {
+        if !self.is_configured()
+            && object.get("enabled").and_then(|v| v.as_bool()) != Some(true)
+            && object.get("join_url").is_none()
+        {
             return Err(
                 "backbone mode is not configured; set {\"enabled\": true} to enable it".to_string(),
             );
@@ -1265,7 +1749,9 @@ impl BackboneManager {
             self.push_store_forward(config.store_forward).await;
         }
         if let Some(url) = join_request {
-            self.start_client(JoinTarget::from_url(&url)?).await?;
+            // Legacy single-link API: manage the link named `default`.
+            self.upsert_link("default", &json!({ "url": url, "enabled": true }))
+                .await?;
             restarted = true;
         }
         if let Some(node) = disconnect_request {
@@ -1308,11 +1794,9 @@ impl BackboneManager {
             return Some(false);
         };
         if peer.direction == PeerDirection::Outbound {
-            let mut inner = self.inner.lock().await;
-            if let Some(stop) = inner.client_stop.take() {
-                stop.store(true, Ordering::Relaxed);
+            if let Some(name) = peer.link.clone() {
+                self.stop_link(&name).await;
             }
-            inner.client_active = false;
         }
         peer.close("kicked");
         self.broadcast_peer("left", &peer);
@@ -1324,25 +1808,6 @@ impl BackboneManager {
     pub(crate) async fn note_handshake_error(&self, remote: SocketAddr, message: &str) {
         self.set_last_error(Some(format!("handshake from {remote} failed: {message}")))
             .await;
-    }
-
-    /// Record an outbound client failure for the panel.
-    pub(crate) async fn note_outbound_failure(&self, message: String) {
-        self.set_last_error(Some(message)).await;
-    }
-
-    pub(crate) async fn clear_last_error(&self) {
-        self.set_last_error(None).await;
-    }
-
-    pub(crate) async fn on_client_loop_exit(&self) {
-        {
-            let mut inner = self.inner.lock().await;
-            inner.client_active = false;
-            inner.client_stop = None;
-        }
-        self.refresh_running_flag().await;
-        self.broadcast_status().await;
     }
 
     /// A clone of the bridge shutdown receiver for session tasks.
@@ -1530,6 +1995,7 @@ impl BackboneManager {
         node_id: NodeId,
         name: String,
         direction: PeerDirection,
+        link: Option<String>,
         remote_addr: String,
         auth: String,
         app_version: String,
@@ -1541,6 +2007,7 @@ impl BackboneManager {
             node_id,
             name,
             direction,
+            link,
             remote_addr,
             connected_at_ms: util::now_ms(),
             auth,

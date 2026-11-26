@@ -41,5 +41,6 @@ were studied as prior art and for hardware pin-map facts, and are credited here.
   against a modified Codec2; no Codec2 source files are modified here.
 
 Rust crates are licensed under their respective terms (Apache-2.0/MIT/BSD), listed in each
-crate's Cargo metadata. Firmware libraries (RadioLib, Adafruit nRF52 core, arduino-esp32) are
+crate's Cargo metadata. The outbound gateway webhook client uses `reqwest` (Apache-2.0/MIT) with
+`rustls` (Apache-2.0/ISC/MIT) and `ring` (ISC); no system OpenSSL is linked. Firmware libraries (RadioLib, Adafruit nRF52 core, arduino-esp32) are
 licensed by their authors; see `firmware/THIRD_PARTY.md` when added.

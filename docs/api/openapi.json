@@ -2,9 +2,9 @@
   "openapi": "3.1.0",
   "info": {
     "title": "OpenMesh Bridge API",
-    "version": "0.3.0",
-    "summary": "Local REST control API for an OpenMesh bridge (v0.3.0, AI-native + beginner UX).",
-    "description": "The bridge daemon owns identity, radios, the message store and backbone mode. This document is normative for the REST surface; the WebSocket catalog (`/api/ws`) is documented in docs/architecture/WEBSOCKET-API.md and backbone protocol details in docs/architecture/BACKBONE.md.\n\nAuthentication: every route except `GET /api/health` requires `Authorization: Bearer <token>` (token file `~/.config/openmesh/bridge-token`, mode 0600). The WebSocket also accepts `?token=` because browsers cannot set headers. The API is loopback-only by default; do not bind it to a network interface.\n\nAttribution: mutating calls may send `X-OpenMesh-Agent: <name>` (MCP does this automatically) or `X-OpenMesh-Client: web|cli`; the bridge records them in `GET /api/activity`. Read calls are not logged. Errors are JSON with `error`, `code`, `message` and a `help_topic` slug.",
+    "version": "0.7.0",
+    "summary": "Local REST control API for an OpenMesh bridge (v0.7.0, resilience + AI-native operations).",
+    "description": "The bridge daemon owns identity, radios, the message store and backbone mode. This document is normative for the REST surface; the WebSocket catalog (`/api/ws`) is documented in docs/architecture/WEBSOCKET-API.md and backbone protocol details in docs/architecture/BACKBONE.md.\n\nAuthentication: every route except `GET /api/health` (and the HMAC-signed inbound gateway webhook `POST /api/gateways/{id}/inbound`) requires `Authorization: Bearer <token>` (token file `~/.config/openmesh/bridge-token`, mode 0600). The WebSocket also accepts `?token=` because browsers cannot set headers. The API is loopback-only by default; do not bind it to a network interface.\n\nAttribution: mutating calls may send `X-OpenMesh-Agent: <name>` (MCP does this automatically) or `X-OpenMesh-Client: web|cli`; the bridge records them in `GET /api/activity`. Read calls are not logged. Errors are JSON with `error`, `code`, `message` and a `help_topic` slug.\n\nv0.7.0 adds authenticated webhook gateways (`/api/gateways*`, `remote-operations.md` §2) and multiple outbound backbone links (`/api/backbone/links*`, `remote-operations.md` §3).",
     "license": {
       "name": "AGPL-3.0-only",
       "identifier": "AGPL-3.0-only"
@@ -69,6 +69,10 @@
     {
       "name": "activity",
       "description": "Transparency log of write actions and agent attribution."
+    },
+    {
+      "name": "gateways",
+      "description": "Authenticated webhook gateways: outbound signed POSTs and inbound signed channel injection (remote-operations.md §2)."
     }
   ],
   "components": {
@@ -92,6 +96,13 @@
         "schema": {
           "type": "string",
           "maxLength": 32
+        }
+      },
+      "X-OpenMesh-Signature": {
+        "description": "`sha256=<hex HMAC-SHA256(secret, raw request body)>`, signed with the connector's `secret_env` value.",
+        "schema": {
+          "type": "string",
+          "pattern": "^sha256=[0-9a-f]{64}$"
         }
       }
     },
@@ -225,6 +236,26 @@
         "schema": {
           "type": "string",
           "maxLength": 32
+        }
+      },
+      "GatewayIdPath": {
+        "name": "id",
+        "in": "path",
+        "required": true,
+        "description": "Gateway connector id (lowercase letters, digits, '-', '_', '.'; max 64).",
+        "schema": {
+          "type": "string",
+          "pattern": "^[a-z0-9._-]{1,64}$"
+        }
+      },
+      "LinkNamePath": {
+        "name": "name",
+        "in": "path",
+        "required": true,
+        "description": "Outbound backbone link name (lowercase letters, digits, '-', '_', '.'; max 32).",
+        "schema": {
+          "type": "string",
+          "pattern": "^[a-z0-9._-]{1,32}$"
         }
       }
     },
@@ -2736,6 +2767,373 @@
           "message": "regulatory override requires acknowledgement",
           "warning": "Regulatory override active — transmissions may violate local radio regulations and void your radio's certification. Use only in a life-threatening emergency where local law permits. You are responsible for compliance and for any interference or damage.",
           "help_topic": "regulatory-and-emergency"
+        }
+      },
+      "GatewayOutbound": {
+        "type": "object",
+        "required": [
+          "url",
+          "secret_env"
+        ],
+        "properties": {
+          "url": {
+            "type": "string",
+            "format": "uri",
+            "description": "Outbound webhook URL. Any query string is redacted as `?<redacted>` in API responses (it may carry provider credentials)."
+          },
+          "secret_env": {
+            "type": "string",
+            "description": "Environment variable name holding the HMAC-SHA256 signing secret. The value is never stored, logged or returned."
+          },
+          "secret_set": {
+            "type": "boolean",
+            "readOnly": true,
+            "description": "Whether `secret_env` is currently set in the bridge process."
+          },
+          "channel_ids": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{16}$"
+            },
+            "description": "Channels to mirror. Empty means all channels."
+          },
+          "include_direct": {
+            "type": "boolean",
+            "default": false,
+            "description": "Also forward incoming direct messages."
+          },
+          "include_attachments": {
+            "type": "boolean",
+            "default": false,
+            "description": "Include attachment metadata (mime, size). Bytes are never pushed through webhooks in v0.7."
+          },
+          "timeout_ms": {
+            "type": "integer",
+            "minimum": 100,
+            "maximum": 120000,
+            "default": 10000
+          },
+          "max_retries": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 10,
+            "default": 3,
+            "description": "Retries after the first attempt, with exponential backoff."
+          }
+        }
+      },
+      "GatewayInbound": {
+        "type": "object",
+        "required": [
+          "secret_env",
+          "channel_id"
+        ],
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "default": true
+          },
+          "secret_env": {
+            "type": "string",
+            "description": "Environment variable name holding the inbound HMAC secret."
+          },
+          "secret_set": {
+            "type": "boolean",
+            "readOnly": true
+          },
+          "channel_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{16}$",
+            "description": "Channel that inbound webhook messages are injected into."
+          },
+          "max_chars": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 4000,
+            "default": 400
+          },
+          "inbound_path": {
+            "type": "string",
+            "readOnly": true,
+            "description": "Path adapters POST to: `/api/gateways/{id}/inbound`."
+          }
+        }
+      },
+      "GatewayStatus": {
+        "type": "object",
+        "properties": {
+          "deliveries": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "failures": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "retries": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "last_success_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "last_failure_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "last_status": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "last_error": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Plain-language delivery error; never contains URLs, bodies or secrets."
+          },
+          "inbound_accepted": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "inbound_rejected": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "inbound_last_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          }
+        }
+      },
+      "GatewayConnector": {
+        "type": "object",
+        "required": [
+          "id",
+          "kind",
+          "enabled"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "webhook"
+            ]
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "outbound": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/GatewayOutbound"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "inbound": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/GatewayInbound"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "status": {
+            "$ref": "#/components/schemas/GatewayStatus"
+          }
+        }
+      },
+      "GatewayList": {
+        "type": "object",
+        "required": [
+          "version",
+          "connectors"
+        ],
+        "properties": {
+          "version": {
+            "type": "integer",
+            "const": 1
+          },
+          "connectors": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/GatewayConnector"
+            }
+          },
+          "enqueued": {
+            "type": "integer",
+            "minimum": 0,
+            "readOnly": true
+          },
+          "dropped": {
+            "type": "integer",
+            "minimum": 0,
+            "readOnly": true
+          }
+        }
+      },
+      "GatewayTestResult": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          },
+          "connector": {
+            "type": "string"
+          },
+          "status": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "HTTP status returned by the adapter, if it answered."
+          },
+          "attempts": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "GatewayInboundResult": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "const": true
+          },
+          "connector": {
+            "type": "string"
+          },
+          "channel_id": {
+            "type": "string"
+          },
+          "message_id": {
+            "type": "integer"
+          }
+        }
+      },
+      "BackboneLinkStats": {
+        "type": "object",
+        "properties": {
+          "frames_in": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "frames_out": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "bytes_in": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "bytes_out": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      },
+      "BackboneLink": {
+        "type": "object",
+        "required": [
+          "name",
+          "mode",
+          "enabled",
+          "connected"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "client"
+            ]
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "running": {
+            "type": "boolean",
+            "description": "A reconnect loop is currently scheduled for this link."
+          },
+          "connected": {
+            "type": "boolean"
+          },
+          "connected_at_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "attempts": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "last_error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "url": {
+            "type": "string",
+            "description": "Connection string with the bearer token replaced by `token=redacted`."
+          },
+          "stats": {
+            "$ref": "#/components/schemas/BackboneLinkStats"
+          }
+        }
+      },
+      "BackboneLinks": {
+        "type": "array",
+        "items": {
+          "$ref": "#/components/schemas/BackboneLink"
+        }
+      },
+      "BackboneLinkConfig": {
+        "type": "object",
+        "required": [
+          "url"
+        ],
+        "properties": {
+          "url": {
+            "type": "string",
+            "description": "`openmesh://backbone?host=...&port=...&token=...` connection string."
+          },
+          "enabled": {
+            "type": "boolean",
+            "default": true
+          }
         }
       }
     }
@@ -5378,6 +5776,707 @@
                   "code": "bad_request",
                   "message": "…",
                   "help_topic": "getting-started"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing/invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "error": "unauthorized",
+                  "code": "unauthorized",
+                  "message": "…",
+                  "help_topic": "getting-started"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/gateways": {
+      "get": {
+        "tags": [
+          "gateways"
+        ],
+        "summary": "List webhook gateways (redacted) with delivery status",
+        "description": "Configuration contains environment variable names and secret-presence booleans only; secret values are never stored or returned. `outbound.url` query strings are redacted.",
+        "responses": {
+          "200": {
+            "description": "Gateway connectors",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GatewayList"
+                },
+                "example": {
+                  "version": 1,
+                  "connectors": [
+                    {
+                      "id": "sms-ops",
+                      "kind": "webhook",
+                      "enabled": true,
+                      "outbound": {
+                        "url": "https://gateway.example/openmesh",
+                        "secret_env": "OPENMESH_SMS_OUT_SECRET",
+                        "secret_set": true,
+                        "channel_ids": [],
+                        "include_direct": false,
+                        "include_attachments": false,
+                        "timeout_ms": 10000,
+                        "max_retries": 3
+                      },
+                      "inbound": {
+                        "enabled": true,
+                        "secret_env": "OPENMESH_SMS_IN_SECRET",
+                        "secret_set": true,
+                        "channel_id": "dba1337a96acc686",
+                        "max_chars": 400,
+                        "inbound_path": "/api/gateways/sms-ops/inbound"
+                      },
+                      "status": {
+                        "deliveries": 12,
+                        "failures": 1,
+                        "retries": 2,
+                        "last_success_ms": 1760000000000,
+                        "last_failure_ms": 1759999000000,
+                        "last_status": 200,
+                        "last_error": null,
+                        "inbound_accepted": 4,
+                        "inbound_rejected": 0,
+                        "inbound_last_ms": 1760000000000
+                      }
+                    }
+                  ],
+                  "enqueued": 13,
+                  "dropped": 0
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "error": "bad_request",
+                  "code": "bad_request",
+                  "message": "…",
+                  "help_topic": "getting-started"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing/invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "error": "unauthorized",
+                  "code": "unauthorized",
+                  "message": "…",
+                  "help_topic": "getting-started"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/gateways/{id}": {
+      "put": {
+        "tags": [
+          "gateways"
+        ],
+        "summary": "Add or replace one webhook gateway connector",
+        "description": "Upsert. Inline secrets (any `secret*`, `token`, `password` or `psk` field other than `secret_env`) are rejected, and a `secret_env` name is rejected when that environment variable is not set in the bridge process. Writes are recorded in the activity log.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/GatewayIdPath"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GatewayConnector"
+              },
+              "example": {
+                "id": "sms-ops",
+                "kind": "webhook",
+                "enabled": true,
+                "outbound": {
+                  "url": "https://gateway.example/openmesh",
+                  "secret_env": "OPENMESH_SMS_OUT_SECRET",
+                  "secret_set": true,
+                  "channel_ids": [],
+                  "include_direct": false,
+                  "include_attachments": false,
+                  "timeout_ms": 10000,
+                  "max_retries": 3
+                },
+                "inbound": {
+                  "enabled": true,
+                  "secret_env": "OPENMESH_SMS_IN_SECRET",
+                  "secret_set": true,
+                  "channel_id": "dba1337a96acc686",
+                  "max_chars": 400,
+                  "inbound_path": "/api/gateways/sms-ops/inbound"
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Redacted connector with status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GatewayConnector"
+                },
+                "example": {
+                  "id": "sms-ops",
+                  "kind": "webhook",
+                  "enabled": true,
+                  "outbound": {
+                    "url": "https://gateway.example/openmesh",
+                    "secret_env": "OPENMESH_SMS_OUT_SECRET",
+                    "secret_set": true,
+                    "channel_ids": [],
+                    "include_direct": false,
+                    "include_attachments": false,
+                    "timeout_ms": 10000,
+                    "max_retries": 3
+                  },
+                  "inbound": {
+                    "enabled": true,
+                    "secret_env": "OPENMESH_SMS_IN_SECRET",
+                    "secret_set": true,
+                    "channel_id": "dba1337a96acc686",
+                    "max_chars": 400,
+                    "inbound_path": "/api/gateways/sms-ops/inbound"
+                  },
+                  "status": {
+                    "deliveries": 12,
+                    "failures": 1,
+                    "retries": 2,
+                    "last_success_ms": 1760000000000,
+                    "last_failure_ms": 1759999000000,
+                    "last_status": 200,
+                    "last_error": null,
+                    "inbound_accepted": 4,
+                    "inbound_rejected": 0,
+                    "inbound_last_ms": 1760000000000
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "error": "bad_request",
+                  "code": "bad_request",
+                  "message": "…",
+                  "help_topic": "getting-started"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing/invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "error": "unauthorized",
+                  "code": "unauthorized",
+                  "message": "…",
+                  "help_topic": "getting-started"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "gateways"
+        ],
+        "summary": "Remove one webhook gateway connector",
+        "description": "Stops outbound delivery for the connector immediately; the audit trail stays in the activity log.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/GatewayIdPath"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ActionOk"
+                },
+                "example": {
+                  "deleted": true,
+                  "id": "sms-ops"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown connector",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "error": "not_found",
+                  "id": "sms-ops"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing/invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "error": "unauthorized",
+                  "code": "unauthorized",
+                  "message": "…",
+                  "help_topic": "getting-started"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/gateways/{id}/test": {
+      "post": {
+        "tags": [
+          "gateways"
+        ],
+        "summary": "Send one signed test payload to the outbound webhook",
+        "description": "POSTs `{event:\"test\",connector,text,timestamp_ms}` with `X-OpenMesh-Signature` over the raw body (single attempt, no retries) and returns the adapter's HTTP status. Token authenticated; recorded in the activity log.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/GatewayIdPath"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Test delivery result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GatewayTestResult"
+                },
+                "example": {
+                  "ok": true,
+                  "connector": "sms-ops",
+                  "status": 200,
+                  "attempts": 1,
+                  "error": null
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "error": "bad_request",
+                  "code": "bad_request",
+                  "message": "…",
+                  "help_topic": "getting-started"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing/invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "error": "unauthorized",
+                  "code": "unauthorized",
+                  "message": "…",
+                  "help_topic": "getting-started"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown connector or no outbound webhook",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "error": "not_found",
+                  "message": "gateway not found"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/gateways/{id}/inbound": {
+      "post": {
+        "tags": [
+          "gateways"
+        ],
+        "summary": "Inbound webhook: inject one signed channel message",
+        "description": "Authenticated with `X-OpenMesh-Signature: sha256=<hex HMAC-SHA256(secret, raw body)>` using the connector's `inbound.secret_env` (NOT the bridge bearer token), verified in constant time. Body `{text, from, timestamp_ms}`; `text` is required and limited to `max_chars`, requests are rate limited to 30/minute. `from` is display-only attribution from the adapter and never an identity claim: the injected message is signed by this bridge. Bad signature/missing secret -> 401, unknown connector or disabled inbound -> 404, over-length/invalid JSON -> 400, rate limit -> 429; nothing is injected on any error. Successful injection is audited.",
+        "security": [],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/GatewayIdPath"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "text"
+                ],
+                "properties": {
+                  "text": {
+                    "type": "string"
+                  },
+                  "from": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "maxLength": 120,
+                    "description": "Display-only sender label, e.g. a phone number."
+                  },
+                  "timestamp_ms": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "int64"
+                  }
+                }
+              },
+              "example": {
+                "text": "Reply from SMS",
+                "from": "+4712345678",
+                "timestamp_ms": 1760000000000
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Injected message",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GatewayInboundResult"
+                },
+                "example": {
+                  "ok": true,
+                  "connector": "sms-ops",
+                  "channel_id": "dba1337a96acc686",
+                  "message_id": 1024
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "error": "bad_request",
+                  "code": "bad_request",
+                  "message": "…",
+                  "help_topic": "getting-started"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing/invalid signature or unset secret (no injection)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "error": "unauthorized"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown connector or inbound disabled (no injection)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "error": "inbound_disabled"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Body larger than 64 KiB",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "error": "too_large"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "More than 30 authenticated inbound requests/minute for this connector",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "error": "rate_limited",
+                  "message": "inbound rate limit exceeded"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/backbone/links": {
+      "get": {
+        "tags": [
+          "backbone"
+        ],
+        "summary": "List outbound backbone links with per-link status",
+        "description": "One entry per persisted link (`<data-dir>/backbone-links.json`). Bearer tokens are redacted as `token=redacted`.",
+        "responses": {
+          "200": {
+            "description": "Outbound links",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BackboneLinks"
+                },
+                "example": [
+                  {
+                    "name": "oslo",
+                    "mode": "client",
+                    "enabled": true,
+                    "running": true,
+                    "connected": true,
+                    "connected_at_ms": 1760000000000,
+                    "attempts": 1,
+                    "last_error": null,
+                    "url": "openmesh://backbone?host=mesh.example.org&port=9443&token=redacted&node=6b1f4a02c9de8810&name=oslo&v=1",
+                    "stats": {
+                      "frames_in": 100,
+                      "frames_out": 90,
+                      "bytes_in": 24000,
+                      "bytes_out": 22000
+                    }
+                  }
+                ]
+              }
+            }
+          },
+          "401": {
+            "description": "Missing/invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "error": "unauthorized",
+                  "code": "unauthorized",
+                  "message": "…",
+                  "help_topic": "getting-started"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/backbone/links/{name}": {
+      "put": {
+        "tags": [
+          "backbone"
+        ],
+        "summary": "Add or update one outbound backbone link",
+        "description": "Persists the link in `backbone-links.json` (mode 0600) and (re)starts its reconnect loop. `enabled:false` keeps the entry without dialing. The legacy single-link `join` path manages the link named `default`.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/LinkNamePath"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BackboneLinkConfig"
+              },
+              "example": {
+                "url": "openmesh://backbone?host=mesh.example.org&port=9443&token=…&name=oslo",
+                "enabled": true
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Link status (token redacted)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BackboneLink"
+                },
+                "example": {
+                  "name": "oslo",
+                  "mode": "client",
+                  "enabled": true,
+                  "running": true,
+                  "connected": true,
+                  "connected_at_ms": 1760000000000,
+                  "attempts": 1,
+                  "last_error": null,
+                  "url": "openmesh://backbone?host=mesh.example.org&port=9443&token=redacted&node=6b1f4a02c9de8810&name=oslo&v=1",
+                  "stats": {
+                    "frames_in": 100,
+                    "frames_out": 90,
+                    "bytes_in": 24000,
+                    "bytes_out": 22000
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "error": "bad_request",
+                  "code": "bad_request",
+                  "message": "…",
+                  "help_topic": "getting-started"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing/invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "error": "unauthorized",
+                  "code": "unauthorized",
+                  "message": "…",
+                  "help_topic": "getting-started"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "backbone"
+        ],
+        "summary": "Remove one outbound backbone link",
+        "description": "Stops the link's reconnect loop and deletes it from `backbone-links.json`.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/LinkNamePath"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ActionOk"
+                },
+                "example": {
+                  "deleted": true,
+                  "name": "oslo"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown link",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "error": "not_found",
+                  "name": "oslo"
                 }
               }
             }

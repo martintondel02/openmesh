@@ -22,6 +22,19 @@
 //! openmesh-cli backbone rotate-token
 //! openmesh-cli backbone connect 'openmesh://backbone?host=...&port=9443&token=...'
 //! openmesh-cli backbone disconnect <node_id>
+//! openmesh-cli backbone links list|add --url ... [--name ...]|remove <name>
+//! ```
+//!
+//! Gateway connectors (authenticated webhooks; secrets are env-var names only):
+//!
+//! ```text
+//! openmesh-cli gateways list
+//! openmesh-cli gateways show <id>
+//! openmesh-cli gateways set <id> --from-file gateways.json
+//! openmesh-cli gateways set sms-ops --url https://adapter/hook --secret-env OUT=NAME \
+//!       --secret-env IN=NAME --inbound --inbound-channel <channel_id>
+//! openmesh-cli gateways test <id>
+//! openmesh-cli gateways remove <id>
 //! ```
 
 use std::process::ExitCode;
@@ -100,6 +113,99 @@ enum BackboneCommand {
         /// Backbone server node id (hex).
         node_id: String,
     },
+    /// Manage multiple outbound backbone links (redundancy, separate communities, failover).
+    Links {
+        #[command(subcommand)]
+        command: Option<LinksCommand>,
+    },
+}
+
+#[derive(Debug, Clone, Subcommand)]
+enum LinksCommand {
+    /// List configured outbound links (bearer tokens are redacted).
+    List,
+    /// Add or update one outbound link.
+    Add {
+        /// `openmesh://backbone?host=...&port=...&token=...` connection URL.
+        #[arg(long, value_name = "URL")]
+        url: String,
+        /// Link name (default: derived from the connection string).
+        #[arg(long, value_name = "NAME")]
+        name: Option<String>,
+        /// Store the link disabled: kept in config, no reconnect loop.
+        #[arg(long)]
+        disabled: bool,
+    },
+    /// Remove one outbound link by name.
+    Remove {
+        /// Link name.
+        name: String,
+    },
+}
+
+#[derive(Debug, Clone, Subcommand)]
+enum GatewaysCommand {
+    /// List webhook gateway connectors and their delivery status.
+    List,
+    /// Show one gateway connector (secrets are shown as env-var names only).
+    Show {
+        /// Connector id, e.g. sms-ops.
+        id: String,
+    },
+    /// Add or update a gateway connector (from a JSON file and/or individual flags).
+    Set {
+        /// Connector id, e.g. sms-ops.
+        id: String,
+        /// Full connector JSON (see docs/design/remote-operations.md §2).
+        #[arg(long, value_name = "FILE")]
+        from_file: Option<std::path::PathBuf>,
+        /// Outbound webhook URL.
+        #[arg(long, value_name = "URL")]
+        url: Option<String>,
+        /// Outbound secret env-var name as `OUT=NAME` (never the secret value).
+        #[arg(long = "secret-env", value_name = "OUT=NAME")]
+        secret_env: Vec<String>,
+        /// Channel id to mirror; repeatable. Omit to mirror all channels.
+        #[arg(long = "channel", value_name = "ID")]
+        channel: Vec<String>,
+        /// Also forward incoming direct messages.
+        #[arg(long)]
+        include_direct: bool,
+        /// Include attachment metadata (mime/size) in outbound payloads.
+        #[arg(long)]
+        include_attachments: bool,
+        /// Outbound request timeout in milliseconds.
+        #[arg(long, value_name = "MS")]
+        timeout_ms: Option<u64>,
+        /// Outbound retry count after the first attempt.
+        #[arg(long, value_name = "N")]
+        max_retries: Option<u32>,
+        /// Enable the inbound webhook endpoint.
+        #[arg(long)]
+        inbound: bool,
+        /// Inbound channel id (required for a new inbound endpoint).
+        #[arg(long, value_name = "ID")]
+        inbound_channel: Option<String>,
+        /// Inbound secret env-var name as `IN=NAME` (never the secret value).
+        #[arg(long = "inbound-secret-env", value_name = "IN=NAME")]
+        inbound_secret_env: Option<String>,
+        /// Maximum inbound text length in characters.
+        #[arg(long, value_name = "N")]
+        max_chars: Option<usize>,
+        /// Disable the connector (kept in config).
+        #[arg(long)]
+        disable: bool,
+    },
+    /// Remove one gateway connector.
+    Remove {
+        /// Connector id.
+        id: String,
+    },
+    /// Send one signed test payload to the outbound webhook and show the result.
+    Test {
+        /// Connector id.
+        id: String,
+    },
 }
 
 #[derive(Debug, Clone, Subcommand)]
@@ -115,6 +221,12 @@ enum AgentCommand {
         /// MCP client: claude, cursor, dsh or generic.
         #[arg(long, default_value = "generic", value_name = "CLIENT")]
         client: String,
+        /// MCP transport: stdio (default, local process) or http (remote, opt-in on the bridge).
+        #[arg(long, default_value = "stdio", value_name = "TRANSPORT")]
+        transport: String,
+        /// Full remote MCP URL for --transport http (default: <api>/mcp).
+        #[arg(long, value_name = "URL")]
+        url: Option<String>,
     },
     /// Show recent mutating actions (source, action, result).
     Activity {
@@ -194,6 +306,11 @@ enum Command {
         #[command(subcommand)]
         command: Option<BackboneCommand>,
     },
+    /// Manage authenticated webhook gateways (outbound + inbound webhooks).
+    Gateways {
+        #[command(subcommand)]
+        command: GatewaysCommand,
+    },
     /// Agent/AI-native helpers: system prompt, MCP config, activity log.
     Agent {
         #[command(subcommand)]
@@ -250,6 +367,7 @@ fn main() -> ExitCode {
 async fn run(cli: Cli) -> Result<u8> {
     match &cli.command {
         Command::Backbone { command } => backbone_command(&cli, command.as_ref()).await,
+        Command::Gateways { command } => gateways_command(&cli, command).await,
         Command::Agent { command } => agent_command(&cli, command).await,
         Command::Config { command } => config_command(&cli, command).await,
         Command::Help { topic } => help_command(&cli, topic.as_deref()).await,
@@ -1296,6 +1414,22 @@ fn mcp_client_config(api: &str, token_file: &str) -> Value {
     })
 }
 
+/// Remote MCP-over-HTTP client config (`remote-operations.md` §1). The token is a placeholder:
+/// clients send `Authorization: Bearer <bridge token>`; never print the token itself.
+fn mcp_http_client_config(url: &str) -> Value {
+    json!({
+        "mcpServers": {
+            "openmesh": {
+                "type": "http",
+                "url": url,
+                "headers": {
+                    "Authorization": "Bearer ${OPENMESH_TOKEN}",
+                },
+            }
+        }
+    })
+}
+
 fn tier_is_advanced(tier: &str) -> Result<bool> {
     match tier.trim().to_ascii_lowercase().as_str() {
         "beginner" => Ok(false),
@@ -1438,9 +1572,9 @@ fn build_agent_prompt(
 
 async fn agent_command(cli: &Cli, command: &AgentCommand) -> Result<u8> {
     let base = api_base(cli);
-    let token = resolve_token(cli)?;
     match command {
         AgentCommand::Prompt { tier } => {
+            let token = resolve_token(cli)?;
             tier_is_advanced(tier)?;
             let config = http_json("GET", &base, "/api/config", &token, None).await?;
             let status = http_json("GET", &base, "/api/status", &token, None).await?;
@@ -1461,7 +1595,11 @@ async fn agent_command(cli: &Cli, command: &AgentCommand) -> Result<u8> {
                 println!("{}", value["prompt"].as_str().unwrap_or(""));
             }
         }
-        AgentCommand::Config { client } => {
+        AgentCommand::Config {
+            client,
+            transport,
+            url,
+        } => {
             let client = client.trim().to_ascii_lowercase();
             if !matches!(client.as_str(), "claude" | "cursor" | "dsh" | "generic") {
                 bail!("unknown client '{client}': use claude, cursor, dsh or generic");
@@ -1472,16 +1610,38 @@ async fn agent_command(cli: &Cli, command: &AgentCommand) -> Result<u8> {
                 .unwrap_or_else(default_token_path)
                 .display()
                 .to_string();
-            let config = mcp_client_config(&base, &token_file);
-            // stdout stays valid JSON so it can be redirected straight into a client config.
-            println!("{}", serde_json::to_string_pretty(&config)?);
-            eprintln!(
-                "openmesh-cli: paste this into the {client} MCP configuration (mcpServers). \
-                 It runs `{} mcp` with OPENMESH_API={base} and reads the token from {token_file}.",
-                bridge_binary_path()
-            );
+            match transport.trim().to_ascii_lowercase().as_str() {
+                "stdio" => {
+                    let config = mcp_client_config(&base, &token_file);
+                    // stdout stays valid JSON so it can be redirected straight into a client config.
+                    println!("{}", serde_json::to_string_pretty(&config)?);
+                    eprintln!(
+                        "openmesh-cli: paste this into the {client} MCP configuration (mcpServers). \
+                         It runs `{} mcp` with OPENMESH_API={base} and reads the token from {token_file}.",
+                        bridge_binary_path()
+                    );
+                }
+                "http" => {
+                    let url = url
+                        .clone()
+                        .unwrap_or_else(|| format!("{}/mcp", base.trim_end_matches('/')));
+                    if !url.starts_with("http://") && !url.starts_with("https://") {
+                        bail!("--url must start with http:// or https:// (got '{url}')");
+                    }
+                    let config = mcp_http_client_config(&url);
+                    println!("{}", serde_json::to_string_pretty(&config)?);
+                    eprintln!(
+                        "openmesh-cli: paste this into the {client} MCP configuration (mcpServers). \
+                         Remote MCP must be enabled in <data-dir>/mcp-http.json (enabled:true) and is \
+                         read-only unless allow_write:true. Replace the Authorization placeholder with \
+                         'Bearer <token>' using the bridge token from {token_file} (never commit it)."
+                    );
+                }
+                other => bail!("unknown --transport '{other}': use stdio or http"),
+            }
         }
         AgentCommand::Activity { limit } => {
+            let token = resolve_token(cli)?;
             let limit = (*limit).clamp(1, 256);
             let value = http_json(
                 "GET",
@@ -2059,6 +2219,38 @@ fn print_backbone_info(info: &Value, json: bool) -> Result<()> {
                 .unwrap_or(0),
         );
     }
+    if let Some(links) = info.get("links").and_then(|v| v.as_array()) {
+        if links.is_empty() {
+            println!("links        (none)");
+        } else {
+            let summary = links
+                .iter()
+                .map(|link| {
+                    format!(
+                        "{}({})",
+                        link.get("name").and_then(|v| v.as_str()).unwrap_or("?"),
+                        if link
+                            .get("connected")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false)
+                        {
+                            "connected"
+                        } else if link
+                            .get("enabled")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false)
+                        {
+                            "connecting"
+                        } else {
+                            "disabled"
+                        }
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
+            println!("links        {summary}");
+        }
+    }
     Ok(())
 }
 
@@ -2192,13 +2384,677 @@ async fn backbone_command(cli: &Cli, command: Option<&BackboneCommand>) -> Resul
                 );
             }
         }
+        Some(BackboneCommand::Links { command }) => {
+            return links_command(cli, &base, &token, command.as_ref()).await;
+        }
     }
     Ok(0)
+}
+
+// ---------------------------------------------------------------------------------------------
+// Multiple outbound backbone links (remote-operations.md §3)
+// ---------------------------------------------------------------------------------------------
+
+async fn links_command(
+    cli: &Cli,
+    base: &str,
+    token: &str,
+    command: Option<&LinksCommand>,
+) -> Result<u8> {
+    match command {
+        None | Some(LinksCommand::List) => {
+            let value = http_json("GET", base, "/api/backbone/links", token, None).await?;
+            if cli.json {
+                println!("{}", serde_json::to_string_pretty(&value)?);
+            } else {
+                let links = value.as_array().cloned().unwrap_or_default();
+                if links.is_empty() {
+                    println!("(no outbound backbone links)");
+                    println!(
+                        "Add one with: openmesh-cli backbone links add --url                          '<openmesh://backbone?host=...&port=9443&token=...>' [--name oslo]"
+                    );
+                } else {
+                    println!(
+                        "{:<14} {:<8} {:<10} {:<19} {:<13} url",
+                        "name", "enabled", "connected", "frames in/out", "last_error"
+                    );
+                    for link in links {
+                        let stats = link.get("stats").cloned().unwrap_or(Value::Null);
+                        let frames = format!(
+                            "{}/{}",
+                            stats.get("frames_in").and_then(|v| v.as_u64()).unwrap_or(0),
+                            stats
+                                .get("frames_out")
+                                .and_then(|v| v.as_u64())
+                                .unwrap_or(0)
+                        );
+                        println!(
+                            "{:<14} {:<8} {:<10} {:<19} {:<13} {}",
+                            link.get("name").and_then(|v| v.as_str()).unwrap_or(""),
+                            link.get("enabled")
+                                .and_then(|v| v.as_bool())
+                                .unwrap_or(false),
+                            link.get("connected")
+                                .and_then(|v| v.as_bool())
+                                .unwrap_or(false),
+                            frames,
+                            short_text(
+                                link.get("last_error")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("-"),
+                                13
+                            ),
+                            link.get("url").and_then(|v| v.as_str()).unwrap_or(""),
+                        );
+                    }
+                }
+            }
+        }
+        Some(LinksCommand::Add {
+            url,
+            name,
+            disabled,
+        }) => {
+            let name = name.clone().unwrap_or_else(|| derive_link_name(url));
+            let value = http_json(
+                "PUT",
+                base,
+                &format!("/api/backbone/links/{name}"),
+                token,
+                Some(json!({ "url": url, "enabled": !disabled })),
+            )
+            .await?;
+            if cli.json {
+                println!("{}", serde_json::to_string_pretty(&value)?);
+            } else {
+                println!(
+                    "link {name}: enabled={} connected={}",
+                    value
+                        .get("enabled")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(true),
+                    value
+                        .get("connected")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false)
+                );
+                println!("  inspect     openmesh-cli backbone links list");
+                println!("  peers       openmesh-cli backbone peers");
+            }
+        }
+        Some(LinksCommand::Remove { name }) => {
+            let value = http_json(
+                "DELETE",
+                base,
+                &format!("/api/backbone/links/{name}"),
+                token,
+                None,
+            )
+            .await?;
+            if cli.json {
+                println!("{}", serde_json::to_string_pretty(&value)?);
+            } else {
+                println!(
+                    "link {name}: deleted={}",
+                    value
+                        .get("deleted")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false)
+                );
+            }
+        }
+    }
+    Ok(0)
+}
+
+/// Derive a link name from a connection string: `name=` query value, else `host-port`.
+fn derive_link_name(url: &str) -> String {
+    let mut name = None;
+    let mut host = None;
+    let mut port = "9443";
+    if let Some((_, query)) = url.split_once('?') {
+        for pair in query.split('&') {
+            let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+            match key {
+                "name" => name = Some(value.to_string()),
+                "host" => host = Some(value.to_string()),
+                "port" => port = value,
+                _ => {}
+            }
+        }
+    }
+    let raw = name
+        .filter(|value| !value.is_empty())
+        .or_else(|| host.map(|host| format!("{host}-{port}")))
+        .unwrap_or_else(|| "link".to_string());
+    let sanitised: String = raw
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let trimmed = sanitised.trim_matches('-');
+    let truncated: String = trimmed.chars().take(32).collect();
+    if truncated.is_empty() {
+        "link".to_string()
+    } else {
+        truncated
+    }
+}
+
+fn short_text(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_string();
+    }
+    text.chars().take(max.saturating_sub(1)).collect::<String>() + "…"
+}
+
+/// Display-safe URL: keep scheme/host/path, drop query and fragment (they may carry keys).
+fn redact_webhook_url(url: &str) -> String {
+    let without_fragment = url.split('#').next().unwrap_or(url);
+    without_fragment
+        .split('?')
+        .next()
+        .unwrap_or(without_fragment)
+        .to_string()
+}
+
+// ---------------------------------------------------------------------------------------------
+// Gateways (authenticated webhooks, remote-operations.md §2)
+// ---------------------------------------------------------------------------------------------
+
+async fn gateways_command(cli: &Cli, command: &GatewaysCommand) -> Result<u8> {
+    let base = api_base(cli);
+    let token = resolve_token(cli)?;
+    match command {
+        GatewaysCommand::List => {
+            let value = http_json("GET", &base, "/api/gateways", &token, None).await?;
+            if cli.json {
+                println!("{}", serde_json::to_string_pretty(&value)?);
+            } else {
+                let connectors = value
+                    .get("connectors")
+                    .and_then(|v| v.as_array())
+                    .cloned()
+                    .unwrap_or_default();
+                if connectors.is_empty() {
+                    println!("(no gateway connectors)");
+                    println!(
+                        "Add one with: openmesh-cli gateways set sms-ops --url                          https://adapter.example/hook --secret-env OUT=OPENMESH_SMS_OUT_SECRET                          --secret-env IN=OPENMESH_SMS_IN_SECRET --inbound --inbound-channel <id>"
+                    );
+                } else {
+                    println!(
+                        "{:<16} {:<8} {:<9} {:<10} {:<10} url / inbound",
+                        "id", "enabled", "deliver", "failures", "inbound"
+                    );
+                    for connector in connectors {
+                        let status = connector.get("status").cloned().unwrap_or(Value::Null);
+                        let outbound = connector.get("outbound");
+                        let inbound = connector.get("inbound");
+                        let url = outbound
+                            .and_then(|outbound| outbound.get("url"))
+                            .and_then(|v| v.as_str())
+                            .map(redact_webhook_url)
+                            .unwrap_or_else(|| "-".to_string());
+                        let inbound_path = inbound
+                            .and_then(|inbound| inbound.get("inbound_path"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("-");
+                        println!(
+                            "{:<16} {:<8} {:<9} {:<10} {:<10} {} {}",
+                            connector.get("id").and_then(|v| v.as_str()).unwrap_or(""),
+                            connector
+                                .get("enabled")
+                                .and_then(|v| v.as_bool())
+                                .unwrap_or(false),
+                            status
+                                .get("deliveries")
+                                .and_then(|v| v.as_u64())
+                                .unwrap_or(0),
+                            status.get("failures").and_then(|v| v.as_u64()).unwrap_or(0),
+                            inbound
+                                .and_then(|inbound| inbound.get("enabled"))
+                                .and_then(|v| v.as_bool())
+                                .unwrap_or(false),
+                            url,
+                            if inbound_path == "-" {
+                                String::new()
+                            } else {
+                                format!("inbound={inbound_path}")
+                            }
+                        );
+                    }
+                }
+            }
+        }
+        GatewaysCommand::Show { id } => {
+            let gateway = fetch_gateway(&base, &token, id).await?;
+            print_gateway(&gateway, cli.json)?;
+        }
+        GatewaysCommand::Set {
+            id,
+            from_file,
+            url,
+            secret_env,
+            channel,
+            include_direct,
+            include_attachments,
+            timeout_ms,
+            max_retries,
+            inbound,
+            inbound_channel,
+            inbound_secret_env,
+            max_chars,
+            disable,
+        } => {
+            let mut body = if let Some(path) = from_file {
+                let bytes = tokio::fs::read(path)
+                    .await
+                    .with_context(|| format!("reading gateway config {}", path.display()))?;
+                serde_json::from_slice::<Value>(&bytes)
+                    .with_context(|| format!("parsing gateway config {}", path.display()))?
+            } else {
+                // Patch the existing connector when it exists, else start a fresh one.
+                fetch_gateway(&base, &token, id)
+                    .await
+                    .unwrap_or_else(|_| json!({ "id": id, "kind": "webhook", "enabled": true }))
+            };
+            if !body.is_object() {
+                bail!("gateway config must be a JSON object");
+            }
+            body["id"] = json!(id);
+            for spec in secret_env {
+                apply_secret_env(&mut body, spec)?;
+            }
+            if let Some(url) = url {
+                gateway_section(&mut body, "outbound", true)?.insert("url".into(), json!(url));
+            }
+            if !channel.is_empty() {
+                gateway_section(&mut body, "outbound", true)?
+                    .insert("channel_ids".into(), json!(channel));
+            }
+            if *include_direct {
+                gateway_section(&mut body, "outbound", true)?
+                    .insert("include_direct".into(), json!(true));
+            }
+            if *include_attachments {
+                gateway_section(&mut body, "outbound", true)?
+                    .insert("include_attachments".into(), json!(true));
+            }
+            if let Some(timeout) = timeout_ms {
+                gateway_section(&mut body, "outbound", true)?
+                    .insert("timeout_ms".into(), json!(timeout));
+            }
+            if let Some(retries) = max_retries {
+                gateway_section(&mut body, "outbound", true)?
+                    .insert("max_retries".into(), json!(retries));
+            }
+            if *inbound {
+                let section = gateway_section(&mut body, "inbound", true)?;
+                section.insert("enabled".into(), json!(true));
+                if let Some(channel_id) = inbound_channel {
+                    section.insert("channel_id".into(), json!(channel_id));
+                }
+                if let Some(env) = inbound_secret_env {
+                    section.insert("secret_env".into(), json!(strip_env_direction(env)));
+                }
+                section
+                    .entry("max_chars".to_string())
+                    .or_insert_with(|| json!(400));
+                if !section.contains_key("secret_env") {
+                    bail!("--inbound requires --inbound-secret-env IN=NAME");
+                }
+                if !section.contains_key("channel_id") {
+                    bail!("--inbound requires --inbound-channel <CHANNEL_ID>");
+                }
+            } else {
+                if inbound_secret_env.is_some() || inbound_channel.is_some() || max_chars.is_some()
+                {
+                    let section = gateway_section(&mut body, "inbound", true)?;
+                    if let Some(env) = inbound_secret_env {
+                        section.insert("secret_env".into(), json!(strip_env_direction(env)));
+                    }
+                    if let Some(channel_id) = inbound_channel {
+                        section.insert("channel_id".into(), json!(channel_id));
+                    }
+                    if let Some(max) = max_chars {
+                        section.insert("max_chars".into(), json!(max));
+                    }
+                }
+            }
+            if *disable {
+                body["enabled"] = json!(false);
+            } else if body.get("enabled").is_none() {
+                body["enabled"] = json!(true);
+            }
+            let value = http_json(
+                "PUT",
+                &base,
+                &format!("/api/gateways/{id}"),
+                &token,
+                Some(body),
+            )
+            .await?;
+            if cli.json {
+                println!("{}", serde_json::to_string_pretty(&value)?);
+            } else {
+                println!("gateway {id} saved.");
+                print_gateway(&value, false)?;
+            }
+        }
+        GatewaysCommand::Remove { id } => {
+            let value = http_json(
+                "DELETE",
+                &base,
+                &format!("/api/gateways/{id}"),
+                &token,
+                None,
+            )
+            .await?;
+            if cli.json {
+                println!("{}", serde_json::to_string_pretty(&value)?);
+            } else {
+                println!(
+                    "gateway {id}: deleted={}",
+                    value
+                        .get("deleted")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false)
+                );
+            }
+        }
+        GatewaysCommand::Test { id } => {
+            let value = http_json(
+                "POST",
+                &base,
+                &format!("/api/gateways/{id}/test"),
+                &token,
+                Some(json!({})),
+            )
+            .await?;
+            if cli.json {
+                println!("{}", serde_json::to_string_pretty(&value)?);
+            } else {
+                println!(
+                    "test {id}: ok={} status={} attempts={}",
+                    value.get("ok").and_then(|v| v.as_bool()).unwrap_or(false),
+                    value
+                        .get("status")
+                        .and_then(|v| v.as_u64())
+                        .map(|status| status.to_string())
+                        .unwrap_or_else(|| "-".to_string()),
+                    value.get("attempts").and_then(|v| v.as_u64()).unwrap_or(0),
+                );
+                if let Some(error) = value.get("error").and_then(|v| v.as_str()) {
+                    println!("  error       {error}");
+                }
+            }
+        }
+    }
+    Ok(0)
+}
+
+fn strip_env_direction(value: &str) -> String {
+    let value = value.trim();
+    value
+        .split_once('=')
+        .filter(|(direction, _)| {
+            matches!(
+                direction.trim().to_ascii_uppercase().as_str(),
+                "OUT" | "OUTBOUND" | "IN" | "INBOUND"
+            )
+        })
+        .map(|(_, name)| name.to_string())
+        .unwrap_or_else(|| value.to_string())
+}
+
+fn apply_secret_env(body: &mut Value, spec: &str) -> Result<()> {
+    let Some((direction, name)) = spec.split_once('=') else {
+        bail!("--secret-env expects OUT=NAME or IN=NAME");
+    };
+    let name = name.trim();
+    if name.is_empty() {
+        bail!("--secret-env: the environment variable name must not be empty");
+    }
+    match direction.trim().to_ascii_uppercase().as_str() {
+        "OUT" | "OUTBOUND" => {
+            gateway_section(body, "outbound", true)?.insert("secret_env".into(), json!(name));
+        }
+        "IN" | "INBOUND" => {
+            gateway_section(body, "inbound", true)?.insert("secret_env".into(), json!(name));
+        }
+        other => bail!("--secret-env direction must be OUT or IN (got {other})"),
+    }
+    Ok(())
+}
+
+fn gateway_section<'a>(
+    body: &'a mut Value,
+    key: &str,
+    create: bool,
+) -> Result<&'a mut serde_json::Map<String, Value>> {
+    let object = body
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("gateway config must be a JSON object"))?;
+    if create && !object.contains_key(key) {
+        object.insert(key.to_string(), json!({}));
+    }
+    object
+        .get_mut(key)
+        .and_then(|value| value.as_object_mut())
+        .ok_or_else(|| anyhow::anyhow!("gateway {key} section must be a JSON object"))
+}
+
+async fn fetch_gateway(base: &str, token: &str, id: &str) -> Result<Value> {
+    let list = http_json("GET", base, "/api/gateways", token, None).await?;
+    list.get("connectors")
+        .and_then(|v| v.as_array())
+        .and_then(|connectors| {
+            connectors
+                .iter()
+                .find(|connector| connector.get("id").and_then(|v| v.as_str()) == Some(id))
+        })
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("gateway '{id}' not found"))
+}
+
+fn print_gateway(gateway: &Value, json: bool) -> Result<()> {
+    if json {
+        println!("{}", serde_json::to_string_pretty(gateway)?);
+        return Ok(());
+    }
+    println!(
+        "id           {}   kind={} enabled={}",
+        gateway.get("id").and_then(|v| v.as_str()).unwrap_or(""),
+        gateway
+            .get("kind")
+            .and_then(|v| v.as_str())
+            .unwrap_or("webhook"),
+        gateway
+            .get("enabled")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+    );
+    if let Some(outbound) = gateway
+        .get("outbound")
+        .filter(|outbound| !outbound.is_null())
+    {
+        println!(
+            "outbound     {}  secret_env={} set={}",
+            redact_webhook_url(outbound.get("url").and_then(|v| v.as_str()).unwrap_or("")),
+            outbound
+                .get("secret_env")
+                .and_then(|v| v.as_str())
+                .unwrap_or(""),
+            outbound
+                .get("secret_set")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+        );
+        println!(
+            "             channels={} include_direct={} include_attachments={} timeout_ms={} max_retries={}",
+            outbound
+                .get("channel_ids")
+                .and_then(|v| v.as_array())
+                .map(|ids| {
+                    if ids.is_empty() {
+                        "all".to_string()
+                    } else {
+                        ids.iter()
+                            .filter_map(|id| id.as_str())
+                            .collect::<Vec<_>>()
+                            .join(",")
+                    }
+                })
+                .unwrap_or_else(|| "all".to_string()),
+            outbound
+                .get("include_direct")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+            outbound
+                .get("include_attachments")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+            outbound
+                .get("timeout_ms")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0),
+            outbound
+                .get("max_retries")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0),
+        );
+    } else {
+        println!("outbound     (not configured)");
+    }
+    if let Some(inbound) = gateway.get("inbound").filter(|inbound| !inbound.is_null()) {
+        println!(
+            "inbound      enabled={} secret_env={} set={} channel={} max_chars={}",
+            inbound
+                .get("enabled")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+            inbound
+                .get("secret_env")
+                .and_then(|v| v.as_str())
+                .unwrap_or(""),
+            inbound
+                .get("secret_set")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+            inbound
+                .get("channel_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or(""),
+            inbound
+                .get("max_chars")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0),
+        );
+        if let Some(path) = inbound.get("inbound_path").and_then(|v| v.as_str()) {
+            println!(
+                "inbound url  POST {}  (X-OpenMesh-Signature: sha256=<hex HMAC-SHA256>)",
+                path
+            );
+        }
+    } else {
+        println!("inbound      (not configured)");
+    }
+    if let Some(status) = gateway.get("status") {
+        println!(
+            "status       deliveries={} failures={} retries={} last_status={} last_error={}",
+            status
+                .get("deliveries")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0),
+            status.get("failures").and_then(|v| v.as_u64()).unwrap_or(0),
+            status.get("retries").and_then(|v| v.as_u64()).unwrap_or(0),
+            status
+                .get("last_status")
+                .and_then(|v| v.as_u64())
+                .map(|status| status.to_string())
+                .unwrap_or_else(|| "-".to_string()),
+            status
+                .get("last_error")
+                .and_then(|v| v.as_str())
+                .unwrap_or("-"),
+        );
+        println!(
+            "inbound      accepted={} rejected={}",
+            status
+                .get("inbound_accepted")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0),
+            status
+                .get("inbound_rejected")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0),
+        );
+    }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn link_names_derive_from_connection_strings() {
+        assert_eq!(
+            derive_link_name(
+                "openmesh://backbone?host=mesh.example.org&port=9443&token=abc&name=oslo"
+            ),
+            "oslo"
+        );
+        assert_eq!(
+            derive_link_name("openmesh://backbone?host=mesh.example.org&port=9443&token=abc"),
+            "mesh-example-org-9443"
+        );
+        assert_eq!(
+            derive_link_name("openmesh://backbone?host=10.0.0.5&port=9555"),
+            "10-0-0-5-9555"
+        );
+        assert!(!derive_link_name("garbage").is_empty());
+    }
+
+    #[test]
+    fn gateway_display_urls_are_redacted() {
+        assert_eq!(
+            redact_webhook_url("https://hooks.example/services/T000/B000/secret?token=abc"),
+            "https://hooks.example/services/T000/B000/secret"
+        );
+        assert_eq!(
+            redact_webhook_url("https://gateway.example/openmesh"),
+            "https://gateway.example/openmesh"
+        );
+        assert!(
+            !redact_webhook_url("https://user:pass@gateway.example/hook?api_key=super-secret")
+                .contains("super-secret")
+        );
+    }
+
+    #[test]
+    fn gateway_secret_env_specs_target_outbound_and_inbound() {
+        let mut body = json!({ "id": "sms-ops" });
+        apply_secret_env(&mut body, "OUT=OPENMESH_SMS_OUT_SECRET").unwrap();
+        apply_secret_env(&mut body, "IN=OPENMESH_SMS_IN_SECRET").unwrap();
+        assert_eq!(body["outbound"]["secret_env"], "OPENMESH_SMS_OUT_SECRET");
+        assert_eq!(body["inbound"]["secret_env"], "OPENMESH_SMS_IN_SECRET");
+        assert!(apply_secret_env(&mut body, "OPENMESH_BARE").is_err());
+        assert!(apply_secret_env(&mut body, "SIDEWAYS=NAME").is_err());
+        assert_eq!(
+            strip_env_direction("IN=OPENMESH_SMS_IN_SECRET"),
+            "OPENMESH_SMS_IN_SECRET"
+        );
+        assert_eq!(
+            strip_env_direction("OPENMESH_SMS_IN_SECRET"),
+            "OPENMESH_SMS_IN_SECRET"
+        );
+    }
 
     #[test]
     fn authority_parsing() {
@@ -2287,6 +3143,22 @@ mod tests {
         ));
         // Unknown regions are conservative.
         assert!(override_values_exceed_legal("MARS", Some(1), None, None));
+    }
+
+    #[test]
+    fn mcp_http_config_uses_url_and_header_placeholder() {
+        let config = mcp_http_client_config("http://127.0.0.1:8787/mcp");
+        let server = &config["mcpServers"]["openmesh"];
+        assert_eq!(server["type"], "http");
+        assert_eq!(server["url"], "http://127.0.0.1:8787/mcp");
+        assert_eq!(
+            server["headers"]["Authorization"],
+            "Bearer ${OPENMESH_TOKEN}"
+        );
+        // No real token material is embedded in the generated config.
+        let text = config.to_string();
+        assert!(!text.contains("OPENMESH_TOKEN_FILE"));
+        assert!(text.contains("${OPENMESH_TOKEN}"));
     }
 
     #[test]

@@ -1,7 +1,9 @@
-//! Backbone outbound client (`openmesh-bridge join <openmesh://backbone?...>`).
+//! Backbone outbound link loop (`openmesh-bridge join <openmesh://backbone?...>` and the
+//! `backbone-links.json` multi-link list).
 //!
-//! Keeps a persistent authenticated TCP link to a backbone server and reconnects with
-//! exponential backoff (plus jitter) whenever the link drops.
+//! Keeps one persistent authenticated TCP link per configured backbone and reconnects with
+//! exponential backoff (plus jitter) whenever the link drops. Several links may run at once; the
+//! engine's `(src, seq)` dedup suppresses frames that arrive over more than one path.
 
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -11,21 +13,22 @@ use tokio::net::TcpStream;
 use tokio::sync::watch;
 
 use super::wire::{self, ClientHandshakeParams};
-use super::{BackboneManager, JoinTarget, PeerDirection, WireError};
+use super::{BackboneManager, ClientLink, PeerDirection, WireError};
 
-/// Run the outbound link loop until `stop` or the bridge shutdown fires.
+/// Run one outbound link's reconnect loop until the link stop flag or bridge shutdown fires.
 pub async fn client_loop(
     manager: Arc<BackboneManager>,
-    join: JoinTarget,
-    stop: Arc<std::sync::atomic::AtomicBool>,
+    link: Arc<ClientLink>,
     mut shutdown: watch::Receiver<bool>,
 ) {
+    let join = &link.target;
     let mut backoff = join.reconnect_min_ms;
     let address = join.connection.authority();
     loop {
-        if stop.load(Ordering::Relaxed) || *shutdown.borrow() {
+        if link.stop.load(Ordering::Relaxed) || *shutdown.borrow() {
             break;
         }
+        link.begin_attempt();
         let connect =
             tokio::time::timeout(Duration::from_secs(10), TcpStream::connect(&address)).await;
         match connect {
@@ -40,7 +43,7 @@ pub async fn client_loop(
                 match wire::client_handshake(&mut stream, &params).await {
                     Ok(welcome) => {
                         backoff = join.reconnect_min_ms;
-                        manager.clear_last_error().await;
+                        link.mark_connected();
                         let remote = stream
                             .peer_addr()
                             .map(|addr| addr.to_string())
@@ -55,6 +58,7 @@ pub async fn client_loop(
                                 welcome.node_id,
                                 welcome.name.clone(),
                                 PeerDirection::Outbound,
+                                Some(link.name.clone()),
                                 remote,
                                 auth.to_string(),
                                 "backbone-server".to_string(),
@@ -64,6 +68,7 @@ pub async fn client_loop(
                         tracing::info!(
                             backbone = %welcome.node_id,
                             name = %welcome.name,
+                            link = %link.name,
                             "backbone outbound link established"
                         );
                         let (read_half, write_half) = stream.into_split();
@@ -78,32 +83,29 @@ pub async fn client_loop(
                             shutdown,
                         )
                         .await;
+                        link.mark_disconnected();
                     }
                     Err(WireError::AuthFailed(reason)) => {
-                        manager
-                            .note_outbound_failure(format!("backbone auth failed: {reason}"))
-                            .await;
-                        tracing::warn!(reason, "backbone server rejected our token");
+                        link.note_error(format!("backbone auth failed: {reason}"));
+                        tracing::warn!(
+                            link = %link.name,
+                            reason,
+                            "backbone server rejected our token"
+                        );
                     }
                     Err(error) => {
-                        manager
-                            .note_outbound_failure(format!("backbone handshake failed: {error}"))
-                            .await;
+                        link.note_error(format!("backbone handshake failed: {error}"));
                     }
                 }
             }
             Ok(Err(error)) => {
-                manager
-                    .note_outbound_failure(format!("cannot reach backbone {address}: {error}"))
-                    .await;
+                link.note_error(format!("cannot reach backbone {address}: {error}"));
             }
             Err(_) => {
-                manager
-                    .note_outbound_failure(format!("cannot reach backbone {address}: timeout"))
-                    .await;
+                link.note_error(format!("cannot reach backbone {address}: timeout"));
             }
         }
-        if stop.load(Ordering::Relaxed) || *shutdown.borrow() {
+        if link.stop.load(Ordering::Relaxed) || *shutdown.borrow() {
             break;
         }
         let jitter = rand::random::<u64>() % (backoff / 4 + 1);
@@ -115,6 +117,7 @@ pub async fn client_loop(
             .saturating_mul(2)
             .min(join.reconnect_max_ms.max(backoff));
     }
-    manager.on_client_loop_exit().await;
-    tracing::debug!("backbone outbound link loop stopped");
+    link.mark_disconnected();
+    manager.on_link_loop_exit(&link).await;
+    tracing::debug!(link = %link.name, "backbone outbound link loop stopped");
 }

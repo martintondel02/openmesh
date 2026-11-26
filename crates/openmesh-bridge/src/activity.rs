@@ -127,7 +127,7 @@ impl ActivityLog {
             "capacity": ACTIVITY_CAPACITY,
             "agent_connected": self.has_agent_activity(),
             "last_agent_at_ms": (self.last_agent_at_ms() > 0).then(|| self.last_agent_at_ms()),
-            "sources": ["user", "cli", "web", "agent:*"],
+            "sources": ["user", "cli", "web", "agent:*", "gateway:*"],
         })
     }
 }

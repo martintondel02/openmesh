@@ -1,6 +1,6 @@
 # OpenMesh roadmap
 
-**Status:** living document · v0.6.0 · **Last updated:** 2026-11-26
+**Status:** living document · v0.7.0 · **Last updated:** 2026-11-26
 **Calendar model:** one maintainer working with an AI agent team (DeepSeek Harness), roughly
 30–40 focused hours per week, with hardware available from M1 onward. Dates are *relative
 weeks from v0.1.0*, not promises; a 20 % buffer is included per milestone.
@@ -212,6 +212,40 @@ permissions (software cannot grant them).
 
 **Exit criteria (met):** Rust/firmware/web/Android gates incl. new override tests, docs/help/OpenAPI
 checkers, and a real-device spot-check of the override flow.
+
+## 3f. v0.6 — Media tiers and tiny voice (shipped 2026-11-26)
+
+**Goal:** make images and voice usable inside the radio's real airtime budget.
+
+* Shared tier table (`content/presets/media.json`): images Tiny 320 / Medium 640 / High 1280 /
+  Original; voice Tiny Codec2 1.3 kbps / Medium Codec2 3.2 kbps / High Opus 12 kbps.
+* Pure-Rust Codec2 (`openmesh-voice` crate, LGPL-2.1/MIT) compiled to WASM for the browser and
+  linked into Android via UniFFI — one codec on every client, no NDK/emscripten codec build.
+* Measured pre-send previews (bytes, estimated airtime, duty-budget share), profile-aware caps,
+  automatic tier suggestion; Original confirmation-gated and disabled on long-range profiles.
+* Device QA: tiny voice record/encode/playback on Android (Codec2 17 s → 2.9 KiB), image tiers
+  (Tiny screenshot → 1.7 KiB, Original over-cap gating), no crashes. Cross-client playback over
+  real radios still needs M1 hardware.
+* No wire change; vectors byte-identical.
+
+## 3g. v0.7 — Remote operations and gateways (shipped 2026-11-26)
+
+**Goal:** operate a node from elsewhere and bridge a mesh channel to the outside world.
+
+* **Remote MCP over HTTP (opt-in):** `/mcp` on the bridge listener with bearer auth, read-only
+  scope by default, existing `confirm:true` rules, sessions/SSE, rate limits, and audited writes.
+  stdio remains the default local MCP transport.
+* **Webhook gateways:** signed outbound webhook delivery and signed inbound injection
+  (`POST /api/gateways/{id}/inbound`) with env-only secrets, per-channel filters, retries,
+  metadata-only attachments and status. Adapters documented for Matrix, SMS providers, email
+  forwarders and satellite messengers (no vendor SDKs yet).
+* **Multiple backbone links:** concurrently join several backbones with per-link status/backoff;
+  engine dedup keeps loops safe; legacy single-link `join` configs still work.
+* **Security posture:** loopback by default, token auth, read-only MCP default, constant-time
+  HMAC verification, audit log, and explicit documentation that a gateway leg is no longer
+  end-to-end encrypted.
+* Docs: help topic 18, `docs/guides/remote-operations.md`, ADR-0012.
+* No wire change; vectors byte-identical.
 
 ## 4. M1 — Field-ready text mesh (weeks 1–8)
 

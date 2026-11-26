@@ -631,6 +631,14 @@ fn tool_catalog() -> Vec<ToolDef> {
     ]
 }
 
+/// `(is_write, requires_confirm)` for a tool in the shared catalog (`None` if unknown).
+pub(crate) fn tool_flags(name: &str) -> Option<(bool, bool)> {
+    tool_catalog()
+        .into_iter()
+        .find(|tool| tool.name == name)
+        .map(|tool| (tool.write, tool.confirm))
+}
+
 fn tools_list_json(read_only: bool) -> Value {
     let tools: Vec<Value> = tool_catalog()
         .into_iter()
@@ -696,7 +704,7 @@ fn redact_api(api: &str) -> String {
     api.to_string()
 }
 
-struct McpServer {
+pub(crate) struct McpServer {
     http: HttpClient,
     read_only: bool,
     write_limit: usize,
@@ -704,7 +712,28 @@ struct McpServer {
 }
 
 impl McpServer {
-    async fn handle_line(&mut self, line: &str) -> Option<String> {
+    /// Build an in-process-dispatcher handle for the HTTP transport. `api`/`token` point at the
+    /// local bridge so tool calls reuse the same REST path as stdio MCP.
+    pub(crate) fn embedded(
+        api: String,
+        token: String,
+        agent_name: String,
+        read_only: bool,
+        write_limit: usize,
+    ) -> Self {
+        Self {
+            http: HttpClient {
+                api,
+                token: Some(token),
+                agent_name,
+            },
+            read_only,
+            write_limit,
+            write_times: VecDeque::new(),
+        }
+    }
+
+    pub(crate) async fn handle_line(&mut self, line: &str) -> Option<String> {
         let request: Value = match serde_json::from_str(line) {
             Ok(value) => value,
             Err(e) => {

@@ -64,7 +64,7 @@ Read-only tools (always available):
 | `openmesh_backbone_peers` | — | connected peers with counters |
 | `openmesh_backbone_setup` | — | onboarding payload: connection string, steps, firewall, systemd |
 | `openmesh_setup_state` | — | first-run/checklist state + recommendations |
-| `openmesh_activity` | `limit?` | recent write actions with source (`user` / `agent:<name>`) |
+| `openmesh_activity` | `limit?` | recent write actions with source (`user` / `cli` / `web` / `agent:<name>` / `gateway:<id>`) |
 | `openmesh_help` | `topic?`, `audience?` | help index, or one topic's markdown from `content/help` |
 
 Write tools (hidden when `OPENMESH_MCP_READ_ONLY=1`; ⚠ = requires `"confirm": true`):
@@ -97,6 +97,25 @@ Tool contract rules:
   require `confirm: true`; the MCP server refuses destructive calls in read-only mode.
 * Timeouts: 10 s per HTTP call; long media transfers return a queued result with a message id
   instead of blocking.
+
+Transport and remote scope (v0.7):
+
+* **stdio is the default and fully local** (`openmesh-bridge mcp`); it is not deprecated or
+  feature-gated. HTTP is an **opt-in** second transport on the bridge's existing listener,
+  configured in `<data-dir>/mcp-http.json` (default `enabled: false` → 404; corrupt file → warn and
+  stay disabled).
+* The HTTP endpoint authenticates with the **existing bridge bearer token**; missing/wrong token →
+  401 and no tool execution. It is **read-only by default**: write calls are refused before
+  execution with a JSON-RPC error whose `data.code` is `http_scope_read_only`, unless
+  `allow_write: true`. `require_confirm: true` keeps the `confirm: true` rules below; the MCP tool
+  catalog is not duplicated by the transport.
+* Sessions use `Mcp-Session-Id` (accepted/generated/echoed), are bounded (`max_sessions`) and
+  rate-limited (`rate_limit_per_min`); POST returns JSON or one SSE `data:` frame when
+  `Accept: text/event-stream` is present, GET is an SSE `event: ping` keep-alive, DELETE ends the
+  session. Requests are capped at 256 KiB and every write tool call is audited in the activity log
+  (`source: agent:<name>` from `X-OpenMesh-Agent`, else `agent:mcp-http`).
+* Loopback by default: expose it only through an SSH forward, VPN or authenticated tunnel; never
+  bind the bridge to `0.0.0.0` on an untrusted network.
 
 ### 1.2 Resources
 

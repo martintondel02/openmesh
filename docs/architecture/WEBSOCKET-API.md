@@ -325,6 +325,14 @@ The server replies with a sequence of `node`, `message`, `group_message`, `confi
 | POST | `/api/attachments` | Raw body upload (`Content-Type` required, `X-OpenMesh-Filename` optional). Returns `{ "id": "att_…", "size": n, "sha256": "…" }`. Max 32 MiB. |
 | GET | `/api/events` | Server-Sent Events stream (optional convenience; WS preferred). |
 | GET | `/` | Serves the built web app (`apps/web/dist`) when present. |
+| GET | `/api/gateways` | Webhook gateway connectors with redacted config + delivery/inbound status. |
+| PUT | `/api/gateways/:id` | Upsert one connector (env-var secret names only). |
+| DELETE | `/api/gateways/:id` | Remove one connector. |
+| POST | `/api/gateways/:id/test` | Send one signed test payload to the outbound webhook. |
+| POST | `/api/gateways/:id/inbound` | HMAC-only inbound adapter callback (no bearer token); injects a channel message. |
+| GET | `/api/backbone/links` | Outbound backbone links with per-link status (tokens redacted). |
+| PUT | `/api/backbone/links/:name` | Add/update an outbound link (`openmesh://backbone?...` URL). |
+| DELETE | `/api/backbone/links/:name` | Remove an outbound link. |
 
 ---
 
@@ -369,7 +377,20 @@ accounting, configuration fields, setup payload and security model — lives in
 | DELETE | `/api/backbone/peers/:node_id` | yes | Kick a peer |
 | GET | `/api/backbone/setup` | yes | Onboarding steps, firewall commands, systemd unit, connection string |
 | GET | `/api/backbone/qr.svg` | yes | QR code of the connection string |
+| GET | `/api/backbone/links` | yes | Outbound links with per-link status (tokens redacted) |
+| PUT | `/api/backbone/links/:name` | yes | Add/update an outbound link |
+| DELETE | `/api/backbone/links/:name` | yes | Remove an outbound link |
 
 When the bridge is not in backbone mode these endpoints return
 `{"enabled": false}` (HTTP 200) rather than 404, so the panel can offer to enable backbone mode
-with one click (`POST /api/backbone/config {"enabled": true}`).
+with one click (`POST /api/backbone/config {"enabled": true}`). Outbound links work in any mode
+and are described in [BACKBONE.md §7b](BACKBONE.md).
+
+## 9. Gateways and remote MCP
+
+Webhook gateways bridge channels to external services through signed HTTP adapters; remote MCP
+over HTTP is opt-in on the same listener at `/mcp`. Both are disabled by default and documented in
+[remote-operations.md](../guides/remote-operations.md) (operator guide), ADR-0012 and the machine
+contract `docs/api/openapi.json`. Security rules: env-only secrets, HMAC-signed inbound callbacks,
+loopback default, read-only MCP scope unless explicitly enabled, and activity-log audit for every
+write. A gateway leg is no longer end-to-end encrypted — its operator sees the bridged plaintext.

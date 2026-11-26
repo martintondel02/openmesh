@@ -18,6 +18,7 @@ import type {
   BackboneStatus,
 } from '../../types/backbone';
 import type { ActivityEntry } from '../../types/agents';
+import type { BackboneLink, GatewayConnector, McpHttpStatus } from '../../types/ops';
 import type { SetupRecommendation, SetupState } from '../../types/setup';
 import { recommendedFor } from '../setup';
 import type {
@@ -93,6 +94,10 @@ export interface DemoDataset {
   backbone: DemoBackbone;
   setup: DemoSetupSeed;
   agents: DemoAgentSeed;
+  /** v0.7 remote operations seeds. */
+  gateways: GatewayConnector[];
+  backboneLinks: BackboneLink[];
+  mcp: McpHttpStatus;
 }
 
 export interface DemoSetupSeed {
@@ -800,7 +805,7 @@ export function createDemoDataset(nowMs: number = Date.now()): DemoDataset {
   };
 
   const hello: HelloData = {
-    bridge_version: '0.6.0-demo',
+    bridge_version: '0.7.0-demo',
     protocol: 'omp/1',
     node: { node_id: ownId, name: 'martin-nord', class: 'client', caps: 0b1010001 },
     radios: [
@@ -982,12 +987,108 @@ export function createDemoDataset(nowMs: number = Date.now()): DemoDataset {
   ];
   const agents: DemoAgentSeed = { configured: true, name: 'claude', activities: agentActivities };
 
+  const gateways: GatewayConnector[] = [
+    {
+      id: 'sms-ops',
+      kind: 'webhook',
+      enabled: true,
+      outbound: {
+        url: 'https://gateway.example/openmesh',
+        secret_env: 'OPENMESH_SMS_OUT_SECRET',
+        channel_ids: [],
+        include_direct: false,
+        include_attachments: false,
+        timeout_ms: 10_000,
+        max_retries: 3,
+      },
+      inbound: {
+        enabled: true,
+        secret_env: 'OPENMESH_SMS_IN_SECRET',
+        channel_id: channels[0]?.channel_id ?? 'dba1337a96acc686',
+        max_chars: 400,
+      },
+      status: {
+        last_success_ms: nowMs - 4 * MINUTE,
+        last_failure_ms: null,
+        last_error: null,
+        retries: 0,
+        out_secret_present: true,
+        in_secret_present: true,
+      },
+    },
+    {
+      id: 'matrix-ops',
+      kind: 'webhook',
+      enabled: true,
+      outbound: {
+        url: 'https://matrix.example/_openmesh/webhook',
+        secret_env: 'OPENMESH_MATRIX_OUT_SECRET',
+        channel_ids: [channels[1]?.channel_id ?? 'c1a2b3d4e5f60718'],
+        include_direct: true,
+        include_attachments: false,
+        timeout_ms: 10_000,
+        max_retries: 3,
+      },
+      inbound: {
+        enabled: false,
+        secret_env: null,
+        channel_id: null,
+        max_chars: 400,
+      },
+      status: {
+        last_success_ms: nowMs - 3 * 60 * MINUTE,
+        last_failure_ms: nowMs - 6 * MINUTE,
+        last_error: 'adapter connect timeout',
+        retries: 3,
+        out_secret_present: false,
+        in_secret_present: false,
+      },
+    },
+  ];
+
+  const backboneLinks: BackboneLink[] = [
+    {
+      name: 'oslo',
+      url: `openmesh://backbone?host=oslo.backbone.example&port=9443&token=demo-backbone-token-not-a-real-secret&node=${ownId}`,
+      mode: 'client',
+      enabled: true,
+      connected: true,
+      last_error: null,
+      stats: { peers: 3, uptime_s: 7_320, frames_in: 1_284, frames_out: 964 },
+    },
+    {
+      name: 'cabin',
+      url: 'openmesh://backbone?host=cabin.backbone.example&port=9443&token=demo-cabin-token-not-a-real-secret',
+      mode: 'client',
+      enabled: true,
+      connected: false,
+      last_error: 'connection refused (retrying)',
+      stats: null,
+    },
+  ];
+
+  const mcp: McpHttpStatus = {
+    enabled: true,
+    path: '/mcp',
+    allow_write: false,
+    require_confirm: true,
+    rate_limit_per_min: 60,
+    max_sessions: 8,
+    endpoint_url: 'http://127.0.0.1:8787/mcp',
+    source: 'demo',
+    active_sessions: 1,
+    requests_per_min: 4,
+  };
+
   return {
     now: nowMs,
     ownNodeId: ownId,
     backbone,
     setup,
     agents,
+    gateways,
+    backboneLinks,
+    mcp,
     ownName: 'martin-nord',
     ownPosition,
     hello,

@@ -19,6 +19,7 @@
 pub mod activity;
 pub mod attachments;
 pub mod demo;
+pub mod gateway;
 pub mod help;
 pub mod http;
 pub mod json;
@@ -128,6 +129,8 @@ pub struct Bridge {
     pub shared: Arc<Shared>,
     /// Backbone mode control surface.
     pub backbone: Arc<BackboneManager>,
+    /// Authenticated webhook gateways (outbound worker + inbound auth).
+    pub gateways: Arc<gateway::GatewayManager>,
     shutdown: watch::Sender<bool>,
     tasks: Vec<tokio::task::JoinHandle<()>>,
 }
@@ -345,6 +348,10 @@ impl Bridge {
             *snapshot.write().await = initial;
         }
 
+        // Gateway manager (webhooks) shares the activity log with the HTTP control surface.
+        let activity = Arc::new(crate::activity::ActivityLog::new());
+        let gateways = gateway::GatewayManager::new(options.data_dir.clone(), activity.clone());
+
         let shared = Arc::new(Shared {
             snapshot: snapshot.clone(),
             store: store.clone(),
@@ -354,6 +361,7 @@ impl Bridge {
             started_at_ms,
             backbone: backbone.clone(),
             backbone_envelopes: backbone_envelopes.clone(),
+            gateways: gateways.clone(),
         });
 
         if options.api_only {
@@ -373,6 +381,7 @@ impl Bridge {
                 shutdown_rx.clone(),
                 backbone.clone(),
                 backbone_envelopes.clone(),
+                gateways.clone(),
             );
             task_handles.push(tokio::spawn(engine_task));
 
@@ -396,7 +405,7 @@ impl Bridge {
         }
 
         // 9. HTTP/WS API server (listener bound early above).
-        let activity = Arc::new(crate::activity::ActivityLog::new());
+        let mcp_http = Arc::new(http::mcp::McpHttp::load(&options.data_dir));
         let web_root = http::resolve_web_root(options.serve_web.clone());
         if let Some(root) = &web_root {
             tracing::info!(path = %root.display(), "serving web client");
@@ -406,6 +415,9 @@ impl Bridge {
             shared: shared.clone(),
             backbone: backbone.clone(),
             activity: activity.clone(),
+            mcp_http: mcp_http.clone(),
+            local_addr: addr,
+            gateways: gateways.clone(),
             web_root,
             shutdown: shutdown_rx.clone(),
         });
@@ -430,6 +442,7 @@ impl Bridge {
             events,
             shared,
             backbone,
+            gateways,
             shutdown: shutdown_tx,
             tasks: task_handles,
         })
@@ -465,6 +478,7 @@ impl Bridge {
     pub async fn shutdown(self) {
         let _ = self.shutdown.send(true);
         self.backbone.shutdown().await;
+        self.gateways.shutdown().await;
         let tasks = self.tasks;
         let join_all = futures_util::future::join_all(tasks);
         if tokio::time::timeout(std::time::Duration::from_secs(3), join_all)
@@ -491,6 +505,7 @@ async fn core_task(
     mut shutdown: watch::Receiver<bool>,
     backbone: Arc<BackboneManager>,
     backbone_envelopes: Arc<AtomicUsize>,
+    gateways: Arc<gateway::GatewayManager>,
 ) {
     let mut runtime = CoreRuntime {
         engine,
@@ -509,6 +524,8 @@ async fn core_task(
         pending_resources: std::collections::HashMap::new(),
         backbone,
         backbone_envelopes,
+        gateways,
+        gateway_echo: std::collections::HashSet::new(),
         shutdown: shutdown.clone(),
     };
     // Introduce ourselves immediately so nearby nodes learn the identity.

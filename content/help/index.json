@@ -155,6 +155,18 @@
       ]
     },
     {
+      "slug": "gateways-and-remote-agents",
+      "title": "Gateways and remote agents",
+      "summary": "Bridge a channel to SMS, Matrix, email or satellite through signed webhooks, and give a remote AI agent scoped, audited access.",
+      "audience": "both",
+      "minutes": 10,
+      "related": [
+        "backbone",
+        "agents",
+        "security"
+      ]
+    },
+    {
       "slug": "security",
       "title": "Security and privacy",
       "summary": "What is encrypted, what a relay sees, backups, tokens and the checklist for a safe setup.",

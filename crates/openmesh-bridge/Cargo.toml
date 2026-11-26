@@ -37,6 +37,8 @@ rand = { workspace = true }
 http = "1"
 httparse = "1"
 sha2 = { workspace = true }
+# HTTPS client for outbound gateway webhooks (rustls; no system OpenSSL required).
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 # SO_REUSEADDR/SO_REUSEPORT for the LAN transport (pure Rust).
 socket2 = "0.6"
 # Pure-Rust QR code generator for the backbone setup panel.

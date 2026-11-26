@@ -4,7 +4,7 @@
 //! handlers communicate with it through [`EngineInput`]; the engine's [`openmesh_core::Event`]s
 //! are persisted, mapped to the documented JSON shapes and fanned out to API clients.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
@@ -22,6 +22,7 @@ use openmesh_core::{
 };
 
 use crate::attachments::AttachmentStore;
+use crate::gateway::{AttachmentMeta, GatewayManager, GatewayMessage};
 use crate::json::*;
 use crate::store::{
     ChannelRecord, ContactRecord, Store, StoredAttachment, StoredMessage, identity_b64,
@@ -167,6 +168,19 @@ pub enum CommandKind {
     LeaveChannel(ChannelIdData),
     SetConfig(serde_json::Value),
     Announce,
+    /// Inbound gateway webhook message (gateways, remote-operations.md §2).
+    GatewayInbound(GatewayInboundData),
+}
+
+/// Injected channel message from an inbound gateway webhook.
+#[derive(Clone, Debug)]
+pub struct GatewayInboundData {
+    pub connector_id: String,
+    pub channel_id: String,
+    pub text: String,
+    /// Display-only attribution supplied by the adapter; never an identity claim.
+    pub from: Option<String>,
+    pub timestamp_ms: Option<u64>,
 }
 
 /// Input queue of the engine task.
@@ -274,6 +288,8 @@ pub struct Shared {
     pub backbone: Arc<BackboneManager>,
     /// Live engine store-and-forward envelope count, surfaced in `backbone_status`.
     pub backbone_envelopes: Arc<AtomicUsize>,
+    /// Authenticated webhook gateway manager (outbound worker + inbound auth).
+    pub gateways: Arc<GatewayManager>,
 }
 
 /// Emit one JSON event to every connected WebSocket/SSE client.
@@ -307,6 +323,9 @@ pub struct CoreRuntime {
     pub pending_resources: HashMap<u32, (ResourceManifest, Vec<u8>)>,
     pub backbone: Arc<BackboneManager>,
     pub backbone_envelopes: Arc<AtomicUsize>,
+    pub gateways: Arc<GatewayManager>,
+    /// Message ids injected by an inbound gateway, so they are not echoed to outbound webhooks.
+    pub gateway_echo: HashSet<u32>,
     pub shutdown: tokio::sync::watch::Receiver<bool>,
 }
 
@@ -521,6 +540,7 @@ impl CoreRuntime {
         // Position/telemetry messages also emit their dedicated event; avoid duplicate UI rows.
         if !matches!(record.kind, MessageKind::Position | MessageKind::Telemetry) {
             self.emit("message", record.to_message_json());
+            self.forward_to_gateways(&record, true);
         }
 
         if let Some(res_id) = pending_res_id {
@@ -594,6 +614,9 @@ impl CoreRuntime {
         self.store.put_message(&record)?;
         if !matches!(record.kind, MessageKind::Position | MessageKind::Telemetry) {
             self.emit("group_message", record.to_group_message_json());
+            if !self.gateway_echo.remove(&record.msg_id) {
+                self.forward_to_gateways(&record, false);
+            }
         }
         Ok(())
     }
@@ -860,6 +883,10 @@ impl CoreRuntime {
                 self.cmd_set_config(id.as_deref(), value, &reply, now).await
             }
             CommandKind::Announce => self.cmd_announce(now).await,
+            CommandKind::GatewayInbound(data) => {
+                self.cmd_gateway_inbound(id.as_deref(), data, &reply, now)
+                    .await
+            }
         };
         if let Err(e) = result {
             tracing::warn!(error = %e, "command failed");
@@ -890,6 +917,27 @@ impl CoreRuntime {
                 Err(_) => return id,
             }
         }
+    }
+
+    /// Hand one stored message to the gateway manager's outbound webhook worker.
+    fn forward_to_gateways(&self, record: &StoredMessage, direct: bool) {
+        let message = GatewayMessage {
+            channel_id: record.channel_id.map(|channel| channel.to_hex()),
+            direct,
+            message_id: record.msg_id,
+            from: record.from.to_hex(),
+            from_name: record
+                .from_name
+                .clone()
+                .unwrap_or_else(|| record.from.to_hex()),
+            text: record.text.clone(),
+            timestamp_ms: record.sent_at_ms,
+            attachment: record.attachment.as_ref().map(|attachment| AttachmentMeta {
+                mime: attachment.mime.clone(),
+                size: attachment.size,
+            }),
+        };
+        self.gateways.enqueue(message);
     }
 
     fn est_airtime_ms(&self, processed: &Processed) -> u32 {
@@ -1185,6 +1233,10 @@ impl CoreRuntime {
         };
         self.store.put_message(&record)?;
         self.emit("group_message", record.to_group_message_json());
+        // Two-way bridging: locally originated channel messages are mirrored to configured
+        // webhooks too. Direct messages stay local (connectors opt into incoming direct
+        // messages with `include_direct`).
+        self.forward_to_gateways(&record, false);
         self.send_reply(
             reply,
             "send_result",
@@ -1194,6 +1246,94 @@ impl CoreRuntime {
                 est_airtime_ms: est,
                 queued: true,
             },
+        );
+        Ok(())
+    }
+
+    async fn cmd_gateway_inbound(
+        &mut self,
+        id: Option<&str>,
+        data: GatewayInboundData,
+        reply: &mpsc::UnboundedSender<Arc<str>>,
+        now: u64,
+    ) -> Result<()> {
+        let Some(channel) = parse_node_id(&data.channel_id) else {
+            reply_error(reply, id, "bad_request", "invalid channel_id");
+            return Ok(());
+        };
+        let Some(channel_record) = self.store.get_channel(channel)? else {
+            reply_error(reply, id, "not_found", "unknown channel");
+            return Ok(());
+        };
+        if let Some(psk) = channel_record.psk_bytes() {
+            // Idempotent, mirrors cmd_send_group_message.
+            self.engine.add_channel(&channel_record.name, &psk);
+        }
+        let msg_id = self.new_msg_id();
+        let sent_at_ms = data.timestamp_ms.unwrap_or(now);
+        let app = AppMessage {
+            id: msg_id,
+            kind: MessageKind::Text,
+            sent_at_ms: now,
+            text: Some(data.text.clone()),
+            reply_to: None,
+            thread: None,
+            attachment: None,
+            position: None,
+            telemetry: None,
+            sender: Some(self.identity()),
+            signature: None,
+        };
+        let processed = match self.engine.send_message(Target::Channel(channel), app, now) {
+            Ok(processed) => processed,
+            Err(error) => {
+                reply_error(reply, id, error_code(&error), &error.to_string());
+                return Ok(());
+            }
+        };
+        self.process(processed, now).await;
+        let from_name = match data.from.as_deref() {
+            Some(from) => format!("{} ({})", data.connector_id, from),
+            None => data.connector_id.clone(),
+        };
+        let record = StoredMessage {
+            msg_id,
+            peer: None,
+            channel_id: Some(channel),
+            channel_name: Some(channel_record.name.clone()),
+            from: self.node(),
+            to: channel,
+            from_name: Some(from_name.chars().take(64).collect()),
+            kind: MessageKind::Text,
+            text: Some(data.text),
+            sent_at_ms,
+            received_at_ms: now,
+            outgoing: true,
+            delivered: false,
+            read: false,
+            reply_to: None,
+            thread: None,
+            attachment: None,
+            position: None,
+            signature_valid: true,
+            sender_key: Some(identity_to_b64(&self.identity())),
+            via_store: false,
+        };
+        self.store.put_message(&record)?;
+        if self.gateway_echo.len() >= 512 {
+            self.gateway_echo.clear();
+        }
+        self.gateway_echo.insert(msg_id);
+        self.emit("group_message", record.to_group_message_json());
+        self.send_reply(
+            reply,
+            "gateway_inbound_result",
+            id,
+            serde_json::json!({
+                "ok": true,
+                "channel_id": channel.to_hex(),
+                "message_id": msg_id,
+            }),
         );
         Ok(())
     }

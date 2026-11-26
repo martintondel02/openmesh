@@ -5,6 +5,50 @@ All notable changes to this project are documented here. The format follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Protocol changes are called out
 explicitly.
 
+## [0.7.0] - 2026-11-26
+
+### Added — remote operations and gateways
+
+**Remote MCP over HTTP (opt-in)**
+- `<data-dir>/mcp-http.json` (mode 0600, default disabled) exposes the MCP server on the bridge's
+  existing HTTP listener at `/mcp`: JSON-RPC over POST (JSON or single SSE frame), SSE keep-alive
+  on GET, `Mcp-Session-Id` sessions, bearer-token auth with the bridge token, **read-only scope by
+  default** (`allow_write` opt-in), existing `confirm:true` rules, rate limits, 256 KiB body cap,
+  and activity-log audit for every write (source `agent:<name>`/`agent:mcp-http`, no secrets).
+- `openmesh-cli agent config --transport http` prints a client config; docs/agents/mcp.md gained a
+  Remote MCP section and AI-NATIVE §1.1 documents the transport/scope rules. stdio remains the
+  default; MCP stays (no removal).
+
+**Webhook gateways (both directions)**
+- `<data-dir>/gateways.json` (mode 0600) connectors with outbound signed webhooks (HMAC-SHA256
+  `X-OpenMesh-Signature`, message metadata, channel/direct filters, attachment metadata only,
+  bounded retries/backoff, activity audit) and optional inbound `POST
+  /api/gateways/{id}/inbound` (constant-time HMAC verification, length/rate limits, injects a
+  display-attributed text message into a configured channel).
+- REST/CLI: GET/PUT/DELETE `/api/gateways*`, `POST /api/gateways/{id}/test`,
+  `openmesh-cli gateways list|show|set|remove|test`; secrets are env-var references only, never
+  stored, logged or returned. Adapter recipes for Matrix, SMS, email and satellite in
+  `docs/guides/remote-operations.md`; new help topic 18.
+
+**Multiple backbone links**
+- `<data-dir>/backbone-links.json`; the bridge can join several backbones concurrently with
+  per-link reconnect/backoff and status, deduped by the engine; legacy `join` imports as
+  `default`. APIs `GET /api/backbone/links` + PUT/DELETE, `GET /api/backbone` links summary,
+  WebSocket status; CLI `openmesh-cli backbone links list|add|remove`; BACKBONE.md multiple-links
+  spec.
+
+**Docs/help**
+- New help topic "Gateways and remote agents" (18 topics), `docs/guides/remote-operations.md`,
+  ADR-0012; README remote-operations section.
+
+### Security
+- Loopback defaults, token auth, read-only MCP default, env-only secrets, constant-time HMAC,
+  rate limits, audit trail, and explicit docs that gateways break E2E for the bridged leg.
+- No wire-format changes; golden vectors byte-identical.
+
+### Changed
+- Version 0.7.0 (workspace/web/Tauri/Android `versionCode` 8/firmware `OM_FW_VERSION`).
+
 ## [0.6.0] - 2026-11-26
 
 ### Added — media tiers and tiny voice (Codec2)

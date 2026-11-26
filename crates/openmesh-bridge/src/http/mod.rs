@@ -5,6 +5,7 @@
 //! full web framework would add dependency surface without buying anything. The WebSocket
 //! protocol itself is handled by tokio-tungstenite.
 
+pub mod mcp;
 pub mod ws;
 
 use std::collections::HashMap;
@@ -18,6 +19,7 @@ use tokio::sync::watch;
 
 use crate::activity::{self, ActivityLog};
 use crate::attachments::MAX_ATTACHMENT_BYTES;
+use crate::gateway::{GatewayManager, InboundOutcome};
 use crate::json::{b64, error_json, event_json, parse_node_id};
 use crate::runtime::{self, CommandError, CommandKind, Shared};
 use crate::store::Store;
@@ -37,6 +39,12 @@ pub struct HttpState {
     pub backbone: Arc<BackboneManager>,
     /// Bounded transparency log for mutating API calls (AI-NATIVE.md §2).
     pub activity: Arc<ActivityLog>,
+    /// Authenticated webhook gateways (remote-operations.md §2).
+    pub gateways: Arc<GatewayManager>,
+    /// Opt-in remote MCP transport (`docs/design/remote-operations.md` §1).
+    pub mcp_http: Arc<mcp::McpHttp>,
+    /// Local API address, used by the MCP HTTP dispatcher to reach the REST API in-process.
+    pub local_addr: SocketAddr,
     pub web_root: Option<PathBuf>,
     pub shutdown: watch::Receiver<bool>,
 }
@@ -120,6 +128,7 @@ fn reason_phrase(status: u16) -> &'static str {
         404 => "Not Found",
         405 => "Method Not Allowed",
         413 => "Payload Too Large",
+        429 => "Too Many Requests",
         426 => "Upgrade Required",
         431 => "Request Header Fields Too Large",
         500 => "Internal Server Error",
@@ -196,6 +205,11 @@ async fn handle_connection(
         }
         return stream_sse(stream, state).await;
     }
+    // Remote MCP over HTTP is opt-in and handles its own status/auth/SSE responses. The path is
+    // reserved even when disabled so it returns 404 instead of the web SPA fallback.
+    if request.path == state.mcp_http.path() {
+        return mcp::handle(&mut stream, &request, &state).await;
+    }
 
     let response = route(&request, &state).await;
     record_activity(&request, &response, &state);
@@ -244,12 +258,12 @@ async fn route(request: &HttpRequest, state: &Arc<HttpState>) -> HttpResponse {
             extra_headers: vec![
                 (
                     "Access-Control-Allow-Methods".into(),
-                    "GET, POST, PATCH, DELETE, OPTIONS".into(),
+                    "GET, POST, PUT, PATCH, DELETE, OPTIONS".into(),
                 ),
                 (
                     "Access-Control-Allow-Headers".into(),
                     "Authorization, Content-Type, X-OpenMesh-Filename, X-OpenMesh-Duration-Ms, \
-                     X-OpenMesh-Agent, X-OpenMesh-Client"
+                     X-OpenMesh-Agent, X-OpenMesh-Client, X-OpenMesh-Signature"
                         .into(),
                 ),
                 ("Access-Control-Max-Age".into(), "86400".into()),
@@ -263,7 +277,11 @@ async fn route(request: &HttpRequest, state: &Arc<HttpState>) -> HttpResponse {
             serde_json::json!({ "ok": true, "version": openmesh_core::CRATE_VERSION }),
         );
     }
-    if path.starts_with("/api/") && !authorized(request, &state.token) {
+    // Inbound gateway webhooks authenticate with their own HMAC signature over the raw body
+    // (adapters do not hold the bridge API token); everything else under /api/ needs the token.
+    let gateway_inbound =
+        request.method == "POST" && gateway_route_id(path, Some("/inbound")).is_some();
+    if path.starts_with("/api/") && !authorized(request, &state.token) && !gateway_inbound {
         return HttpResponse::error(401, "unauthorized");
     }
 
@@ -347,6 +365,37 @@ async fn route(request: &HttpRequest, state: &Arc<HttpState>) -> HttpResponse {
         ("GET", "/api/backbone/peers") => {
             HttpResponse::json(200, state.backbone.peers_view().await)
         }
+        // --- v0.7.0 multiple outbound links (remote-operations.md §3) ---------------------
+        ("GET", "/api/backbone/links") => {
+            HttpResponse::json(200, state.backbone.links_view().await)
+        }
+        ("PUT", _) if backbone_link_name(path).is_some() => {
+            let name = backbone_link_name(path).unwrap_or_default().to_string();
+            let body = match parse_json_body(request) {
+                Ok(value) => value,
+                Err(response) => return response,
+            };
+            match state.backbone.upsert_link(&name, &body).await {
+                Ok(view) => HttpResponse::json(200, view),
+                Err(e) => bad_request(&e),
+            }
+        }
+        ("DELETE", _) if backbone_link_name(path).is_some() => {
+            let name = backbone_link_name(path).unwrap_or_default().to_string();
+            match state.backbone.delete_link(&name).await {
+                Ok(true) => {
+                    HttpResponse::json(200, serde_json::json!({ "deleted": true, "name": name }))
+                }
+                Ok(false) => HttpResponse::json(
+                    404,
+                    serde_json::json!({ "error": "not_found", "name": name }),
+                ),
+                Err(e) => HttpResponse::json(
+                    500,
+                    serde_json::json!({ "error": "internal", "message": e }),
+                ),
+            }
+        }
         ("POST", "/api/backbone/config") => {
             let body: serde_json::Value = match serde_json::from_slice(&request.body) {
                 Ok(value) => value,
@@ -403,6 +452,62 @@ async fn route(request: &HttpRequest, state: &Arc<HttpState>) -> HttpResponse {
                 ),
                 None => HttpResponse::json(200, serde_json::json!({ "enabled": false })),
             }
+        }
+        // --- v0.7.0 gateways: authenticated webhooks (remote-operations.md §2) ------------
+        ("GET", "/api/gateways") => HttpResponse::json(200, state.gateways.list_view().await),
+        ("PUT", _) if gateway_route_id(path, None).is_some() => {
+            let id = gateway_route_id(path, None).unwrap_or_default().to_string();
+            let body = match parse_json_body(request) {
+                Ok(value) => value,
+                Err(response) => return response,
+            };
+            match state.gateways.upsert(&id, &body).await {
+                Ok(view) => HttpResponse::json(200, view),
+                Err(e) => bad_request(&e),
+            }
+        }
+        ("DELETE", _) if gateway_route_id(path, None).is_some() => {
+            let id = gateway_route_id(path, None).unwrap_or_default().to_string();
+            match state.gateways.delete(&id).await {
+                Ok(true) => {
+                    HttpResponse::json(200, serde_json::json!({ "deleted": true, "id": id }))
+                }
+                Ok(false) => {
+                    HttpResponse::json(404, serde_json::json!({ "error": "not_found", "id": id }))
+                }
+                Err(e) => HttpResponse::json(
+                    500,
+                    serde_json::json!({ "error": "internal", "message": e }),
+                ),
+            }
+        }
+        ("POST", _) if gateway_route_id(path, Some("/test")).is_some() => {
+            let id = gateway_route_id(path, Some("/test"))
+                .unwrap_or_default()
+                .to_string();
+            match state.gateways.test(&id).await {
+                Ok(result) => HttpResponse::json(200, result),
+                Err(e) if e.contains("not found") => HttpResponse::json(
+                    404,
+                    serde_json::json!({ "error": "not_found", "message": e }),
+                ),
+                Err(e) => bad_request(&e),
+            }
+        }
+        ("POST", _) if gateway_route_id(path, Some("/inbound")).is_some() => {
+            let id = gateway_route_id(path, Some("/inbound"))
+                .unwrap_or_default()
+                .to_string();
+            let outcome: InboundOutcome = state
+                .gateways
+                .handle_inbound(
+                    &state.shared,
+                    &id,
+                    request.header("x-openmesh-signature"),
+                    &request.body,
+                )
+                .await;
+            HttpResponse::json(outcome.status, outcome.body)
         }
         // --- v0.3.0: AI-native + help surface (AI-NATIVE.md, ux-help-system.md §5) ---------
         ("GET", "/api/help") => HttpResponse::json(200, crate::help::index_value()),
@@ -652,6 +757,22 @@ async fn route(request: &HttpRequest, state: &Arc<HttpState>) -> HttpResponse {
     }
 }
 
+/// Extract `{id}` from `/api/gateways/{id}[suffix]`; rejects extra path segments.
+fn gateway_route_id<'a>(path: &'a str, suffix: Option<&str>) -> Option<&'a str> {
+    let rest = path.strip_prefix("/api/gateways/")?;
+    let id = match suffix {
+        Some(suffix) => rest.strip_suffix(suffix)?,
+        None => rest,
+    };
+    (!id.is_empty() && !id.contains('/')).then_some(id)
+}
+
+/// Extract `{name}` from `/api/backbone/links/{name}`; rejects extra path segments.
+fn backbone_link_name(path: &str) -> Option<&str> {
+    let name = path.strip_prefix("/api/backbone/links/")?;
+    (!name.is_empty() && !name.contains('/')).then_some(name)
+}
+
 fn parse_json_body(request: &HttpRequest) -> Result<Value, HttpResponse> {
     serde_json::from_slice(&request.body).map_err(|e| {
         HttpResponse::json(
@@ -827,6 +948,26 @@ fn summarize_activity(request: &HttpRequest) -> String {
                 .or_else(|| text("invite_url"))
                 .map(|v| { v.chars().take(40).collect::<String>() })
                 .unwrap_or_else(|| "via invite".to_string())
+        ),
+        ("PUT", _) if path.starts_with("/api/gateways/") => format!(
+            "upsert gateway {}",
+            gateway_route_id(path, None).unwrap_or("?")
+        ),
+        ("DELETE", _) if path.starts_with("/api/gateways/") => format!(
+            "remove gateway {}",
+            gateway_route_id(path, None).unwrap_or("?")
+        ),
+        ("POST", _) if path.starts_with("/api/gateways/") && path.ends_with("/test") => format!(
+            "test gateway {}",
+            gateway_route_id(path, Some("/test")).unwrap_or("?")
+        ),
+        ("PUT", _) if backbone_link_name(path).is_some() => format!(
+            "upsert backbone link {}",
+            backbone_link_name(path).unwrap_or("?")
+        ),
+        ("DELETE", _) if backbone_link_name(path).is_some() => format!(
+            "remove backbone link {}",
+            backbone_link_name(path).unwrap_or("?")
         ),
         ("POST", "/api/backbone/config") => "update backbone config".to_string(),
         ("POST", "/api/backbone/token/rotate") => {

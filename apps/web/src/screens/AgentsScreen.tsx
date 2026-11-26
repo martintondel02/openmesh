@@ -38,6 +38,7 @@ import {
   formatActivityTime,
 } from '../lib/agents';
 import type { ActivityEntry, AgentClient, PromptTier } from '../types/agents';
+import { RemoteMcpCard } from './agents/RemoteMcp';
 
 const SOURCE_TONES = {
   agent: 'violet',
@@ -432,6 +433,10 @@ export function AgentsScreen() {
               </section>
             ) : null}
           </div>
+        </div>
+
+        <div className="mt-4">
+          <RemoteMcpCard advanced={advanced} />
         </div>
       </div>
 

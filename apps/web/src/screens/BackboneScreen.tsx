@@ -35,6 +35,8 @@ import { BackboneControls } from './backbone/BackboneControls';
 import { BackboneConnection, BackboneInstallCard } from './backbone/BackboneConnection';
 import { BackboneExposureCard } from './backbone/BackboneExposure';
 import { BackboneSetupDrawer } from './backbone/BackboneSetup';
+import { GatewaysCard } from './backbone/Gateways';
+import { BackboneLinksCard } from './backbone/BackboneLinks';
 
 /**
  * Backbone control panel (OBB/1, v0.2).
@@ -333,6 +335,9 @@ export function BackboneScreen() {
             </div>
           </>
         )}
+
+        <GatewaysCard advanced={uiMode === 'advanced'} />
+        {uiMode === 'advanced' ? <BackboneLinksCard /> : null}
       </div>
 
       <BackboneSetupDrawer

@@ -1,6 +1,6 @@
 # OpenMesh Backbone Mode (OBB/1)
 
-**Status:** normative for v0.2.0
+**Status:** normative for v0.2.0; multiple outbound links (§7b) normative for v0.7.0
 **Applies to:** `crates/openmesh-bridge` (server + client), `apps/web` (control panel),
 `tools/flash`/installers (deployment), `docs/INSTALL.md`
 **Related:** [PROTOCOL.md](PROTOCOL.md) (OMP/1 frames), [WEBSOCKET-API.md](WEBSOCKET-API.md) §8
@@ -32,7 +32,7 @@ authentication (a shared token) prevents unauthorised peers from injecting traff
 | Mode | Command | Behaviour |
 | --- | --- | --- |
 | Backbone server | `openmesh-bridge backbone` | Listens on TCP, authenticates peers, relays frames between peers and its own radio/network interfaces, exposes `/api/backbone*`, serves the panel. |
-| Backbone client | `openmesh-bridge join <openmesh://backbone?...>` | Dials a backbone, reconnects with backoff, advertises itself, relays frames between its local interfaces and the backbone. Shows up in the server's peer table. |
+| Backbone client | `openmesh-bridge join <openmesh://backbone?...>` | Dials a backbone, reconnects with backoff, advertises itself, relays frames between its local interfaces and the backbone. Shows up in the server's peer table. A bridge may run several links at once (§7b). |
 | Legacy raw TCP | `--tcp-listen` / `--tcp-peer` | Pre-v0.2 length-prefixed frame stream, unauthenticated. Kept for compatibility, **not** exposed in the panel; use backbone mode for anything reachable from a network. |
 
 A backbone server is a normal bridge in every other respect: it can own a LoRa radio, speak UDP on
@@ -182,7 +182,10 @@ openmesh://backbone?host=<host>&port=<port>&token=<base64url>&node=<server_node_
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| GET | `/api/backbone` | `{enabled, running, bind, port, auth, token_set, max_peers, allowlist, store_forward, name, public_host, ping_interval_s, totals:{...}}` — token never returned |
+| GET | `/api/backbone` | `{enabled, running, bind, port, auth, token_set, max_peers, allowlist, store_forward, name, public_host, ping_interval_s, totals:{...}, links:[...]}` — token never returned; `links` is the §7b summary |
+| GET | `/api/backbone/links` | `[{name, mode:"client", enabled, running, connected, connected_at_ms, attempts, last_error, url (token redacted), stats:{frames_in,frames_out,bytes_in,bytes_out}}]` |
+| PUT | `/api/backbone/links/{name}` | Add/update one outbound link `{url, enabled?}`; persists `<data-dir>/backbone-links.json` (0600) and starts/stops its reconnect loop |
+| DELETE | `/api/backbone/links/{name}` | Remove one outbound link and stop its reconnect loop |
 | GET | `/api/backbone/peers` | `[{node_id, name, direction, remote_addr, connected_at_ms, last_seen_ms, frames_in, frames_out, bytes_in, bytes_out, rtt_ms, app_version, auth}]` |
 | POST | `/api/backbone/config` | Partial update of §5 fields (except token); returns the new config + `restarted` flag |
 | POST | `/api/backbone/token/rotate` | Returns `{token: "<new base64url>"}` **once**; old token is invalid immediately |
@@ -199,7 +202,11 @@ Events (server → client, pushed while connected and on change):
   "running": true, "peers": 2, "uptime_s": 3600,
   "frames_in": 1042, "frames_out": 998, "bytes_in": 250080, "bytes_out": 239520,
   "throughput_in_bps": 812, "throughput_out_bps": 764,
-  "store_forward_envelopes": 3, "auth_failures": 0, "last_error": null } }
+  "store_forward_envelopes": 3, "auth_failures": 0, "last_error": null,
+  "links": [ { "name":"oslo", "mode":"client", "enabled":true, "running":true,
+               "connected":true, "connected_at_ms":1760000000000, "attempts":1,
+               "last_error":null, "url":"openmesh://backbone?host=…&token=redacted&…",
+               "stats":{ "frames_in":100, "frames_out":90, "bytes_in":24000, "bytes_out":22000 } } ] } }
 
 { "v":1, "type":"backbone_peer", "data": {
   "action": "joined" | "left" | "updated", "peer": { ...same shape as GET /api/backbone/peers... } } }
@@ -208,6 +215,90 @@ Events (server → client, pushed while connected and on change):
 Commands (client → server): `get_backbone`, `set_backbone_config`, `backbone_kick`
 (`{node_id}`), `backbone_rotate_token`. Unknown fields are ignored, changes are broadcast back
 via `backbone_status` / `config`.
+
+---
+
+## 7b. Multiple outbound links (client side, v0.7.0)
+
+A bridge may join **several backbones at once** — for redundancy, for bridging separate
+communities, or as a failover pair. Each link is an independent OBB/1 client with its own token,
+reconnect/backoff loop and statistics.
+
+```
+                    ┌──────────────────────┐
+   radio mesh ──────│  openmesh-bridge     │
+   (LoRa/UDP)       │   multiple links     │
+                    └───────┬───────┬──────┘
+                            │       │
+                   OBB/1    │       │    OBB/1
+                   token A  │       │    token B
+                            ▼       ▼
+                     ┌─────────┐  ┌─────────┐
+                     │backbone │  │backbone │
+                     │ oslo    │  │ cabin   │
+                     └─────────┘  └─────────┘
+```
+
+### Configuration — `<data-dir>/backbone-links.json` (mode 0600)
+
+```json
+{"version":1,"links":[
+  {"name":"oslo","url":"openmesh://backbone?host=mesh.example.org&port=9443&token=…&node=…","enabled":true},
+  {"name":"cabin","url":"openmesh://backbone?host=10.0.0.5&port=9443&token=…&node=…","enabled":true}
+]}
+```
+
+* Names are unique, 1–32 lowercase `[a-z0-9._-]` characters; the URL is a §6 connection string.
+* `enabled:false` keeps a link in the file without dialing it (operator parking, maintenance).
+* The file is created/updated by `PUT /api/backbone/links/{name}` and
+  `openmesh-cli backbone links add`; it is never required — the legacy single-link path below
+  keeps working.
+* Unknown fields, duplicate names and invalid URLs are ignored at startup with a warning so a
+  typo cannot take down the other links.
+
+### Behaviour
+
+* One reconnect loop per enabled link, each with exponential backoff + jitter (1 s → 30 s default),
+  independent of the others: one unreachable backbone never affects another link.
+* `GET /api/backbone/links`, `GET /api/backbone` (`links` field) and the `backbone_status`
+  WebSocket event report per-link `connected`, `last_error`, `attempts` and frame/byte counters.
+  Peer rows carry the link `name` so the panel can attribute sessions; `GET /api/backbone/peers`
+  stays a flat peer list and may hold one row per backbone server.
+* Tokens are redacted (`token=redacted`) everywhere in the API, CLI and logs. The only place a
+  token is intentionally shown is the server-side `GET /api/backbone/setup` connection string
+  (shown once on first run) and `POST /api/backbone/token/rotate`.
+* Compatibility: an existing setup that runs `openmesh-bridge join <url>` (or the
+  `POST /api/backbone/config {"join_url": …}` call) is imported/served as the link named
+  `default`. A saved `backbone-links.json` takes precedence on startup; running `join` again
+  updates the `default` entry. On restart every `enabled:true` link is restored.
+
+### Loop safety and deduplication
+
+A mesh may now reach the same frame over two paths (for example two backbones that peer with each
+other, or a radio mesh that reaches both). This is safe: OMP/1 receivers deduplicate on
+`(src, seq)` (`PROTOCOL.md` §4), so a duplicated frame is processed once, does not re-emit ACKs,
+and is not relayed again by store-and-forward. The links are therefore **additive bandwidth, not
+a loop hazard**. Two rules still matter:
+
+1. **Do not create an intentional cycle of backbone servers.** Transient duplicates are cheap;
+   an infinite relay loop is not. Backbone-to-backbone peering is deferred to OBB/2 (`remote-operations.md`
+   §4); until then, connect each mesh bridge to backbones that do not re-share the same frames.
+2. **Dedup state has limits.** The `(src, seq)` window is bounded; reconnect a link after a long
+   partition and the engine will re-deliver recent frames rather than dropping them. That is
+   correct (store-and-forward may replay), just do not tune TTLs to "fix" duplicates.
+
+### Operator advice
+
+* Use two links when the radios are the only path and the backbones are on different networks
+  (different providers/VPS/houses) — not two links to the same host.
+* Give each link a short, meaningful name (`oslo`, `cabin`, `field`) — it is what the panel,
+  activity log and peer table show.
+* Watch `last_error` per link: a permanently failing link is usually a rotated token or a firewall
+  change, not something to retry forever.
+* Rotate the token on the server, then update each link (`PUT /api/backbone/links/{name}` with the
+  new URL) — links are independent, so you can rotate one backbone without touching the other.
+* The API/CLI never print link tokens; copy the connection string from the backbone's setup page to
+  the bridge that should join it.
 
 ---
 
@@ -275,6 +366,10 @@ openmesh-cli backbone kick <node_id>
 openmesh-cli backbone rotate-token
 openmesh-cli backbone connect '<url>'
 openmesh-cli backbone disconnect <node_id>
+# Multiple outbound links (v0.7.0)
+openmesh-cli backbone links list
+openmesh-cli backbone links add --url '<openmesh://backbone?...>' [--name oslo] [--disabled]
+openmesh-cli backbone links remove oslo
 ```
 
 `openmesh-cli` reads the bridge token from `~/.config/openmesh/bridge-token` (or `--token` /

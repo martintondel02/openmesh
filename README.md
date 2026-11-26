@@ -84,7 +84,7 @@ envelopes) and reject what makes life hard on a 240-byte MTU: global routing sta
 per message, and client stacks nobody wants to use. Details and trade-offs:
 [ADR-0001](docs/adr/0001-own-protocol-vs-reticulum.md), [research notes](docs/research/).
 
-## Feature status (v0.6.0)
+## Feature status (v0.7.0)
 
 | Area | Status |
 | --- | --- |
@@ -350,6 +350,43 @@ No protocol change: resources already carry MIME + bytes; vectors are untouched.
 Guides: [images and voice notes](content/help/media.md) ·
 [media tiers contract](docs/design/media-tiers.md) ·
 [PROTOCOL §9.4](docs/architecture/PROTOCOL.md)
+
+## Remote operations and gateways (v0.7)
+
+OpenMesh is now operable **from another machine** and can bridge a mesh channel to the outside
+world without a VPN full of custom code:
+
+- **Remote MCP over HTTP (opt-in).** The bridge can expose its MCP server on its local HTTP
+  listener (`/mcp`) with the bridge bearer token, **read-only by default**, existing `confirm:true`
+  gating for dangerous tools, session IDs, SSE responses and rate limits. stdio remains the
+  default local path; the HTTP transport is for a tunnel/VPN, never a public bind. Every write is
+  audited in the activity log.
+- **Gateways.** Authenticated **webhook connectors** bridge a channel to any adapter in both
+  directions: outbound messages are signed `POST`s (HMAC-SHA256) with metadata; inbound calls to
+  `POST /api/gateways/{id}/inbound` (also HMAC-signed) inject a text message into a configured
+  channel. Secrets live in env vars only, are never stored/logged, and every connector has a test
+  button, per-channel filters, retries and status. Adapters documented for Matrix, SMS providers,
+  an email forwarder and satellite messengers — no vendor lock-in and no attachment bytes leave
+  the mesh in v0.7.
+- **Multiple backbone links.** A bridge can join several backbones at once (redundancy/failover,
+  separate communities); `(src,seq)` dedup prevents loops, links have individual status/backoff,
+  and legacy single-link `join` configs keep working.
+- **Security posture:** loopback by default, token auth for every route, secrets via env vars,
+  activity-log audit for writes, and explicit warnings that a gateway operator sees bridged
+  plaintext (that leg is no longer end-to-end encrypted).
+
+| Gateways: signed webhooks both ways | Remote MCP over HTTP (read-only default) |
+| --- | --- |
+| ![Gateways](docs/assets/screenshots/gateways.jpg) | ![Remote MCP](docs/assets/screenshots/remote-mcp.jpg) |
+
+| Multiple backbone links |
+| --- |
+| ![Backbone links](docs/assets/screenshots/backbone-links.jpg) |
+
+Guides: [remote operations](docs/guides/remote-operations.md) ·
+[help: gateways and remote agents](content/help/gateways-and-remote-agents.md) ·
+[ADR 0012](docs/adr/0012-remote-mcp-and-gateways.md) ·
+[MCP reference](docs/agents/mcp.md)
 
 ## Repository layout
 

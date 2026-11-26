@@ -48,6 +48,78 @@ bridge REST API  http://127.0.0.1:8787      ← identity, radio, store, backbone
   instead of blocking.
 * Write rate limit: 30 writes/minute per server process.
 
+### Remote MCP over HTTP (opt-in, v0.7+)
+
+stdio remains the default, local-only transport. The bridge can additionally expose the same MCP
+server on its **existing HTTP listener** for agents on another machine (or over a tunnel/VPN). It is
+disabled by default and read-only unless explicitly configured.
+
+Configure `<data-dir>/mcp-http.json` (created as `0600` on first bridge start; the bridge writes a
+disabled default and tolerates a corrupt file by staying disabled):
+
+```json
+{
+  "enabled": true,
+  "path": "/mcp",
+  "allow_write": false,
+  "require_confirm": true,
+  "rate_limit_per_min": 60,
+  "max_sessions": 8
+}
+```
+
+* `enabled: false` (default) → the path returns **404**. Restart the bridge after editing.
+* **Auth**: `Authorization: Bearer <bridge token>` (the same token as REST/WS). Missing/wrong
+  token → **401** JSON-RPC error and no tool execution. Never put the token in a URL or commit it;
+  read it from the bridge token file or a client secret store.
+* **Scope**: read-only by default. Write tools are refused before execution with
+  `{"error":{"code":-32000,"data":{"code":"http_scope_read_only"}}}` unless `allow_write: true`.
+  `require_confirm: true` keeps the MCP `confirm: true` requirement for destructive tools; setting
+  it to `false` is only for fully trusted automation.
+* **Transport**: HTTP JSON-RPC on the configured path.
+  * `POST /mcp` with one JSON-RPC message → JSON response (`application/json`); if the request
+    `Accept` includes `text/event-stream`, the response is a single SSE `data:` frame and closes.
+  * `GET /mcp` returns an SSE keep-alive stream (`event: ping` every 20 s) while enabled.
+  * `DELETE /mcp` ends the session named by `Mcp-Session-Id`.
+  * `Mcp-Session-Id` is echoed when supplied and generated when absent; sessions are bounded
+    (`max_sessions`) and requests are rate-limited (`rate_limit_per_min`, HTTP **429** with a
+    JSON-RPC error). JSON-RPC bodies are capped at **256 KiB** (**413**).
+* **Audit**: every write tool call (including refusals) is appended to the bridge activity log with
+  `source: agent:<name>` when the request sends `X-OpenMesh-Agent`, else `source: agent:mcp-http`;
+  summaries never appear in the log with tokens or message bodies.
+
+CLI helper for a ready-to-paste client config:
+
+```sh
+openmesh-cli agent config --transport http --url http://127.0.0.1:8787/mcp
+```
+
+Example session (token from the bridge token file):
+
+```sh
+TOKEN=$(cat ~/.config/openmesh/bridge-token)
+# initialize: note the Mcp-Session-Id response header
+curl -sS -D - http://127.0.0.1:8787/mcp \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{}}}'
+SID=<paste Mcp-Session-Id>
+curl -sS http://127.0.0.1:8787/mcp \
+  -H "Authorization: Bearer $TOKEN" -H "Mcp-Session-Id: $SID" -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}'
+# SSE variant (one data: frame)
+curl -sS -N http://127.0.0.1:8787/mcp \
+  -H "Authorization: Bearer $TOKEN" -H 'Accept: text/event-stream' -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":3,"method":"ping","params":{}}'
+```
+
+Security guidance: keep the bridge API/reverse proxy bound to **loopback**. To reach it remotely,
+use an SSH port-forward, WireGuard/Tailscale or a TLS-terminating tunnel with its own access
+control; do not expose port 8787 directly. Rotate the bridge token if it leaks (all MCP/REST
+clients must then be updated). Troubleshooting: 404 → `enabled` is false or the request path
+differs from `path`; 401 → wrong/missing token; 429 → rate/session limit (reuse an
+`Mcp-Session-Id` or raise the limits deliberately); JSON-RPC `http_scope_read_only` → set
+`allow_write: true` and restart; 413 → the request exceeds 256 KiB.
+
 ---
 
 ## 2. Install and configure
@@ -321,6 +393,8 @@ For "look, don't touch" assistants (dashboards, triage, remote hands), launch wi
 ---
 
 ## 7. Troubleshooting
+
+Remote MCP HTTP (v0.7): see the troubleshooting bullets in the "Remote MCP over HTTP" section above (404 / 401 / 429 / `http_scope_read_only` / 413).
 
 | Symptom | Likely cause | Fix |
 | --- | --- | --- |

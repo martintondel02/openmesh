@@ -50,6 +50,9 @@ import {
 } from '../lib/setup';
 import { SetupRestClient } from '../lib/setup-api';
 import { AgentsRestClient } from '../lib/agents-api';
+import { OpsApiError, OpsRestClient } from '../lib/ops-api';
+import type { BackboneLink, BackboneLinkInput, GatewayConfigInput, GatewayConnector, GatewayTestResult, McpHttpStatus } from '../types/ops';
+import { GATEWAYS_HELP_TOPIC } from '../lib/ops';
 import { normalizeActivityPayload } from '../lib/agents';
 import { parseHelpRoute } from '../lib/help';
 import type { RegulatoryOverride } from '../types/regulatory';
@@ -377,6 +380,22 @@ export interface AppState {
   agentLoading: boolean;
   agentError: string | null;
 
+  /* remote operations (v0.7): gateways, remote MCP guidance, multi-link backbone */
+  gateways: GatewayConnector[] | null;
+  gatewaysLoading: boolean;
+  gatewaysError: string | null;
+  /** True when GET /api/gateways 404s (older bridge): show guidance instead of forms. */
+  gatewaysUnsupported: boolean;
+  gatewaySaving: string | null;
+  gatewayTesting: string | null;
+  backboneLinks: BackboneLink[] | null;
+  backboneLinksLoading: boolean;
+  backboneLinksError: string | null;
+  backboneLinksUnsupported: boolean;
+  backboneLinkSaving: string | null;
+  /** Remote MCP HTTP status when exposed/seeded; null means render file-config guidance only. */
+  mcpStatus: McpHttpStatus | null;
+
   /* actions */
   bootstrap: () => Promise<void>;
   retryConnection: () => Promise<void>;
@@ -439,6 +458,15 @@ export interface AppState {
   kickAllBackbonePeers: () => Promise<number>;
   rotateBackboneToken: () => Promise<string>;
   loadBackboneSetup: () => Promise<BackboneSetup | null>;
+  loadGateways: () => Promise<void>;
+  saveGateway: (input: GatewayConfigInput) => Promise<boolean>;
+  setGatewayEnabled: (id: string, enabled: boolean) => Promise<boolean>;
+  deleteGateway: (id: string) => Promise<boolean>;
+  testGateway: (id: string) => Promise<GatewayTestResult | null>;
+  loadBackboneLinks: () => Promise<void>;
+  saveBackboneLink: (input: BackboneLinkInput) => Promise<boolean>;
+  setBackboneLinkEnabled: (name: string, enabled: boolean) => Promise<boolean>;
+  deleteBackboneLink: (name: string) => Promise<boolean>;
   pushToast: (toast: Omit<Toast, 'id'>) => void;
   dismissToast: (id: string) => void;
   handleEvent: (event: Envelope) => void;
@@ -485,6 +513,14 @@ function setupRestClient(settings: AppSettings): SetupRestClient {
 
 function agentsRestClient(settings: AppSettings): AgentsRestClient {
   return new AgentsRestClient({
+    baseUrl: settings.bridgeUrl,
+    token: settings.token || null,
+    timeoutMs: 8000,
+  });
+}
+
+function opsRestClient(settings: AppSettings): OpsRestClient {
+  return new OpsRestClient({
     baseUrl: settings.bridgeUrl,
     token: settings.token || null,
     timeoutMs: 8000,
@@ -731,6 +767,18 @@ export const useAppStore = create<AppState>()((set, get) => ({
   activitySources: [],
   agentLoading: false,
   agentError: null,
+  gateways: null,
+  gatewaysLoading: false,
+  gatewaysError: null,
+  gatewaysUnsupported: false,
+  gatewaySaving: null,
+  gatewayTesting: null,
+  backboneLinks: null,
+  backboneLinksLoading: false,
+  backboneLinksError: null,
+  backboneLinksUnsupported: false,
+  backboneLinkSaving: null,
+  mcpStatus: null,
 
   resolveAttachmentUrl: async (attachmentId, mime) => {
     if (!transport) throw new Error('Not connected');
@@ -905,6 +953,18 @@ export const useAppStore = create<AppState>()((set, get) => ({
       activitySources: [...new Set(dataset.agents.activities.map((entry) => entry.source))],
       agentLoading: false,
       agentError: null,
+      gateways: cloneValue(dataset.gateways ?? []),
+      gatewaysLoading: false,
+      gatewaysError: null,
+      gatewaysUnsupported: false,
+      gatewaySaving: null,
+      gatewayTesting: null,
+      backboneLinks: cloneValue(dataset.backboneLinks ?? []),
+      backboneLinksLoading: false,
+      backboneLinksError: null,
+      backboneLinksUnsupported: false,
+      backboneLinkSaving: null,
+      mcpStatus: cloneValue(dataset.mcp ?? null),
       composerDrafts: {},
     });
   },
@@ -1776,6 +1836,297 @@ export const useAppStore = create<AppState>()((set, get) => ({
         helpTopic: 'agents',
         diagnostics: { endpoint: '/api/activity', bridge: state.settings.bridgeUrl },
       });
+    }
+  },
+
+  /* -------------------- remote operations: gateways + multi-link (v0.7) -------------------- */
+
+  loadGateways: async () => {
+    const state = get();
+    if (state.mode === 'demo') {
+      set({
+        gateways: cloneValue(demoDatasetRef?.gateways ?? []),
+        gatewaysLoading: false,
+        gatewaysError: null,
+        gatewaysUnsupported: false,
+      });
+      return;
+    }
+    if (state.connection !== 'connected' || state.gatewaysLoading) return;
+    set({ gatewaysLoading: true, gatewaysError: null });
+    try {
+      const connectors = await opsRestClient(state.settings).listGateways();
+      set({ gateways: connectors, gatewaysLoading: false, gatewaysUnsupported: false });
+    } catch (error) {
+      if (error instanceof OpsApiError && error.status === 404) {
+        set({ gateways: [], gatewaysLoading: false, gatewaysUnsupported: true, gatewaysError: null });
+        return;
+      }
+      set({ gatewaysLoading: false, gatewaysError: errorMessage(error) });
+      get().pushToast({
+        kind: 'error',
+        title: 'Could not load gateways',
+        message: `${errorMessage(error)} Check the bridge URL and token, then retry.`,
+        helpTopic: GATEWAYS_HELP_TOPIC,
+        diagnostics: { endpoint: '/api/gateways', bridge: state.settings.bridgeUrl },
+      });
+    }
+  },
+
+  saveGateway: async (input) => {
+    const state = get();
+    if (state.mode === 'demo') {
+      const existing = (state.gateways ?? []).find((connector) => connector.id === input.id);
+      const status = existing?.status ?? {
+        last_success_ms: null,
+        last_failure_ms: null,
+        last_error: null,
+        retries: 0,
+        out_secret_present: Boolean(input.outbound.secret_env),
+        in_secret_present: Boolean(input.inbound.secret_env),
+      };
+      const next: GatewayConnector = {
+        ...input,
+        status: {
+          ...status,
+          out_secret_present: Boolean(input.outbound.secret_env) || status.out_secret_present,
+          in_secret_present: Boolean(input.inbound.secret_env) || status.in_secret_present,
+        },
+      };
+      const list = [...(state.gateways ?? []).filter((connector) => connector.id !== input.id), next].sort((left, right) =>
+        left.id.localeCompare(right.id),
+      );
+      set({ gateways: list, gatewaysError: null, gatewaysUnsupported: false });
+      get().pushToast({
+        kind: 'success',
+        title: existing ? 'Demo gateway updated' : 'Demo gateway added',
+        message: `${input.id} saved locally — demo mode never calls an adapter.`,
+        helpTopic: GATEWAYS_HELP_TOPIC,
+      });
+      return true;
+    }
+    set({ gatewaySaving: input.id });
+    try {
+      await opsRestClient(state.settings).putGateway(input);
+      set({ gatewaySaving: null, gatewaysUnsupported: false });
+      await get().loadGateways();
+      get().pushToast({
+        kind: 'success',
+        title: 'Gateway saved',
+        message: `${input.id} is ${input.enabled ? 'enabled' : 'disabled'}; secrets stay on the bridge host.`,
+        helpTopic: GATEWAYS_HELP_TOPIC,
+      });
+      return true;
+    } catch (error) {
+      set({ gatewaySaving: null });
+      get().pushToast({
+        kind: 'error',
+        title: 'Could not save gateway',
+        message: errorMessage(error),
+        helpTopic: GATEWAYS_HELP_TOPIC,
+        diagnostics: { endpoint: `/api/gateways/${input.id}`, bridge: state.settings.bridgeUrl },
+      });
+      return false;
+    }
+  },
+
+  setGatewayEnabled: async (id, enabled) => {
+    const state = get();
+    const connector = (state.gateways ?? []).find((item) => item.id === id);
+    if (!connector) return false;
+    return get().saveGateway({
+      id: connector.id,
+      kind: connector.kind,
+      enabled,
+      outbound: connector.outbound,
+      inbound: connector.inbound,
+    });
+  },
+
+  deleteGateway: async (id) => {
+    const state = get();
+    if (state.mode === 'demo') {
+      set({ gateways: (state.gateways ?? []).filter((connector) => connector.id !== id) });
+      get().pushToast({ kind: 'success', title: 'Demo gateway removed', message: id, helpTopic: GATEWAYS_HELP_TOPIC });
+      return true;
+    }
+    try {
+      await opsRestClient(state.settings).deleteGateway(id);
+      set({ gateways: (state.gateways ?? []).filter((connector) => connector.id !== id) });
+      get().pushToast({ kind: 'success', title: 'Gateway removed', message: id, helpTopic: GATEWAYS_HELP_TOPIC });
+      return true;
+    } catch (error) {
+      get().pushToast({
+        kind: 'error',
+        title: 'Could not remove gateway',
+        message: errorMessage(error),
+        helpTopic: GATEWAYS_HELP_TOPIC,
+        diagnostics: { endpoint: `/api/gateways/${id}`, bridge: state.settings.bridgeUrl },
+      });
+      return false;
+    }
+  },
+
+  testGateway: async (id) => {
+    const state = get();
+    if (state.mode === 'demo') {
+      const connector = (state.gateways ?? []).find((item) => item.id === id);
+      const failing = Boolean(connector?.status.last_error);
+      const result: GatewayTestResult = {
+        ok: !failing,
+        status: failing ? 502 : 200,
+        message: failing ? connector?.status.last_error ?? 'adapter unreachable' : 'signed test payload accepted',
+        at_ms: Date.now(),
+      };
+      get().pushToast({
+        kind: result.ok ? 'success' : 'error',
+        title: result.ok ? 'Demo gateway test delivered' : 'Demo gateway test failed',
+        message: result.message ?? undefined,
+        helpTopic: GATEWAYS_HELP_TOPIC,
+      });
+      return result;
+    }
+    set({ gatewayTesting: id });
+    try {
+      const result = await opsRestClient(state.settings).testGateway(id);
+      set({ gatewayTesting: null });
+      get().pushToast({
+        kind: result.ok ? 'success' : 'error',
+        title: result.ok ? 'Gateway test delivered' : 'Gateway test failed',
+        message: result.message ?? (result.status !== null ? `HTTP ${result.status}` : undefined),
+        helpTopic: GATEWAYS_HELP_TOPIC,
+        diagnostics: { endpoint: `/api/gateways/${id}/test`, bridge: state.settings.bridgeUrl },
+      });
+      await get().loadGateways();
+      return result;
+    } catch (error) {
+      set({ gatewayTesting: null });
+      get().pushToast({
+        kind: 'error',
+        title: 'Gateway test failed',
+        message: errorMessage(error),
+        helpTopic: GATEWAYS_HELP_TOPIC,
+      });
+      return null;
+    }
+  },
+
+  loadBackboneLinks: async () => {
+    const state = get();
+    if (state.mode === 'demo') {
+      set({
+        backboneLinks: cloneValue(demoDatasetRef?.backboneLinks ?? []),
+        backboneLinksLoading: false,
+        backboneLinksError: null,
+        backboneLinksUnsupported: false,
+      });
+      return;
+    }
+    if (state.connection !== 'connected' || state.backboneLinksLoading) return;
+    set({ backboneLinksLoading: true, backboneLinksError: null });
+    try {
+      const links = await opsRestClient(state.settings).listBackboneLinks();
+      set({ backboneLinks: links, backboneLinksLoading: false, backboneLinksUnsupported: false });
+    } catch (error) {
+      if (error instanceof OpsApiError && error.status === 404) {
+        set({ backboneLinks: null, backboneLinksLoading: false, backboneLinksUnsupported: true, backboneLinksError: null });
+        return;
+      }
+      set({ backboneLinksLoading: false, backboneLinksError: errorMessage(error) });
+      get().pushToast({
+        kind: 'error',
+        title: 'Could not load backbone links',
+        message: errorMessage(error),
+        helpTopic: 'backbone',
+        diagnostics: { endpoint: '/api/backbone/links', bridge: state.settings.bridgeUrl },
+      });
+    }
+  },
+
+  saveBackboneLink: async (input) => {
+    const state = get();
+    if (state.mode === 'demo') {
+      const existing = (state.backboneLinks ?? []).find((link) => link.name === input.name);
+      const next: BackboneLink = {
+        name: input.name,
+        url: input.url,
+        mode: existing?.mode ?? 'client',
+        enabled: input.enabled,
+        connected: false,
+        last_error: null,
+        stats: existing?.stats ?? null,
+      };
+      set({
+        backboneLinks: [...(state.backboneLinks ?? []).filter((link) => link.name !== input.name), next].sort((left, right) =>
+          left.name.localeCompare(right.name),
+        ),
+        backboneLinksUnsupported: false,
+      });
+      get().pushToast({
+        kind: 'success',
+        title: existing ? 'Demo backbone link updated' : 'Demo backbone link added',
+        message: `${input.name} saved locally — demo mode never dials a backbone.`,
+        helpTopic: 'backbone',
+      });
+      return true;
+    }
+    set({ backboneLinkSaving: input.name });
+    try {
+      await opsRestClient(state.settings).putBackboneLink(input);
+      set({ backboneLinkSaving: null, backboneLinksUnsupported: false });
+      await get().loadBackboneLinks();
+      get().pushToast({ kind: 'success', title: 'Backbone link saved', message: input.name, helpTopic: 'backbone' });
+      return true;
+    } catch (error) {
+      set({ backboneLinkSaving: null });
+      get().pushToast({
+        kind: 'error',
+        title: 'Could not save backbone link',
+        message: errorMessage(error),
+        helpTopic: 'backbone',
+        diagnostics: { endpoint: `/api/backbone/links/${input.name}`, bridge: state.settings.bridgeUrl },
+      });
+      return false;
+    }
+  },
+
+  setBackboneLinkEnabled: async (name, enabled) => {
+    const state = get();
+    const link = (state.backboneLinks ?? []).find((item) => item.name === name);
+    if (!link) return false;
+    if (!link.url) {
+      get().pushToast({
+        kind: 'warn',
+        title: 'Link URL is redacted',
+        message: 'This bridge did not return the invite URL, so the link can only be enabled from the CLI or the config file.',
+        helpTopic: 'backbone',
+      });
+      return false;
+    }
+    return get().saveBackboneLink({ name: link.name, url: link.url, enabled });
+  },
+
+  deleteBackboneLink: async (name) => {
+    const state = get();
+    if (state.mode === 'demo') {
+      set({ backboneLinks: (state.backboneLinks ?? []).filter((link) => link.name !== name) });
+      get().pushToast({ kind: 'success', title: 'Demo backbone link removed', message: name, helpTopic: 'backbone' });
+      return true;
+    }
+    try {
+      await opsRestClient(state.settings).deleteBackboneLink(name);
+      set({ backboneLinks: (state.backboneLinks ?? []).filter((link) => link.name !== name) });
+      get().pushToast({ kind: 'success', title: 'Backbone link removed', message: name, helpTopic: 'backbone' });
+      return true;
+    } catch (error) {
+      get().pushToast({
+        kind: 'error',
+        title: 'Could not remove backbone link',
+        message: errorMessage(error),
+        helpTopic: 'backbone',
+        diagnostics: { endpoint: `/api/backbone/links/${name}`, bridge: state.settings.bridgeUrl },
+      });
+      return false;
     }
   },
 
