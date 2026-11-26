@@ -37,7 +37,7 @@ This note is itself agent-written and describes the process honestly, including 
 (§8).
 
 This is authorship history, **not a quality claim and not the project's current description**.
-OpenMesh is described as AI-assisted, human-directed and human-QA'd — not "100 % AI-built".
+OpenMesh is described as AI-assisted, human-directed and human-QA'd — not as a fully AI-generated project.
 AI output is untrusted until it has been reviewed and tested by a human (see
 [AI-POLICY.md](../../AI-POLICY.md)). It also does not mean "reviewed to production quality":
 at v0.1.0 there was no hardware, no field test and no external security audit; field and
@@ -367,8 +367,8 @@ scenarios, builds), not "write N lines".
   hygiene (especially the Reticulum License's AI-training clause and the rsLXST
   non-commercial/no-derivatives license) the safe rule is: no code copied from those
   repositories, and the research notes are read-only design references (ADR 0008).
-* **Messaging matters.** Describe the project as **AI-assisted and human-QA'd**, not
-  "100 % AI-built": early milestones were heavily agent-generated, but humans set the contracts,
+* **Messaging matters.** Describe the project as **AI-assisted and human-QA'd**, not as
+  a fully AI-generated project: early milestones were heavily agent-generated, but humans set the contracts,
   review every change, run the tests/device QA and own the releases. AI output is not a warranty
   of correctness, security or fitness, and should never be presented as one.
 
