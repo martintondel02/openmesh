@@ -366,7 +366,10 @@ clean PlatformIO install):
 | Diagnostics | `[env:t1000e_probe]` (`firmware/probe/main.cpp`) is a USB-CDC + LED first-article probe; `[om]` serial markers and short settle delays in `setup()` keep the boot path observable |
 
 Verified on hardware: build, UF2 and nrfutil flashing, boot, USB CDC enumeration, USB companion
-**Ping → Pong**, `radio=ok`, GPS UART init, and BLE advertising with a scan-response name. Not yet
+**Ping → Pong**, `radio=ok`, GPS UART init, and BLE advertising with a scan-response name.
+
+Current board-by-board state, diagnostics and the next steps are tracked in
+[hardware bring-up status, 2026-11-27](../docs/hardware/bringup-status-2026-11-27.md). Not yet
 verified: RF peer TX/RX (needs a second node/field test), Android BLE companion handshake,
 USB/BLE coexistence (BLE-on-USB re-enumerates CDC), sleep current, battery calibration, and the
 other three boards. The first-article unit currently needs a charged battery before the next

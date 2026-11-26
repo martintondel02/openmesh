@@ -447,12 +447,38 @@ void applyRadioConfigIfChanged() {
 
 }  // namespace
 
+// First-article startup tracing: this runs before setup() (static/global constructors). It uses
+// direct GPIO if available so it can report that the application image itself started.
+#if defined(OM_BOOT_TRACE)
+extern "C" void om_boot_trace_ctor(void) __attribute__((constructor(101)));
+extern "C" void om_boot_trace_ctor(void) {
+    pinMode(LED_BUILTIN, OUTPUT);
+    for (int i = 0; i < 3; ++i) {
+        digitalWrite(LED_BUILTIN, HIGH);
+        for (volatile int j = 0; j < 400000; ++j) {
+        }
+        digitalWrite(LED_BUILTIN, LOW);
+        for (volatile int j = 0; j < 400000; ++j) {
+        }
+    }
+}
+#endif
+
 void setup() {
+    // Trace marker: LED solid before USB/serial so a silent crash after setup entry is visible too.
+#if defined(OM_BOOT_TRACE)
+    pinMode(LED_BUILTIN, OUTPUT);
+    digitalWrite(LED_BUILTIN, HIGH);
+#endif
     // USB/serial first: the init markers below must be visible even if a later step fails.
     Serial.begin(115200);
     delay(250);
     Serial.println();
     Serial.println("[om] setup: begin"); delay(150);
+#if defined(OM_EARLY_STOP)
+    Serial.println("[om] EARLY STOP: USB alive"); Serial.flush();
+    for (;;) { digitalWrite(LED_BUILTIN, (millis() / 500) % 2 ? HIGH : LOW); delay(1000); }
+#endif
     g_board = &board::get();
     Serial.printf("[om] board=%s\n", g_board->id); Serial.flush(); delay(150);
     hal::initUx(*g_board);

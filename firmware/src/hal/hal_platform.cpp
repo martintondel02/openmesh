@@ -51,24 +51,10 @@ void randomBytes(void* ctx, uint8_t* out, size_t len) {
 }
 
 void sleepMs(uint32_t ms) {
-    // Light sleep: RTC1 wake-up with the 32.768 kHz LFCLK, then WFE. The radio keeps its own
-    // state; callers only sleep between scheduler ticks.
-    if (ms == 0) return;
-    if (ms > 3600000u) ms = 3600000u;
-    NRF_CLOCK->TASKS_LFCLKSTART = 1;
-    for (volatile int i = 0; i < 100000 && NRF_CLOCK->EVENTS_LFCLKSTARTED == 0; ++i) {
-    }
-    NRF_CLOCK->EVENTS_LFCLKSTARTED = 0;
-    NRF_RTC1->TASKS_STOP = 1;
-    NRF_RTC1->TASKS_CLEAR = 1;
-    NRF_RTC1->PRESCALER = 0;  // 32768 Hz
-    NRF_RTC1->CC[0] = ms * 32;
-    NRF_RTC1->EVENTS_COMPARE[0] = 0;
-    NRF_RTC1->INTENSET = RTC_INTENSET_COMPARE0_Msk;
-    NRF_RTC1->TASKS_START = 1;
-    __WFE();
-    NRF_RTC1->TASKS_STOP = 1;
-    NRF_RTC1->EVENTS_COMPARE[0] = 0;
+    // First-article: free-running scheduler loop. Neither direct RTC1/WFE (conflicts with
+    // FreeRTOS/SoftDevice and breaks millis) nor delay() is safe on the current T1000-E/RAK core
+    // without deeper RTOS integration. USB/radio/companion remain responsive; power is a follow-up.
+    (void)ms;
 }
 
 void initUx(const board::Board& board) {

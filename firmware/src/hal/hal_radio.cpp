@@ -70,7 +70,8 @@ bool Radio::applyConfig(const LoraProfile& profile, const Region& region, int8_t
                                board_->radio.txen >= 0 ? (uint32_t)board_->radio.txen
                                                       : RADIOLIB_NC);
     }
-    radio->setDcDc(true);
+    // RadioLib 7 made the old SX126x::setDcDc() regulator switch protected; the radio defaults to
+    // LDO mode, which is functional for first-article tests. DC-DC mode is a power follow-up.
 #else
     // LR1110: the internal switch is configured by begin(); DIO3 supplies the TCXO voltage.
     (void)board_->radio.dio2_as_rf_switch;

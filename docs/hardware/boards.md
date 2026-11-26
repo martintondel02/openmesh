@@ -43,7 +43,9 @@ and gateways only (it needs the larger flash/queue budget and mains/solar power)
 > Open issues on this first article: USB/BLE coexistence (BLE-on-USB re-enumerates CDC), a charged
 > battery is required for the application to start, and RF peer TX/RX still needs a second node.
 > The other three board targets still need first-article build/boot checks. Build fixes and the
-> verified/not-yet-verified list live in [firmware/README.md §8.1](../../firmware/README.md).
+> verified/not-yet-verified list live in [firmware/README.md §8.1](../../firmware/README.md); the
+> detailed hand-off state is in
+> [hardware bring-up status, 2026-11-27](bringup-status-2026-11-27.md).
 
 ---
 
