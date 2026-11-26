@@ -308,6 +308,23 @@ or accepts the USB permission, the service runs as a normal `connectedDevice` se
 
 ## Device verification
 
+**v0.5.1 regulatory-override spot-check (Pixel-class A069P, Android 17, build 0.5.1/versionCode 6):**
+
+- Advanced → Settings → Regulatory shown the EU868 legal limit (27 dBm · 10 % · 250 kHz) and the
+  warning card; enabling with the default safe values (22 dBm / 10 % / region centre) saved
+  **without typed confirmation** and produced the app-wide banner, the engine log
+  `regulatory: override enabled … acknowledged=true`, and Radio → "Effective duty: 10 %".
+- With duty raised to 100 %, the acknowledgement UI appeared and **Enable override was inert until
+  the "I understand" checkbox was ticked and `OVERRIDE` typed** (no engine log / no state change
+  before that).
+- After confirmation: `override active: 22 dBm · 100 % · 869.525 MHz`, banner everywhere,
+  `regulatory: override enabled … duty=100 … acknowledged=true`, and Radio →
+  "Effective duty: 100 % (region/override policy)". No crashes/ANRs (`adb logcat -b crash` empty).
+- One-tap **Disable override** removed the banner, logged
+  `regulatory: override disabled … acknowledged=false`, and Radio → "Effective duty: 10 %".
+  Hardware cap stayed at 22 dBm (legal region max 27 dBm was never exceeded).
+
+
 The debug APK was installed and exercised on a real Android phone (Pixel-class, Android 17):
 fresh install → notification permission → onboarding → engine start → private channel/invite QR
 → channel message send → offline Help → all main screens, with no crashes and no ANRs
