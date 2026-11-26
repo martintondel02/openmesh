@@ -1,11 +1,17 @@
 # AGENTS.md — instructions for coding agents
 
-This repository is **AI-built and human-directed**. Coding agents (Claude Code, Cursor, DSH,
-Codex-style tools, custom loops) are welcome, but they work under the same rules as humans:
-**contracts first, tests always, no silent protocol drift.** This file is the entry point for any
-agent that will change code, docs or content. Read it before editing.
+This repository is **AI-assisted and human-directed**: agents draft code and documentation, while
+humans set the contracts, review every change, run the tests and hardware QA, and own the
+releases. Coding agents (Claude Code, Cursor, DSH, Codex-style tools, custom loops) work under the
+same rules as humans: **contracts first, tests always, full AI disclosure, no silent protocol
+drift.** This file is the entry point for any agent that will change code, docs or content.
 
-* Humans: see [CONTRIBUTING.md](CONTRIBUTING.md) and [README.md](README.md).
+> **Contributions are closed for now.** Only the repository owner and their designated AI
+> assistant work on this repository. External PRs are auto-closed; the strict
+> [AI contribution policy](AI-POLICY.md) applies to every change (including the owner's agents).
+> AI agents may never open PRs, push commits, approve, merge or release on their own authority.
+
+* Humans: see [CONTRIBUTING.md](CONTRIBUTING.md), [AI-POLICY.md](AI-POLICY.md) and [README.md](README.md).
 * Agents: also read the two agent-facing references — [docs/agents/mcp.md](docs/agents/mcp.md) and
   [docs/agents/prompts.md](docs/agents/prompts.md) — and the help corpus in `content/help/`.
 

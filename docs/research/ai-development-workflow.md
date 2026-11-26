@@ -1,6 +1,7 @@
-# How this repository was built by AI agents
+# How this repository is built with AI assistance
 
-**Status:** process note · **Last updated:** 2026-11-25
+**Status:** process note · **Last updated:** 2026-11-26
+**Policy:** AI involvement is governed by [AI-POLICY.md](../../AI-POLICY.md).
 **Scope:** describes the build process, not the product. No benchmark numbers are claimed; the
 only quantitative claims are repository facts measured with `find`/`wc` and protocol
 measurements that can be reproduced with the commands in this note.
@@ -12,12 +13,14 @@ Related: [Architecture](../architecture/ARCHITECTURE.md) ·
 
 ---
 
-## 1. What "100 % AI-built" means here, precisely
+## 1. What "AI-assisted, human-directed" means here
 
-OpenMesh v0.1.0 was built by a team of AI agents running in the **DeepSeek Harness (DSH)** web
-GUI, under the direction of a human operator who set the goals, provided the machine,
-approved the plan, and will own the result. There is no human-written source code in the
-repository. The human contribution is:
+OpenMesh is developed with AI assistance under human direction. AI agents running in the
+**DeepSeek Harness (DSH)** web GUI draft architecture notes, protocol code, firmware, clients,
+tests and documentation, under a human operator who sets the goals, provides the machine,
+approves the plan, reviews changes and owns the result. The v0.1.0 milestone was heavily
+agent-generated (most artefacts were AI-drafted from human-authored contracts), and since v0.4
+the human also runs real-device QA on Android hardware and approves releases. The human contribution is:
 
 * the product brief and non-goals (what OpenMesh is, who it is for, what it will not do);
 * the environment (Fedora host without a system compiler, no Android SDK, no sudo, network
@@ -33,9 +36,12 @@ Kotlin code, tests, documentation, ADRs, tooling, and the process used to coordi
 This note is itself agent-written and describes the process honestly, including its limits
 (§8).
 
-The "100 %" claim is therefore about authorship of the artefacts, not about removing the
-human. It also does not mean "reviewed to production quality": no hardware, no field test, no
-external security audit has happened at v0.1.0.
+This is authorship history, **not a quality claim and not the project's current description**.
+OpenMesh is described as AI-assisted, human-directed and human-QA'd — not "100 % AI-built".
+AI output is untrusted until it has been reviewed and tested by a human (see
+[AI-POLICY.md](../../AI-POLICY.md)). It also does not mean "reviewed to production quality":
+at v0.1.0 there was no hardware, no field test and no external security audit; field and
+device testing has been added since v0.4.
 
 ---
 
@@ -361,9 +367,10 @@ scenarios, builds), not "write N lines".
   hygiene (especially the Reticulum License's AI-training clause and the rsLXST
   non-commercial/no-derivatives license) the safe rule is: no code copied from those
   repositories, and the research notes are read-only design references (ADR 0008).
-* **The "AI-built" framing can mislead.** The human set goals and owns the result; the agents
-  generated text and code. "100 % AI-built" is not a warranty of correctness, security, or
-  fitness, and should never be used as one.
+* **Messaging matters.** Describe the project as **AI-assisted and human-QA'd**, not
+  "100 % AI-built": early milestones were heavily agent-generated, but humans set the contracts,
+  review every change, run the tests/device QA and own the releases. AI output is not a warranty
+  of correctness, security or fitness, and should never be presented as one.
 
 ### 8.3 Things we deliberately did *not* do
 

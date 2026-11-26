@@ -5,7 +5,7 @@
 > a local bridge daemon with WebSocket/REST/MCP APIs, a React web/PWA client, LoRa firmware, a
 > self-hosted backbone mode for linking distant meshes, and an AI-native agent surface.
 
-OpenMesh v0.3.0. Normative contracts live in `docs/architecture/`; user-facing help topics live in
+OpenMesh v0.5.0. AI-assisted, human-directed and human-QA'd; see AI-POLICY.md. Normative contracts live in `docs/architecture/`; user-facing help topics live in
 `content/help/` and are served by the bridge and web UI. Repository: https://github.com/martintondel02/openmesh
 
 ## Start here
@@ -16,6 +16,8 @@ OpenMesh v0.3.0. Normative contracts live in `docs/architecture/`; user-facing h
 - [Glossary](https://github.com/martintondel02/openmesh/blob/main/docs/glossary.md): every protocol and UX term in one place.
 - [FAQ](https://github.com/martintondel02/openmesh/blob/main/docs/guides/faq.md): product, identity, mesh-behaviour and agent questions.
 - [Agent instructions](https://github.com/martintondel02/openmesh/blob/main/AGENTS.md): rules for coding agents working on this repository.
+- [AI policy](https://github.com/martintondel02/openmesh/blob/main/AI-POLICY.md): strict rules for AI-assisted contributions, disclosure, review, licensing and security. Contributions are closed for now.
+- [Contributing](https://github.com/martintondel02/openmesh/blob/main/CONTRIBUTING.md): contribution status (closed) and the rules that will apply when they open.
 
 ## Architecture (normative)
 
@@ -27,7 +29,7 @@ OpenMesh v0.3.0. Normative contracts live in `docs/architecture/`; user-facing h
 - [AI-NATIVE](https://github.com/martintondel02/openmesh/blob/main/docs/architecture/AI-NATIVE.md): MCP server, tool catalog, activity log, prompt pack, OpenAPI requirements.
 - [UX & help system](https://github.com/martintondel02/openmesh/blob/main/docs/design/ux-help-system.md): beginner/advanced modes, help surfaces, setup presets.
 - [COMPANION-API](https://github.com/martintondel02/openmesh/blob/main/docs/architecture/COMPANION-API.md): BLE/USB companion protocol for mobile firmware links.
-- [ROADMAP](https://github.com/martintondel02/openmesh/blob/main/docs/ROADMAP.md): milestones and scope; v0.3.0 is the AI-native + beginner-UX release.
+- [ROADMAP](https://github.com/martintondel02/openmesh/blob/main/docs/ROADMAP.md): milestones and scope; v0.5.0 is the legal-maxima + emergency-override release.
 
 ## Guides
 
@@ -41,14 +43,14 @@ OpenMesh v0.3.0. Normative contracts live in `docs/architecture/`; user-facing h
 - [MCP server reference](https://github.com/martintondel02/openmesh/blob/main/docs/agents/mcp.md): install/config for Claude Desktop/Code, Cursor, DSH and generic clients; env vars; 27-tool catalog; resources/prompts; read-only mode; safety; troubleshooting.
 - [Prompt pack](https://github.com/martintondel02/openmesh/blob/main/docs/agents/prompts.md): copy-paste prompts for troubleshooting, family setup, backup/migration, VPS backbone, API integration, sensor/radio tweaks, daily operations.
 - [Help topic: Use your AI agent](https://github.com/martintondel02/openmesh/blob/main/content/help/agents.md): beginner-friendly agent usage.
-- [Help corpus index](https://github.com/martintondel02/openmesh/blob/main/content/help/index.json): machine-readable topic metadata (16 topics; beginner/advanced/both).
+- [Help corpus index](https://github.com/martintondel02/openmesh/blob/main/content/help/index.json): machine-readable topic metadata (17 topics; beginner/advanced/both).
 
 ## Help corpus (in-app content)
 
 - [Getting started](https://github.com/martintondel02/openmesh/blob/main/content/help/getting-started.md) · [Install](https://github.com/martintondel02/openmesh/blob/main/content/help/install.md) · [First mesh](https://github.com/martintondel02/openmesh/blob/main/content/help/first-mesh.md) · [Radio & region](https://github.com/martintondel02/openmesh/blob/main/content/help/radio-and-region.md)
 - [Messaging](https://github.com/martintondel02/openmesh/blob/main/content/help/messaging.md) · [Media](https://github.com/martintondel02/openmesh/blob/main/content/help/media.md) · [Channels](https://github.com/martintondel02/openmesh/blob/main/content/help/channels.md) · [Contacts & identity](https://github.com/martintondel02/openmesh/blob/main/content/help/contacts-identity.md)
 - [Map & position](https://github.com/martintondel02/openmesh/blob/main/content/help/map-and-position.md) · [Nodes & telemetry](https://github.com/martintondel02/openmesh/blob/main/content/help/nodes-telemetry.md) · [Backbone](https://github.com/martintondel02/openmesh/blob/main/content/help/backbone.md)
-- [Agents](https://github.com/martintondel02/openmesh/blob/main/content/help/agents.md) · [Security](https://github.com/martintondel02/openmesh/blob/main/content/help/security.md) · [Troubleshooting](https://github.com/martintondel02/openmesh/blob/main/content/help/troubleshooting.md) · [Glossary](https://github.com/martintondel02/openmesh/blob/main/content/help/glossary.md) · [FAQ](https://github.com/martintondel02/openmesh/blob/main/content/help/faq.md)
+- [Agents](https://github.com/martintondel02/openmesh/blob/main/content/help/agents.md) · [Legal limits & emergency override](https://github.com/martintondel02/openmesh/blob/main/content/help/regulatory-and-emergency.md) · [Security](https://github.com/martintondel02/openmesh/blob/main/content/help/security.md) · [Troubleshooting](https://github.com/martintondel02/openmesh/blob/main/content/help/troubleshooting.md) · [Glossary](https://github.com/martintondel02/openmesh/blob/main/content/help/glossary.md) · [FAQ](https://github.com/martintondel02/openmesh/blob/main/content/help/faq.md)
 
 ## Decisions (ADRs)
 

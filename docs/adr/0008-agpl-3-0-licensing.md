@@ -31,7 +31,7 @@ Requirements and constraints:
    * **GPLv3** (NomadNet, Meshtastic firmware, RNode firmware): copyleft, compatible with
      AGPL-3.0 in the GPLv3 → AGPLv3 direction (GPLv3 §13 permits combining with AGPLv3).
    * **MIT** (MeshCore): permissive, compatible.
-4. **The project is AI-built.** Some upstream licenses (notably the Reticulum License) contain
+4. **The project is AI-assisted (human-directed and human-reviewed).** Some upstream licenses (notably the Reticulum License) contain
    clauses aimed at AI training/use. Even if we never copy code, using their repositories as
    *design references* and their test vectors as fixtures must be considered carefully.
 5. **Crates and assets.** Rust dependencies have their own licenses (MIT/Apache-2.0 mostly),
@@ -93,7 +93,7 @@ Rules of thumb:
 * Contributors must state the source of any code that is not their own, and confirm no
   incompatible-license code was copied.
 * Generated code (including AI-generated code) is allowed if the contributor has the right to
-  submit it and it is reviewed like any other contribution. The project's own AI-built history
+  submit it and it is reviewed like any other contribution. The project's own AI-assisted workflow
   is disclosed in [ai-development-workflow.md](../research/ai-development-workflow.md).
 
 ## 3. Consequences

@@ -1,21 +1,32 @@
 # Contributing to OpenMesh
 
-Thanks for helping build an open mesh. This project is AI-built and human-directed, so the
-rules are simple and strict: contracts first, tests always, no silent protocol drift.
+> **Contributions are closed for now.** OpenMesh is developed only by the repository owner and
+> their designated AI assistant. Pull requests from anyone else are closed automatically, and
+> issues/discussions are disabled until contributions open. When they open, the
+> [AI contribution policy](AI-POLICY.md) and the rules below apply. Do not open a PR expecting it
+> to be reviewed while this notice is present.
 
-## Ground rules
+Thanks for your interest in building an open mesh. OpenMesh is **AI-assisted and human-directed**:
+AI tools help write code and docs, while humans set the contracts, review every change, run the
+tests and hardware QA, and own the releases. The rules are simple and strict: contracts first,
+tests always, no silent protocol drift, and full disclosure of AI involvement.
 
-1. **Read the specs first.** Protocol changes require an edit to
+## Before you start
+
+1. **Read [AI-POLICY.md](AI-POLICY.md).** AI involvement must be disclosed, reviewed by a human and
+   attributable to a human author; undisclosed or autonomous AI contributions are rejected.
+2. **Read the specs.** Protocol changes require an edit to
    [`docs/architecture/PROTOCOL.md`](docs/architecture/PROTOCOL.md), regenerated golden vectors
    and a firmware conformance note. The spec is normative; code follows it.
-2. **`main` is protected.** Open a PR, keep CI green, squash-merge with a linear history.
-3. **One concern per PR.** Small, reviewable diffs.
-4. **Tests are not optional.** New protocol behaviour needs unit tests; user-facing features need
+3. **`main` is protected.** Contributions go through a PR with green CI and a linear history (when
+   contributions open).
+4. **One concern per PR.** Small, reviewable diffs. AI-generated bulk changes are rejected.
+5. **Tests are not optional.** New protocol behaviour needs unit tests; user-facing features need
    a test or a documented manual verification step in the PR description.
-5. **No licence surprises.** AGPL-3.0-or-later for everything in this repo. Third-party code must
-   be compatible and recorded in `NOTICE`. Do not copy code from restricted licences (notably
-   LXST / rsLXST).
-6. **Be kind.** See `CODE_OF_CONDUCT.md`.
+6. **No licence surprises.** AGPL-3.0-or-later for everything in this repo. Third-party code must
+   be compatible and recorded in `NOTICE`. Do not copy code from restricted licences — notably
+   LXST / rsLXST (CC BY-NC-ND). This includes code produced by an AI from those sources.
+7. **Be kind.** See `CODE_OF_CONDUCT.md`.
 
 ## Development setup
 
@@ -31,6 +42,7 @@ pnpm --dir apps/web build && pnpm --dir apps/web test
 ```
 
 Firmware needs PlatformIO (`pip install platformio`); see `firmware/README.md`.
+Android needs JDK 21 + Android SDK/NDK + cargo-ndk; see `apps/android/README.md`.
 
 ## Commit style
 
@@ -43,11 +55,16 @@ firmware: budget airtime per region in the scheduler
 docs: describe store-and-forward offer cadence
 ```
 
+Commits containing substantive AI output should carry an `AI-Assisted:` trailer, e.g.
+`AI-Assisted: DeepSeek Harness / DeepSeek v4.1-flash (code+tests)`.
+
 ## PR checklist
 
+- [ ] AI assistance disclosed (tools/models, scope) and the change is understood by the human author
 - [ ] Specs updated (if protocol/API changed) and golden vectors regenerated
 - [ ] `cargo fmt`, `clippy -D warnings`, `cargo test --workspace` pass
 - [ ] Web build + tests pass (if `apps/web` touched)
-- [ ] Firmware builds for affected boards (if `firmware/` touched) — CI covers this
-- [ ] Docs updated (README/architecture/ADR if behaviour or decisions changed)
+- [ ] Firmware builds/tests for affected boards (if `firmware/` touched) — CI covers this
+- [ ] Android lint/tests/APK build pass (if `apps/android` touched)
+- [ ] Docs updated (README/architecture/ADR/help if behaviour or decisions changed)
 - [ ] No credentials, tokens, seeds or personal data committed

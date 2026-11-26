@@ -71,7 +71,7 @@ server-owned setup presets, (b) a single author-once help corpus shared by app/d
 
 ### 2.2 One help corpus, three surfaces
 
-* `content/help/*.md` + `index.json` are the **single source of truth** (16 topics: getting
+* `content/help/*.md` + `index.json` are the **single source of truth** (17 topics: getting
   started, install, first mesh, radio/region, messaging, media, channels, contacts/identity,
   map/position, nodes/telemetry, backbone, agents, security, troubleshooting, glossary, FAQ).
   Each topic is self-contained, starts with an H1 title, and carries audience (`beginner`,

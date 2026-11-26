@@ -39,7 +39,7 @@ USB. No bridge, no server, no account.
 | Nodes / map | ✅ node list (role, hops, RSSI/SNR, battery, last seen); osmdroid map with node markers |
 | Radio screen | ✅ BLE/USB connect, firmware/region/profile, signal, frames/airtime counters, tips |
 | Settings | ✅ beginner/advanced modes, name/role/region/profile/store-forward/announce, notifications, radio, airtime, identity/backup warning, help/about links |
-| Help | ✅ bundled `content/help` (16 topics, offline), search, beginner/advanced filter, lightweight markdown reader; every control maps to a help topic (`HelpKeys`) |
+| Help | ✅ bundled `content/help` (17 topics, offline), search, beginner/advanced filter, lightweight markdown reader; every control maps to a help topic (`HelpKeys`) |
 | About/agents/backbone | ✅ MCP guidance, backbone tip with public-exposure/Openflare note, licences, version |
 | Tests | ✅ 39 JVM unit tests (preset parity with `content/presets/setup.json`, QR parse/build, media caps/math, notifications, help registry, framing, airtime) + `cargo test -p openmesh-ffi` (8) |
 
@@ -240,7 +240,7 @@ cargo test -p openmesh-ffi          # 8/8
 
 Current results: **62/62 JVM unit tests pass**, `lintDebug` passes, `assembleDebug` produces
 `app/build/outputs/apk/debug/app-debug.apk` (~23 MB), `assembleRelease` produces an unsigned
-~5.1 MB APK. The APK contains `assets/help/*` (16 topics + index), `assets/presets/setup.json`, and
+~5.1 MB APK. The APK contains `assets/help/*` (17 topics + index), `assets/presets/setup.json`, and
 `lib/{arm64-v8a,armeabi-v7a,x86_64}/libopenmesh_ffi.so`.
 
 The unit tests cover: preset parity against the real `content/presets/setup.json` (all roles,

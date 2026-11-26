@@ -1,0 +1,72 @@
+name: Closed contributions
+
+# OpenMesh is developed only by the repository owner and their designated AI assistant while
+# contributions are closed. External pull requests (and issues, if re-enabled) are closed
+# automatically with a pointer to AI-POLICY.md. This workflow runs in the base-repository context
+# and never checks out or executes pull-request code.
+
+on:
+  pull_request_target:
+    types: [opened, reopened]
+  issues:
+    types: [opened, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+jobs:
+  close-external-pr:
+    if: github.event_name == 'pull_request_target' && github.actor != 'martintondel02'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const pr = context.payload.pull_request;
+            if (!pr) return;
+            const body = [
+              "Thanks for your interest in OpenMesh!",
+              "",
+              "**Contributions are closed for now.** This repository is currently developed only by",
+              "the owner and their designated AI assistant. Pull requests from anyone else are",
+              "closed automatically while this is the case.",
+              "",
+              "When contributions open, the strict AI contribution policy applies:",
+              "https://github.com/martintondel02/openmesh/blob/main/AI-POLICY.md",
+            ].join("\n");
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: pr.number,
+              body,
+            });
+            await github.rest.pulls.update({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: pr.number,
+              state: "closed",
+            });
+
+  close-external-issue:
+    if: github.event_name == 'issues' && github.actor != 'martintondel02'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const issue = context.payload.issue;
+            if (!issue) return;
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issue.number,
+              body: "Contributions and issue reports are closed for now; this issue is being closed automatically. See https://github.com/martintondel02/openmesh/blob/main/AI-POLICY.md. For security reports, follow SECURITY.md.",
+            });
+            await github.rest.issues.update({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issue.number,
+              state: "closed",
+            });

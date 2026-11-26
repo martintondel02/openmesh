@@ -262,7 +262,7 @@ destructive tools that require `"confirm": true` in their arguments.
 | URI | Content | MIME |
 | --- | --- | --- |
 | `openmesh://help/index` | Help topic index (JSON) | `text/markdown` |
-| `openmesh://help/{slug}` | One help topic (all 16 topics are listed, e.g. `openmesh://help/getting-started`) | `text/markdown` |
+| `openmesh://help/{slug}` | One help topic (all 17 topics are listed, e.g. `openmesh://help/getting-started`) | `text/markdown` |
 | `openmesh://status` | Current bridge status JSON | `application/json` |
 | `openmesh://nodes` | Known nodes JSON | `application/json` |
 | `openmesh://config` | Configuration JSON with secrets redacted | `application/json` |

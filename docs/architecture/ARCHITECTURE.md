@@ -23,7 +23,7 @@ how the system is put together, why it is built this way, and what is deliberate
    native Android app.
 6. **Hackable and testable.** Deterministic core, golden vectors, a mesh simulator that runs
    thousands of nodes in one process.
-7. **100 % AI-built, human-directed.** Every line is reviewable, documented and reproducible.
+7. **AI-assisted, human-directed, human-QA'd.** AI tools draft code and docs; humans own the contracts, review every change, run the test/device QA gates and the releases. Every line is reviewable, documented and reproducible.
 
 ### Non-goals (v0.1)
 

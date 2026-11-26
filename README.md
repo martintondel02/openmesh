@@ -178,7 +178,7 @@ and the same secure defaults, running natively on Android:
 - **Beginner / Advanced modes.** Beginner shows only the choices that matter, explained in plain
   language with a `?` on every control. Advanced reveals everything — airtime math, TTLs, raw
   identities, allowlists, token rotation — with the exact numbers and no hidden settings.
-- **One help corpus, everywhere.** The same 16 help topics + glossary power the in-app **Help
+- **One help corpus, everywhere.** The same 17 help topics + glossary power the in-app **Help
   Center** (search, beginner/advanced filter, deep links from every tooltip), the bridge
   `GET /api/help` API, and the AI agent's `openmesh_help` tool. Docs, UI and agents cannot disagree.
 - **A phone that works offline.** The Android app runs the Rust engine on-device over BLE/USB,
@@ -371,13 +371,25 @@ v1 has no forward secrecy and no traffic-analysis resistance. Do not use it as y
 lifeline. Threat model: [ARCHITECTURE.md §Security](docs/architecture/ARCHITECTURE.md#6-security-model).
 Reporting vulnerabilities: [SECURITY.md](SECURITY.md).
 
-## Built by AI
+## How this project is built
 
-This entire repository — protocol design, Rust core, C++ firmware, clients, docs — was built by
-AI coding agents under human direction using DeepSeek Harness with DeepSeek and Kimi models, with
-contracts, golden vectors and CI as the guardrails. The reproducible process and its honest
-limitations are documented in
-[docs/research/ai-development-workflow.md](docs/research/ai-development-workflow.md).
+OpenMesh is **AI-assisted and human-directed**. AI tools help draft protocol code, firmware,
+clients, tests and documentation; humans define the contracts, review every change, run the test
+and QA gates (including real-device Android testing and firmware host-vector conformance), and own
+the releases. AI output is treated as untrusted until reviewed and tested — it is not a substitute
+for human judgement, and no part of this project is claimed to be "fully AI-generated". The
+process and its honest limits are documented in
+[docs/research/ai-development-workflow.md](docs/research/ai-development-workflow.md), and the
+rules for AI involvement are in [AI-POLICY.md](AI-POLICY.md).
+
+## Contributing
+
+**Contributions are closed for now.** OpenMesh is developed only by the repository owner and
+their designated AI assistant; pull requests from anyone else are closed automatically and
+issues/discussions are disabled until contributions open. When they open, the strict
+[AI contribution policy](AI-POLICY.md) and [CONTRIBUTING.md](CONTRIBUTING.md) apply: human authors
+are accountable, AI involvement must be disclosed, and every change must pass the full review and
+test gates.
 
 ## Acknowledgements
 

@@ -74,7 +74,7 @@ uploads use `Authorization: Bearer <token>`.
 ### Help corpus in the web build
 
 `pnpm dev` and `pnpm build` run `scripts/copy-help.mjs` first, which copies `../../content/help`
-(16 topics + index) into the gitignored `apps/web/public/help/`. Demo/offline mode fetches that
+(17 topics + index) into the gitignored `apps/web/public/help/`. Demo/offline mode fetches that
 bundle; a connected bridge serves the same content from `GET /api/help` (with a bundled fallback).
 Never edit `public/help/` by hand — edit `content/help/` and let the build copy.
 
