@@ -137,7 +137,7 @@ jobs:
         run: command -v cargo-ndk >/dev/null || cargo install cargo-ndk --locked
       - name: Build Rust FFI + Kotlin bindings
         run: ./scripts/build-ffi.sh
-      - uses: gradle/actions/setup-gradle@v4
+      - uses: gradle/actions/setup-gradle@v6
       - run: echo "sdk.dir=$ANDROID_HOME" > local.properties
       - name: Build APKs
         run: |
