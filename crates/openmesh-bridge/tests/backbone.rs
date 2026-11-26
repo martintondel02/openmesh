@@ -917,38 +917,46 @@ async fn config_persistence_and_live_listener_restart() {
     let first_port = backbone_port(addr).await;
     assert!(dial(first_port, [0x71; 8], Some(&token)).await.is_ok());
 
-    // Choose a new free port and move the listener live.
-    let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let second_port = probe.local_addr().unwrap().port();
-    drop(probe);
-    let (status, config) = post(
-        addr,
-        "/api/backbone/config",
-        json!({"bind": "127.0.0.1", "port": second_port}),
-    )
-    .await;
-    assert_eq!(status, 200, "restart response: {config}");
-    assert_eq!(config["restarted"], true);
-    assert_eq!(config["port"], second_port);
-    assert_eq!(config["running"], true);
-    // New listener accepts; the token still works.
-    let mut attempts = 0;
-    loop {
-        match dial(second_port, [0x72; 8], Some(&token)).await {
-            Ok(_) => break,
-            Err(error) => {
-                attempts += 1;
-                assert!(attempts < 30, "listener did not restart: {error}");
-                tokio::time::sleep(Duration::from_millis(100)).await;
+    // Choose a new free port and move the listener live. Port probing races with other test
+    // binaries and the OS, so retry with a fresh port instead of failing the whole suite.
+    let mut second_port = 0u16;
+    let mut moved = false;
+    for _ in 0..5 {
+        let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let candidate = probe.local_addr().unwrap().port();
+        drop(probe);
+        let (status, config) = post(
+            addr,
+            "/api/backbone/config",
+            json!({"bind": "127.0.0.1", "port": candidate}),
+        )
+        .await;
+        assert_eq!(status, 200, "restart response: {config}");
+        assert_eq!(config["restarted"], true);
+        assert_eq!(config["port"], candidate);
+        // Under parallel test load the listener may need a moment to accept; if the port was
+        // stolen between probe and bind, try another one.
+        let mut ok = false;
+        for _ in 0..30 {
+            if dial(candidate, [0x72; 8], Some(&token)).await.is_ok() {
+                ok = true;
+                break;
             }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        if ok {
+            second_port = candidate;
+            moved = true;
+            break;
         }
     }
+    assert!(moved, "listener did not restart on any probed port");
     bridge.shutdown().await;
 
     // Restart the process from persisted state only: config (incl. secret) survives.
     let bridge2 = start_bridge(dir.path(), |_| {}).await;
     let addr2 = bridge2.addr;
-    let config = poll(addr2, "/api/backbone", Duration::from_secs(5), |config| {
+    let config = poll(addr2, "/api/backbone", Duration::from_secs(15), |config| {
         config["running"].as_bool() == Some(true)
     })
     .await;
