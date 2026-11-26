@@ -43,7 +43,7 @@ jobs:
           distribution: temurin
           java-version: "21"
 
-      - uses: android-actions/setup-android@v3
+      - uses: android-actions/setup-android@v4
         with:
           # The action's default `tools` package no longer exists in current SDK repos.
           packages: platform-tools
