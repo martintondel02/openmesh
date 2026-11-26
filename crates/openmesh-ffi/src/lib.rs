@@ -34,6 +34,7 @@ use openmesh_core::{
     LinkInfo, MessageKind, NodeClass, NodeId, NodeInfo, Position, Processed, PublicIdentity,
     RelayConfig, ResourceKind, Role, SendMode, StateSnapshot, Target,
 };
+use openmesh_voice::{VoiceError, VoiceTier};
 
 /// Accepted identity seed length (32 bytes).
 pub const SEED_LEN: usize = 32;
@@ -1658,6 +1659,62 @@ impl StateJson {
     }
 }
 
+// ---------------------------------------------------------------------------------------------
+// Voice (Codec2 tiny/medium) — additive free functions (media-tiers.md §4)
+// ---------------------------------------------------------------------------------------------
+
+/// Shared media tier definitions (`content/presets/media.json`, single source for web/Android).
+const MEDIA_TIERS_JSON: &str = include_str!("../../../content/presets/media.json");
+
+fn parse_voice_tier(tier: &str) -> Result<VoiceTier, FfiError> {
+    match tier.trim().to_ascii_lowercase().as_str() {
+        "tiny" => Ok(VoiceTier::Tiny),
+        "medium" => Ok(VoiceTier::Medium),
+        "high" => Ok(VoiceTier::High),
+        other => Err(FfiError::invalid(format!(
+            "unknown voice tier '{other}' (expected tiny, medium or high)"
+        ))),
+    }
+}
+
+fn map_voice_error(error: VoiceError) -> FfiError {
+    FfiError::invalid(error.to_string())
+}
+
+/// Encode 8 kHz mono s16le PCM into raw Codec2 frames for `tiny` or `medium`.
+///
+/// `high` is rejected (clients use the platform Opus/AAC recorder). Empty/short input and a
+/// trailing partial sample/frame are handled by the codec crate (whole-frame truncation).
+#[uniffi::export]
+pub fn openmesh_voice_encode(tier: String, pcm_s16le: Vec<u8>) -> Result<Vec<u8>, FfiError> {
+    let tier = parse_voice_tier(&tier)?;
+    openmesh_voice::encode(tier, &pcm_s16le).map_err(map_voice_error)
+}
+
+/// Decode a raw Codec2 frame stream back to 8 kHz mono s16le PCM (`tiny`/`medium`).
+///
+/// A trailing partial payload frame is ignored; `high` is rejected.
+#[uniffi::export]
+pub fn openmesh_voice_decode(tier: String, payload: Vec<u8>) -> Result<Vec<u8>, FfiError> {
+    let tier = parse_voice_tier(&tier)?;
+    openmesh_voice::decode(tier, &payload).map_err(map_voice_error)
+}
+
+/// The `voice` block of `content/presets/media.json` as JSON (tiny/medium/high formats).
+#[uniffi::export]
+pub fn openmesh_voice_tiers_json() -> String {
+    static VOICE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    VOICE
+        .get_or_init(|| {
+            serde_json::from_str::<serde_json::Value>(MEDIA_TIERS_JSON)
+                .ok()
+                .and_then(|media| media.get("voice").cloned())
+                .map(|voice| voice.to_string())
+                .unwrap_or_else(|| "{}".to_string())
+        })
+        .clone()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2088,5 +2145,67 @@ mod tests {
         let announced = a.announce(100).expect("announce");
         assert!(announced.msg_id.is_none());
         assert!(!announced.outbound.is_empty());
+    }
+    #[test]
+    fn voice_tiers_encode_decode_and_round_trip() {
+        fn sine(duration_ms: u64) -> Vec<u8> {
+            let samples = (8000 * duration_ms / 1000) as usize;
+            let mut pcm = Vec::with_capacity(samples * 2);
+            for index in 0..samples {
+                let t = index as f64 / 8000.0;
+                let value = (2.0 * std::f64::consts::PI * 440.0 * t).sin() * 12_000.0;
+                pcm.extend_from_slice(&(value as i16).to_le_bytes());
+            }
+            pcm
+        }
+        for (tier, expected_bytes) in [("tiny", 175usize), ("medium", 400)] {
+            let pcm = sine(1_000);
+            let encoded = openmesh_voice_encode(tier.to_string(), pcm.clone()).expect("encode");
+            assert_eq!(encoded.len(), expected_bytes, "{tier} 1 s payload");
+            let decoded = openmesh_voice_decode(tier.to_string(), encoded).expect("decode voice");
+            assert_eq!(decoded.len(), pcm.len());
+            assert!(
+                decoded.iter().any(|byte| *byte != 0),
+                "{tier} decode silent"
+            );
+        }
+    }
+
+    #[test]
+    fn voice_tiers_reject_high_invalid_and_empty() {
+        let pcm = vec![0u8; 16_000];
+        let high = openmesh_voice_encode("high".to_string(), pcm.clone()).unwrap_err();
+        assert!(matches!(high, FfiError::InvalidArgument { .. }));
+        let invalid = openmesh_voice_encode("wizard".to_string(), pcm.clone()).unwrap_err();
+        let FfiError::InvalidArgument { msg } = invalid else {
+            panic!("expected InvalidArgument");
+        };
+        assert!(msg.contains("unknown voice tier"));
+        assert!(matches!(
+            openmesh_voice_decode("high".to_string(), vec![0u8; 7]),
+            Err(FfiError::InvalidArgument { .. })
+        ));
+        assert!(matches!(
+            openmesh_voice_encode("tiny".to_string(), Vec::new()),
+            Err(FfiError::InvalidArgument { .. })
+        ));
+        assert!(matches!(
+            openmesh_voice_decode("tiny".to_string(), Vec::new()),
+            Err(FfiError::InvalidArgument { .. })
+        ));
+    }
+
+    #[test]
+    fn voice_tiers_json_contains_all_formats() {
+        let json: serde_json::Value =
+            serde_json::from_str(&openmesh_voice_tiers_json()).expect("tiers JSON");
+        assert_eq!(json["tiny"]["mime"], "audio/c2-1300");
+        assert_eq!(json["tiny"]["mode"], "1300");
+        assert_eq!(json["tiny"]["frame_ms"], 40);
+        assert_eq!(json["medium"]["mime"], "audio/c2-3200");
+        assert_eq!(json["medium"]["bits_per_second"], 3200);
+        assert_eq!(json["high"]["mime"], "audio/ogg; codecs=opus");
+        assert_eq!(json["high"]["codec"], "opus");
+        assert_eq!(json["tiny"]["max_duration_s"], 30);
     }
 }

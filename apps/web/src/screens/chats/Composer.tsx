@@ -4,10 +4,12 @@ import { ArrowUp, ImagePlus, Mic, Paperclip, Reply, TriangleAlert, X } from 'luc
 import { useAppStore } from '../../store/app';
 import type { ActiveThread } from '../../store/app';
 import { estimateText, getProfile } from '../../lib/airtime';
-import { formatBytes, formatDuration, formatSeconds, graphemeLength, messagePreview, cn } from '../../lib/utils';
+import { formatBytes, formatSeconds, graphemeLength, messagePreview, cn } from '../../lib/utils';
 import { IconButton, Kbd } from '../../components/ui/primitives';
 import { SignalBars } from '../../components/ui/signals';
 import { ImageComposerModal } from './ImageComposer';
+import { createDemoImageFile } from '../../lib/attachments';
+import { voiceAttachmentLabel } from '../../lib/media-tiers';
 import { VoiceRecorder, type RecordedVoice } from './VoiceRecorder';
 
 /**
@@ -16,6 +18,7 @@ import { VoiceRecorder, type RecordedVoice } from './VoiceRecorder';
  */
 export function Composer({ thread }: { thread: ActiveThread }) {
   const config = useAppStore((state) => state.config);
+  const appMode = useAppStore((state) => state.mode);
   const messages = useAppStore((state) => state.messages);
   const groupMessages = useAppStore((state) => state.groupMessages);
   const replyTo = useAppStore((state) => state.replyTo);
@@ -56,6 +59,33 @@ export function Composer({ thread }: { thread: ActiveThread }) {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [thread.id, thread.kind, draftKey]);
+
+  // Demo/screenshot helpers: ?media=image opens a synthetic tier preview, ?media=voice the recorder.
+  const demoMediaHandled = useRef(false);
+  useEffect(() => {
+    if (demoMediaHandled.current) return;
+    if (appMode !== 'demo') return;
+    let requested: string | null = null;
+    try {
+      requested = new URLSearchParams(window.location.search).get('media');
+    } catch {
+      requested = null;
+    }
+    if (!requested) return;
+    if (requested === 'voice') {
+      demoMediaHandled.current = true;
+      setRecorderOpen(true);
+    } else if (requested === 'image' || requested === 'tiers' || requested === 'media-tiers') {
+      demoMediaHandled.current = true;
+      void createDemoImageFile()
+        .then((file) => {
+          setImageFile(file);
+          setImageOpen(true);
+        })
+        .catch(() => undefined);
+    }
+    // Demo hydration changes mode after the first render.
+  }, [appMode]);
 
   const replyTarget = useMemo(() => {
     if (!replyTo) return null;
@@ -123,7 +153,7 @@ export function Composer({ thread }: { thread: ActiveThread }) {
         {
           blob: voice.blob,
           mime: voice.mime,
-          filename: `voice-${new Date().toISOString().slice(11, 19).replace(/:/g, '')}.ogg`,
+          filename: `voice-${voice.tier}-${new Date().toISOString().slice(11, 19).replace(/:/g, '')}.${voice.codec === 'codec2' ? 'c2' : 'ogg'}`,
           durationMs: voice.durationMs,
           waveform: voice.waveform,
           localUrl: voice.objectUrl,
@@ -133,7 +163,7 @@ export function Composer({ thread }: { thread: ActiveThread }) {
       pushToast({
         kind: 'success',
         title: 'Voice note queued',
-        message: `${formatDuration(voice.durationMs)} of audio · ~${formatBytes(voice.blob.size)} on the wire`,
+        message: `${voiceAttachmentLabel(voice.mime, voice.durationMs, voice.blob.size)} · ~${formatBytes(voice.blob.size)} on the wire`,
       });
       setRecorderOpen(false);
     } catch (cause) {
@@ -196,7 +226,7 @@ export function Composer({ thread }: { thread: ActiveThread }) {
           <div className="flex items-center gap-1 pb-1">
             <IconButton
               icon={Paperclip}
-              label="Attach an image"
+              label="Attach an image (choose Tiny/Medium/High/Original)"
               onClick={() => fileInputRef.current?.click()}
             />
             <IconButton

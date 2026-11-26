@@ -1,0 +1,12 @@
+[package]
+name = "openmesh-voice"
+description = "Tiny/medium voice codecs (pure-Rust Codec2) shared by the bridge, WASM web client and Android FFI"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+codec2 = "0.3.1"

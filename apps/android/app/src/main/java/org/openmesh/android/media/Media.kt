@@ -3,6 +3,8 @@ package org.openmesh.android.media
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.ImageDecoder
+import android.os.Build
 import android.media.AudioAttributes
 import android.media.MediaPlayer
 import android.media.MediaRecorder
@@ -11,6 +13,7 @@ import java.io.ByteArrayOutputStream
 import java.io.File
 import kotlin.math.max
 import kotlin.math.min
+import org.openmesh.android.util.MeshLog
 
 /** Attachment caps and voice limits per LoRa profile (docs/architecture/PROTOCOL.md §9.4). */
 object MediaMath {
@@ -87,6 +90,151 @@ object ImageCompressor {
         return null
     }
 
+    /** Result of tier compression; failures carry a user-facing reason and are logged. */
+    sealed interface Result {
+        data class Success(val bytes: ByteArray, val mime: String, val width: Int, val height: Int) : Result
+        data class Failure(val reason: String) : Result
+    }
+
+    /**
+     * Compress to a tier target (WebP, JPEG fallback), downscaling/quality-stepping until the
+     * profile cap is met. Robust against content URIs that BitmapFactory cannot handle: uses
+     * ImageDecoder (API 28+) with a software allocator first, then BitmapFactory sampling.
+     */
+    fun compressTier(context: Context, uri: Uri, maxDim: Int, quality: Double, capBytes: Int): Result {
+        MeshLog.i("image compress: begin uri=$uri maxDim=$maxDim quality=$quality cap=$capBytes")
+        var edge = maxDim
+        var attempt = 0
+        var lastSize = -1
+        var lastReason = "no decode succeeded"
+        while (attempt < 6) {
+            attempt += 1
+            val bitmap = decodeScaled(context, uri, edge)
+            if (bitmap == null) {
+                lastReason = "could not decode the selected image (attempt $attempt, edge=$edge)"
+                MeshLog.w("image compress: $lastReason")
+                edge = max(160, (edge * 3) / 4)
+                continue
+            }
+            val (w, h) = MediaMath.scale(bitmap.width, bitmap.height, edge)
+            val scaled = if (w == bitmap.width && h == bitmap.height) bitmap else
+                Bitmap.createScaledBitmap(bitmap, w, h, true).also { if (it !== bitmap) bitmap.recycle() }
+            val encoded = encode(scaled, quality)
+            if (encoded == null) {
+                lastReason = "could not encode the image (attempt $attempt, ${scaled.width}x${scaled.height})"
+                MeshLog.w("image compress: $lastReason")
+                scaled.recycle()
+                edge = max(160, (edge * 3) / 4)
+                continue
+            }
+            lastSize = encoded.first.size
+            MeshLog.i(
+                "image compress: attempt=$attempt edge=$edge size=${scaled.width}x${scaled.height} " +
+                    "mime=${encoded.second} bytes=$lastSize cap=$capBytes",
+            )
+            if (encoded.first.isNotEmpty() && encoded.first.size <= capBytes) {
+                val result = Result.Success(encoded.first, encoded.second, scaled.width, scaled.height)
+                scaled.recycle()
+                MeshLog.i("image compress: success mime=${result.mime} bytes=${result.bytes.size} ${result.width}x${result.height}")
+                return result
+            }
+            scaled.recycle()
+            // Reduce dimensions first, then quality on later attempts.
+            edge = max(160, (edge * 3) / 4)
+        }
+        val reason = if (lastSize > 0) {
+            "Image is ${(lastSize / 1024.0).toString().take(4)} KiB after compression, above the ${capBytes / 1024} KiB profile cap; try a smaller tier."
+        } else {
+            lastReason
+        }
+        MeshLog.w("image compress: failed: $reason")
+        return Result.Failure(reason)
+    }
+
+    private fun decodeScaled(context: Context, uri: Uri, edge: Int): Bitmap? {
+        if (Build.VERSION.SDK_INT >= 28) {
+            runCatching {
+                val source = ImageDecoder.createSource(context.contentResolver, uri)
+                return ImageDecoder.decodeBitmap(source) { decoder, info, _ ->
+                    decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
+                    val w = info.size.width
+                    val h = info.size.height
+                    val (tw, th) = MediaMath.scale(w, h, edge)
+                    if (tw != w || th != h) decoder.setTargetSize(tw, th)
+                }
+            }.onFailure { MeshLog.w("image compress: ImageDecoder failed (${it.message}); falling back to BitmapFactory") }
+        }
+        // BitmapFactory fallback (also API 26/27): bounds first, then sampled decode; retry full
+        // decode if the sampled one fails, and re-open the stream each time (content URIs are
+        // usually re-openable; log the failure clearly if not).
+        return runCatching {
+            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            val boundsOk = context.contentResolver.openInputStream(uri)?.use {
+                BitmapFactory.decodeStream(it, null, bounds) != null || bounds.outWidth > 0
+            } ?: false
+            if (!boundsOk || bounds.outWidth <= 0 || bounds.outHeight <= 0) {
+                MeshLog.w("image compress: bounds decode failed for $uri (boundsOk=$boundsOk ${bounds.outWidth}x${bounds.outHeight})")
+                return@runCatching null
+            }
+            val sample = sampleSize(bounds.outWidth, bounds.outHeight, edge)
+            val options = BitmapFactory.Options().apply {
+                inSampleSize = sample
+                inPreferredConfig = Bitmap.Config.ARGB_8888
+            }
+            val sampled = decodeStream(context, uri, options)
+            MeshLog.i("image compress: BitmapFactory decode sample=$sample bounds=${bounds.outWidth}x${bounds.outHeight} -> ${sampled?.width}x${sampled?.height}")
+            if (sampled != null) return@runCatching sampled
+            val fullOptions = BitmapFactory.Options()
+            decodeStream(context, uri, fullOptions)
+        }.getOrElse {
+            MeshLog.w("image compress: decode threw: ${it.message}")
+            null
+        }
+    }
+
+    private fun decodeStream(context: Context, uri: Uri, options: BitmapFactory.Options): Bitmap? =
+        runCatching {
+            context.contentResolver.openInputStream(uri)?.use { stream ->
+                BitmapFactory.decodeStream(stream, null, options)
+            }.also { if (it == null) MeshLog.w("image compress: decodeStream returned null for $uri") }
+        }.getOrElse {
+            MeshLog.w("image compress: open/decode failed for $uri: ${it.message}")
+            null
+        }
+
+    /** WebP (lossy where supported) with JPEG fallback; returns bytes + actual MIME or null. */
+    private fun encode(bitmap: Bitmap, quality: Double): Pair<ByteArray, String>? {
+        val q = (quality * 100).toInt().coerceIn(1, 100)
+        val webp = runCatching {
+            val out = ByteArrayOutputStream()
+            val format = if (Build.VERSION.SDK_INT >= 30) Bitmap.CompressFormat.WEBP_LOSSY else
+                @Suppress("DEPRECATION") Bitmap.CompressFormat.WEBP
+            val ok = bitmap.compress(format, q, out)
+            MeshLog.i("image compress: webp q=$q ok=$ok bytes=${out.size()}")
+            if (ok && out.size() > 0) out.toByteArray() to "image/webp" else null
+        }.getOrElse {
+            MeshLog.w("image compress: webp threw: ${it.message}")
+            null
+        }
+        if (webp != null) return webp
+        return runCatching {
+            val out = ByteArrayOutputStream()
+            val ok = bitmap.compress(Bitmap.CompressFormat.JPEG, q, out)
+            MeshLog.i("image compress: jpeg fallback q=$q ok=$ok bytes=${out.size()}")
+            if (ok && out.size() > 0) out.toByteArray() to "image/jpeg" else null
+        }.getOrElse {
+            MeshLog.w("image compress: jpeg threw: ${it.message}")
+            null
+        }
+    }
+
+    /** Original image bytes + resolver MIME; the caller enforces the profile cap and confirmation. */
+    fun readOriginal(context: Context, uri: Uri): Pair<ByteArray, String>? {
+        val bytes = context.contentResolver.openInputStream(uri)?.use { it.readBytes() } ?: return null
+        val mime = context.contentResolver.getType(uri) ?: "application/octet-stream"
+        return bytes to mime
+    }
+
     fun sampleSize(width: Int, height: Int, targetEdge: Int): Int {
         var sample = 1
         var w = width
@@ -109,9 +257,14 @@ class VoiceRecorder(private val context: Context) {
 
     val waveform: List<Int> get() = amplitudes.toList()
 
+    var lastMime: String = "audio/mp4"
+        private set
+
     fun start(profile: String): File {
+        val useOpus = android.os.Build.VERSION.SDK_INT >= 29
+        lastMime = if (useOpus) "audio/ogg; codecs=opus" else "audio/mp4"
         val target = File(context.filesDir, "voice").apply { mkdirs() }
-            .resolve("voice-${System.currentTimeMillis()}.m4a")
+            .resolve("voice-${System.currentTimeMillis()}.${if (useOpus) "ogg" else "m4a"}")
         val media = if (android.os.Build.VERSION.SDK_INT >= 31) {
             MediaRecorder(context)
         } else {
@@ -119,11 +272,19 @@ class VoiceRecorder(private val context: Context) {
             MediaRecorder()
         }
         media.setAudioSource(MediaRecorder.AudioSource.MIC)
-        media.setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
-        media.setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
-        media.setAudioSamplingRate(16_000)
-        media.setAudioChannels(1)
-        media.setAudioEncodingBitRate(12_000)
+        if (useOpus) {
+            media.setOutputFormat(MediaRecorder.OutputFormat.OGG)
+            media.setAudioEncoder(MediaRecorder.AudioEncoder.OPUS)
+            media.setAudioSamplingRate(48_000)
+            media.setAudioChannels(1)
+            media.setAudioEncodingBitRate(12_000)
+        } else {
+            media.setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
+            media.setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
+            media.setAudioSamplingRate(16_000)
+            media.setAudioChannels(1)
+            media.setAudioEncodingBitRate(12_000)
+        }
         media.setMaxDuration(MediaMath.maxVoiceSeconds(profile) * 1000)
         media.setOutputFile(target.absolutePath)
         media.prepare()

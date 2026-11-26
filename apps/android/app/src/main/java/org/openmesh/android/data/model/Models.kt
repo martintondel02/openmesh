@@ -156,4 +156,7 @@ data class AppSettings(
     val overridePowerDbm: Int? = null,
     val overrideFreqKhz: Long? = null,
     val overrideReason: String? = null,
+    // Media tiers (v0.6.0): defaults come from content/presets/media.json.
+    val defaultImageTier: String = "medium",
+    val defaultVoiceTier: String = "tiny",
 )

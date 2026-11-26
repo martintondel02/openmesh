@@ -6,10 +6,12 @@ members = [
     "crates/openmesh-cli",
     "crates/openmesh-sim",
     "crates/openmesh-ffi",
+    "crates/openmesh-voice",
+    "crates/openmesh-voice-wasm",
 ]
 
 [workspace.package]
-version = "0.5.1"
+version = "0.6.0"
 edition = "2024"
 rust-version = "1.85"
 license = "AGPL-3.0-or-later"
@@ -48,7 +50,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 thiserror = "2"
 anyhow = "1"
 # internal
-openmesh-core = { path = "crates/openmesh-core", version = "0.5.1" }
+openmesh-core = { path = "crates/openmesh-core", version = "0.6.0" }
+openmesh-voice = { path = "crates/openmesh-voice", version = "0.6.0" }
 
 [profile.release]
 lto = "thin"

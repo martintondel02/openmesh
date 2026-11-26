@@ -19,6 +19,7 @@ path = "src/bin/uniffi-bindgen.rs"
 
 [dependencies]
 openmesh-core = { workspace = true }
+openmesh-voice = { workspace = true }
 uniffi = { version = "0.28", features = ["cli"] }
 thiserror = { workspace = true }
 serde = { workspace = true }

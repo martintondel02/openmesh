@@ -91,6 +91,14 @@ jobs:
       - uses: actions/setup-node@v4
         with: { node-version: 22, cache: pnpm, cache-dependency-path: apps/web/pnpm-lock.yaml }
       - run: pnpm --dir apps/web install --frozen-lockfile
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: voice-wasm
+      - name: Build Codec2 WASM (tiny voice)
+        run: scripts/build-voice-wasm.sh
       - run: pnpm --dir apps/web build
       - run: tar -czf openmesh-web-${GITHUB_REF_NAME}.tar.gz -C apps/web dist
       - uses: actions/upload-artifact@v4

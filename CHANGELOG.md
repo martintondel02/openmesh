@@ -5,6 +5,41 @@ All notable changes to this project are documented here. The format follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Protocol changes are called out
 explicitly.
 
+## [0.6.0] - 2026-11-26
+
+### Added — media tiers and tiny voice (Codec2)
+
+**Air-time-first media tiers**
+- One shared tier table (`content/presets/media.json`) used by web, Android and tests:
+  images Tiny (320 px) / Medium (640 px) / High (1280 px) WebP / Original;
+  voice Tiny (Codec2 1.3 kbps, ≈1.4 KiB per 8 s), Medium (Codec2 3.2 kbps, ≈3.2 KiB per 8 s),
+  High (Opus 12 kbps, ≈12 KiB per 8 s; Android may use AAC/MP4 where OGG/Opus is unavailable).
+- Pre-send preview shows actual bytes, estimated airtime and % of the hourly duty budget, and
+  suggests the largest tier that fits the active profile; Original is confirmation-gated and
+  disabled by default on long-range profiles. Effective voice caps follow
+  `min(tier max, profile cap / bytes per second)`.
+
+**Codec2 tiny/medium voice, everywhere**
+- New `openmesh-voice` Rust crate (pure-Rust `codec2` crate, LGPL-2.1-only AND MIT) implementing
+  the 1300/3200 modes with fixed raw frame streams (`audio/c2-1300`: 7 B/40 ms;
+  `audio/c2-3200`: 8 B/20 ms; 8 kHz mono s16).
+- New `openmesh-voice-wasm` crate + `scripts/build-voice-wasm.sh`: the same code compiled to
+  `wasm32-unknown-unknown` for the web client (fetched at runtime, graceful fallback if absent).
+- UniFFI functions `openmeshVoiceEncode`/`openmeshVoiceDecode`/`openmeshVoiceTiersJson` for the
+  Android engine; Android records PCM with `AudioRecord`, encodes tiny/medium voice via FFI and
+  plays it with `AudioTrack`; High stays on the platform recorder.
+- Cross-client playback: web/Android/desktop all play Codec2 raw, Opus/OGG and AAC/MP4.
+
+**Docs**
+- PROTOCOL §9.4 rewritten: voice tier table, framing, MIME, effective caps and airtime examples;
+  media tier helpers and `content/presets/media.json`; new `docs/design/media-tiers.md`; help
+  topic "Images and voice notes" rewritten around tiers and costs; NOTICE updated for `codec2`.
+- No wire-format change; golden vectors byte-identical.
+
+### Changed
+- Version 0.6.0 (workspace/web/Tauri/Android `versionCode` 7/firmware `OM_FW_VERSION`).
+  CI/release builds the Codec2 WASM before the web bundle.
+
 ## [0.5.1] - 2026-11-26
 
 ### Security

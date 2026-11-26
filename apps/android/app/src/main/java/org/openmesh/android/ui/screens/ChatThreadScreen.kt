@@ -6,6 +6,7 @@ import android.provider.OpenableColumns
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -62,7 +63,6 @@ import org.openmesh.android.data.model.MessageKind
 import org.openmesh.android.data.repository.MediaKind
 import org.openmesh.android.data.repository.MeshRepository
 import org.openmesh.android.media.ImageCompressor
-import org.openmesh.android.ui.components.VoiceRecordDialog
 import org.openmesh.android.ui.components.AirtimeEstimateDialog
 import org.openmesh.android.ui.components.DeliveryIcon
 import org.openmesh.android.ui.components.formatDuration
@@ -89,7 +89,7 @@ fun ChatThreadScreen(
     val listState = rememberLazyListState()
 
     var draft by remember { mutableStateOf("") }
-    var pendingImage by remember { mutableStateOf<PendingImage?>(null) }
+    var pickedImage by remember { mutableStateOf<Uri?>(null) }
     var showVoiceDialog by remember { mutableStateOf(false) }
 
     LaunchedEffect(thread.size) {
@@ -101,12 +101,10 @@ fun ChatThreadScreen(
 
     var cameraUri by remember { mutableStateOf<Uri?>(null) }
     val imagePicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
-        if (uri != null) {
-            pendingImage = prepareImage(context, uri, repository.mediaCapBytes())
-        }
+        if (uri != null) pickedImage = uri
     }
     val cameraLauncher = rememberLauncherForActivityResult(ActivityResultContracts.TakePicture()) { success ->
-        if (success) cameraUri?.let { uri -> pendingImage = prepareImage(context, uri, repository.mediaCapBytes()) }
+        if (success) pickedImage = cameraUri
     }
 
     Column(Modifier.fillMaxSize().imePadding()) {
@@ -142,7 +140,7 @@ fun ChatThreadScreen(
             contentPadding = androidx.compose.foundation.layout.PaddingValues(12.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            items(thread, key = { it.id }) { message -> MessageBubble(message, isChannel) }
+            items(thread, key = { it.id }) { message -> MessageBubble(message, isChannel, repository) }
             if (thread.isEmpty()) {
                 item {
                     Text(
@@ -204,54 +202,29 @@ fun ChatThreadScreen(
         }
     }
 
-    pendingImage?.let { image ->
-        val estimate = repository.estimateMedia(image.bytes.size, MediaKind.IMAGE)
-        AirtimeEstimateDialog(
-            estimate = estimate,
-            onConfirm = {
-                repository.sendAttachmentBytes(peerId, image.name, image.mime, image.bytes, null, isChannel)
-                pendingImage = null
-            },
-            onDismiss = { pendingImage = null },
+    pickedImage?.let { uri ->
+        org.openmesh.android.ui.components.ImageTierSendDialog(
+            repository = repository,
+            peerId = peerId,
+            isChannel = isChannel,
+            uri = uri,
+            onDismiss = { pickedImage = null },
         )
     }
 
     if (showVoiceDialog) {
-        VoiceRecordDialog(
-            maxSeconds = repository.maxVoiceSeconds(),
-            onRecord = { recording ->
-                repository.sendAttachmentBytes(
-                    peerId,
-                    "voice-${recording.durationMs / 1000}s.m4a",
-                    "audio/mp4",
-                    recording.bytes,
-                    recording.durationMs.toLong(),
-                    isChannel,
-                )
-                showVoiceDialog = false
-            },
+        org.openmesh.android.ui.components.VoiceTierRecordDialog(
+            repository = repository,
+            peerId = peerId,
+            isChannel = isChannel,
             onDismiss = { showVoiceDialog = false },
         )
     }
 }
 
-private data class PendingImage(val name: String, val mime: String, val bytes: ByteArray)
-
-private fun prepareImage(context: Context, uri: Uri, capBytes: Int): PendingImage? {
-    var name = uri.lastPathSegment?.substringAfterLast('/') ?: "image.jpg"
-    context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)
-        ?.use { cursor ->
-            if (cursor.moveToFirst()) {
-                val nameIndex = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
-                if (nameIndex >= 0) cursor.getString(nameIndex)?.let { name = it }
-            }
-        }
-    val compressed = ImageCompressor.compress(context, uri, capBytes) ?: return null
-    return PendingImage(name.substringBeforeLast('.') + ".jpg", "image/jpeg", compressed)
-}
 
 @Composable
-private fun MessageBubble(message: Message, isChannel: Boolean) {
+private fun MessageBubble(message: Message, isChannel: Boolean, repository: MeshRepository) {
     val outgoing = message.outgoing
     val bubbleColor = if (outgoing) MeshPrimary.copy(alpha = 0.16f) else MeshSurfaceHigh
     Row(
@@ -273,7 +246,7 @@ private fun MessageBubble(message: Message, isChannel: Boolean) {
                 )
             }
             when (message.kind) {
-                MessageKind.ATTACHMENT -> AttachmentBubble(message)
+                MessageKind.ATTACHMENT -> AttachmentBubble(message, repository)
                 MessageKind.POSITION -> Column {
                     Text("Position", style = MaterialTheme.typography.titleMedium)
                     message.position?.let {
@@ -328,9 +301,34 @@ private fun MessageBubble(message: Message, isChannel: Boolean) {
 }
 
 @Composable
-private fun AttachmentBubble(message: Message) {
+private fun AttachmentBubble(message: Message, repository: MeshRepository) {
     val attachment = message.attachment ?: return
-    Row(verticalAlignment = Alignment.CenterVertically) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val player = remember { org.openmesh.android.media.AttachmentPlayer(context) }
+    var playing by remember { mutableStateOf(false) }
+    val isAudio = attachment.mime.startsWith("audio/")
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier
+            .fillMaxWidth()
+            .then(
+                if (isAudio) {
+                    Modifier.clickable {
+                        val file = repository.attachmentFile(attachment.id)
+                        if (file != null) {
+                            playing = !playing
+                            if (playing) {
+                                player.play(file, attachment.mime) { playing = false }
+                            } else {
+                                player.stop()
+                            }
+                        }
+                    }
+                } else {
+                    Modifier
+                },
+            ),
+    ) {
         Box(
             Modifier
                 .size(44.dp)
@@ -353,19 +351,19 @@ private fun AttachmentBubble(message: Message) {
                 overflow = TextOverflow.Ellipsis,
             )
             Text(
-                buildString {
-                    append("${(attachment.sizeBytes / 1024.0).toString().take(4)} KiB")
-                    attachment.durationMs?.let { append(" · ${formatDuration(it.toLong())}") }
-                    if (attachment.progress < 1f) append(" · ${(attachment.progress * 100).toInt()} %")
-                },
+                org.openmesh.android.media.MediaTierPolicy.attachmentLabel(
+                    attachment.mime,
+                    attachment.durationMs,
+                    attachment.sizeBytes,
+                ) + if (playing) " · playing…" else "",
                 style = MaterialTheme.typography.labelMedium,
-                color = MeshOnSurfaceVariant,
+                color = if (isAudio) MeshPrimary else MeshOnSurfaceVariant,
             )
         }
     }
     if (message.delivery == DeliveryState.FAILED) {
         Text(
-            "Transfer failed — retry will be available with the FFI core.",
+            "Transfer failed — long-press the message to retry.",
             style = MaterialTheme.typography.labelMedium,
             color = MeshOnSurfaceVariant,
         )

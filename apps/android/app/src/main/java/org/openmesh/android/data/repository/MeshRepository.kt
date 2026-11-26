@@ -61,6 +61,9 @@ import org.openmesh.android.data.transport.CompanionTransport
 import org.openmesh.android.data.transport.FramedCompanionClient
 import org.openmesh.android.data.transport.UsbSerialTransport
 import org.openmesh.android.media.MediaMath
+import org.openmesh.android.media.MediaTierLoader
+import org.openmesh.android.media.MediaTierPolicy
+import org.openmesh.android.media.MediaTierPresets
 import org.openmesh.android.util.LoraProfile
 import org.openmesh.android.util.MeshLog
 import org.openmesh.android.util.Region
@@ -135,6 +138,26 @@ class MeshRepository(
     val uiEvents: SharedFlow<UiEvent> = _uiEvents.asSharedFlow()
 
     val helpTopics: List<HelpTopicMeta> get() = help.topics
+
+    /** Media tier presets from the shared content/presets/media.json asset (cached). */
+    val mediaTiers: MediaTierPresets by lazy {
+        runCatching { MediaTierLoader.fromAssets(appContext) }
+            .getOrElse {
+                MeshLog.w("media tiers asset missing; falling back to repo file: ${it.message}")
+                MediaTierLoader.fromRepoFile()
+            }
+    }
+
+    fun defaultImageTier() = _settings.value.defaultImageTier
+    fun defaultVoiceTier() = _settings.value.defaultVoiceTier
+    fun suggestImageTier(capBytes: Int = mediaCapBytes()): String = MediaTierPolicy.suggestImageTier(mediaTiers, capBytes)
+    fun originalImageAllowed(): Boolean = MediaTierPolicy.originalAllowed(_settings.value.profile)
+    fun voiceTier(id: String = defaultVoiceTier()): org.openmesh.android.media.VoiceTier =
+        MediaTierPolicy.voiceTier(mediaTiers, id)
+    fun effectiveVoiceMaxSeconds(voiceTierId: String): Int =
+        MediaTierPolicy.effectiveVoiceMaxSeconds(voiceTier(voiceTierId), mediaCapBytes())
+    fun setDefaultImageTier(id: String) = updateSettings { it.copy(defaultImageTier = id) }
+    fun setDefaultVoiceTier(id: String) = updateSettings { it.copy(defaultVoiceTier = id) }
 
     fun helpTopic(slug: String): org.openmesh.android.data.help.HelpTopic? = help.topic(slug)
 
@@ -935,6 +958,8 @@ class MeshRepository(
             if (updated.positionSharing != previous.positionSharing) prefs.setPositionSharing(if (updated.positionSharing) "channel" else "private")
             if (updated.autoConnect != previous.autoConnect) prefs.setAutoConnect(updated.autoConnect)
             if (updated.notificationsEnabled != previous.notificationsEnabled) prefs.setNotifications(updated.notificationsEnabled)
+            if (updated.defaultImageTier != previous.defaultImageTier) prefs.setDefaultImageTier(updated.defaultImageTier)
+            if (updated.defaultVoiceTier != previous.defaultVoiceTier) prefs.setDefaultVoiceTier(updated.defaultVoiceTier)
         }
         if (started) {
             val patch = """{"name":${jsonString(updated.nodeName)},"profile":"${updated.profile}","region":"${updated.region}","storeForward":${updated.storeForward},"announceIntervalS":${updated.announceIntervalSec.toLong()}}"""
@@ -1000,6 +1025,8 @@ class MeshRepository(
         overridePowerDbm = overridePowerDbm,
         overrideFreqKhz = overrideFreqKhz,
         overrideReason = overrideReason,
+        defaultImageTier = defaultImageTier,
+        defaultVoiceTier = defaultVoiceTier,
     )
 
     private fun jsonString(value: String): String = buildString {

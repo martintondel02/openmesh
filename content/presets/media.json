@@ -1,0 +1,61 @@
+{
+  "version": 1,
+  "airtime_note": "Tier sizes are targets; clients show the measured bytes and estimated airtime before sending.",
+  "images": {
+    "tiny": {
+      "max_dim": 320,
+      "quality": 0.35,
+      "mime": "image/webp"
+    },
+    "medium": {
+      "max_dim": 640,
+      "quality": 0.55,
+      "mime": "image/webp"
+    },
+    "high": {
+      "max_dim": 1280,
+      "quality": 0.7,
+      "mime": "image/webp"
+    },
+    "original": {
+      "max_dim": null,
+      "quality": null,
+      "mime": "original"
+    }
+  },
+  "voice": {
+    "tiny": {
+      "codec": "codec2",
+      "mode": "1300",
+      "mime": "audio/c2-1300",
+      "sample_rate": 8000,
+      "channels": 1,
+      "frame_ms": 40,
+      "bits_per_second": 1300,
+      "max_duration_s": 30
+    },
+    "medium": {
+      "codec": "codec2",
+      "mode": "3200",
+      "mime": "audio/c2-3200",
+      "sample_rate": 8000,
+      "channels": 1,
+      "frame_ms": 20,
+      "bits_per_second": 3200,
+      "max_duration_s": 20
+    },
+    "high": {
+      "codec": "opus",
+      "mode": "opus",
+      "mime": "audio/ogg; codecs=opus",
+      "sample_rate": 48000,
+      "channels": 1,
+      "bits_per_second": 12000,
+      "max_duration_s": 15
+    }
+  },
+  "defaults": {
+    "image": "medium",
+    "voice": "tiny"
+  }
+}

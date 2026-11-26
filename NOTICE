@@ -25,6 +25,21 @@ were studied as prior art and for hardware pin-map facts, and are credited here.
 - MeshCore (https://meshcore.io/) — protocol design inspiration (repeater/room-server roles).
 - Semtech AN1200.13/AN1200.22 — LoRa airtime formulas.
 
+## Bundled Rust dependencies with copyleft terms
+
+### `codec2` crate 0.3.1 — pure-Rust Codec2 implementation
+
+- Licence: **LGPL-2.1-only AND MIT** (see the crate's `Cargo.toml`; Codec2 itself is by David Rowe
+  and contributors, LGPL-2.1).
+- Upstream: <https://github.com/scriptjunkie/codec2> (pure-Rust port used through
+  <https://crates.io/crates/codec2>).
+- Linked statically into `openmesh-voice`, `openmesh-voice-wasm` and `openmesh-ffi` (host, WASM and
+  Android builds). It is used unmodified.
+- The OpenMesh project as a whole is AGPL-3.0-or-later and publishes its complete corresponding
+  source; that source distribution covers the LGPL source/relinking obligations for this
+  dependency. If you redistribute binaries, keep the LGPL notice and the offer/means to relink
+  against a modified Codec2; no Codec2 source files are modified here.
+
 Rust crates are licensed under their respective terms (Apache-2.0/MIT/BSD), listed in each
 crate's Cargo metadata. Firmware libraries (RadioLib, Adafruit nRF52 core, arduino-esp32) are
 licensed by their authors; see `firmware/THIRD_PARTY.md` when added.

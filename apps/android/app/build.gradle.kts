@@ -21,8 +21,8 @@ android {
         applicationId = "org.openmesh.android"
         minSdk = 26
         targetSdk = 35
-        versionCode = 6
-        versionName = "0.5.1"
+        versionCode = 7
+        versionName = "0.6.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables { useSupportLibrary = true }
         ndk {
@@ -111,7 +111,7 @@ val copyHelpAssets = tasks.register<Copy>("copyHelpAssets") {
     into(layout.projectDirectory.dir("src/main/assets/help"))
 }
 val copyPresetAssets = tasks.register<Copy>("copyPresetAssets") {
-    from(File(repoRoot, "content/presets")) { include("setup.json") }
+    from(File(repoRoot, "content/presets")) { include("*.json") }
     into(layout.projectDirectory.dir("src/main/assets/presets"))
 }
 tasks.named("preBuild").configure { dependsOn(copyHelpAssets, copyPresetAssets) }

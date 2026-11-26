@@ -5,7 +5,7 @@
 > a local bridge daemon with WebSocket/REST/MCP APIs, a React web/PWA client, LoRa firmware, a
 > self-hosted backbone mode for linking distant meshes, and an AI-native agent surface.
 
-OpenMesh v0.5.1. AI-assisted, human-directed and human-QA'd; see AI-POLICY.md. Normative contracts live in `docs/architecture/`; user-facing help topics live in
+OpenMesh v0.6.0. AI-assisted, human-directed and human-QA'd; see AI-POLICY.md. Normative contracts live in `docs/architecture/`; user-facing help topics live in
 `content/help/` and are served by the bridge and web UI. Repository: https://github.com/martintondel02/openmesh
 
 ## Start here

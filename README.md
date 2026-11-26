@@ -84,13 +84,13 @@ envelopes) and reject what makes life hard on a 240-byte MTU: global routing sta
 per message, and client stacks nobody wants to use. Details and trade-offs:
 [ADR-0001](docs/adr/0001-own-protocol-vs-reticulum.md), [research notes](docs/research/).
 
-## Feature status (v0.5.1)
+## Feature status (v0.6.0)
 
 | Area | Status |
 | --- | --- |
 | OMP/1 wire protocol, crypto, announces, flooding, dedup | ✅ implemented + golden vectors |
 | Direct & group encrypted messaging | ✅ |
-| Images (compressed, chunked) + voice notes | ✅ protocol + client pipeline |
+| Images (compressed, chunked) + voice notes | ✅ tiers: Tiny/Medium/High/Original images; Codec2 tiny/medium + Opus high voice |
 | Position sharing + map | ✅ |
 | Repeater store-and-forward | ✅ protocol + firmware |
 | Bridge daemon (WS/REST, redb persistence, attachments) | ✅ |
@@ -320,6 +320,36 @@ Guides: [legal limits and emergency override](docs/guides/regulatory-and-emergen
 [help topic](content/help/regulatory-and-emergency.md) ·
 [ADR 0011](docs/adr/0011-regulatory-override.md) ·
 [implementation contract](docs/design/regulatory-and-regions.md)
+
+## Media tiers and tiny voice (v0.6)
+
+Media is now **airtime-first**, with one shared tier table (`content/presets/media.json`) across
+web, Android and tests. Every send shows the *actual* size, estimated airtime and % of the hourly
+duty budget before it goes on air, and the app suggests the largest tier that fits the current
+radio profile.
+
+| Tier | Images | Voice | 8 s voice |
+| --- | --- | --- | --- |
+| **Tiny** | 320 px WebP | **Codec2 1.3 kbps** | ≈ **1.4 KiB** (≈ 7 s airtime at `MEDIUM_FAST`) |
+| **Medium** | 640 px WebP | **Codec2 3.2 kbps** | ≈ 3.2 KiB |
+| **High** | 1280 px WebP | **Opus 12 kbps** (Android may use AAC/MP4) | ≈ 12 KiB |
+| **Original** | untouched | — | backbone/USB or explicit confirmation only |
+
+Codec2 is pure Rust (`codec2` crate, LGPL-2.1/MIT): the same code runs in the browser through a
+small WASM module, in the Android engine via UniFFI, and in the Rust CLI/tests — no C toolchain or
+NDK codec build. Tiny voice is what makes voice practical on slow profiles: an 8-second note
+costs less than one 640 px image, and even fits `LONG_SLOW` within a few seconds of airtime.
+No protocol change: resources already carry MIME + bytes; vectors are untouched. Details:
+[media tiers contract](docs/design/media-tiers.md) ·
+[help: images and voice notes](content/help/media.md).
+
+| Image tiers with measured cost | Voice tiers: Codec2 tiny/medium + Opus high |
+| --- | --- |
+| ![Image tiers](docs/assets/screenshots/media-tiers.jpg) | ![Voice tiers](docs/assets/screenshots/voice-tiers.jpg) |
+
+Guides: [images and voice notes](content/help/media.md) ·
+[media tiers contract](docs/design/media-tiers.md) ·
+[PROTOCOL §9.4](docs/architecture/PROTOCOL.md)
 
 ## Repository layout
 

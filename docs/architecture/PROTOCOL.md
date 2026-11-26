@@ -410,21 +410,38 @@ TX power does not affect airtime. In duty-cycle regions the sender MUST estimate
 either clamp the attachment or require explicit user confirmation. Estimator:
 `util::lora_airtime_ms`.
 
-| Profile | 240 B frame | 5 KiB image | Default attachment cap | Default voice cap |
+| Profile | 240 B frame | 5 KiB image | Default attachment cap | Voice duration cap (tiny / medium / high) |
 | --- | --- | --- | --- | --- |
-| `SHORT_TURBO` | 97 ms | ~2.5 s | 24 KiB (~12 s) | 15 s |
-| `SHORT_FAST` | 194 ms | ~5 s | 24 KiB (~24 s) | 15 s |
-| `MEDIUM_FAST` | 611 ms | ~18 s | 12 KiB (~42 s) | 10 s |
-| `LONG_FAST` | 2 034 ms | ~53 s | 6 KiB (~64 s) | 8 s |
-| `LONG_SLOW` | 13 509 ms | ~354 s | 1.5 KiB (~105 s) | 4 s |
+| `SHORT_TURBO` | 97 ms | ~2.5 s | 24 KiB (~12 s) | 30 s / 20 s / 15 s |
+| `SHORT_FAST` | 194 ms | ~5 s | 24 KiB (~24 s) | 30 s / 20 s / 15 s |
+| `MEDIUM_FAST` | 611 ms | ~18 s | 12 KiB (~42 s) | 30 s / 20 s / 8 s |
+| `LONG_FAST` | 2 034 ms | ~53 s | 6 KiB (~64 s) | 30 s / 15 s / 4 s |
+| `LONG_SLOW` | 13 509 ms | ~354 s | 1.5 KiB (~105 s) | 8 s / 3 s / 1 s |
+
+Voice caps are `min(tier_max_duration, profile_attachment_cap / bytes_per_second)`; clients MUST
+show the effective cap and estimated airtime before sending.
 
 On `LONG_SLOW`, images are effectively a last resort: clients MUST warn that a 5 KiB image costs
 about six minutes of channel airtime and SHOULD offer a text-only or thumbnail-only alternative.
 On `SHORT_*` profiles, voice notes are cheap enough to be the default way to send long thoughts.
 
-Voice notes: Opus mono 6–10 kbps, 16 kHz, 20 ms frames, packaged as `audio/ogg; codecs=opus`
-(8 s ≈ 7 KiB ≈ 39 chunks); optional Codec2 700C profile (`audio/c2-700c`, 8 s ≈ 700 bytes) for
-the most constrained presets.
+### 9.4.1 Voice tiers (v0.6)
+
+Voice notes use three tiers; tiny/medium are **Codec2** (raw frame streams, no container), high is
+**Opus** (clients may substitute AAC/MP4 where OGG/Opus is unavailable, and must declare the MIME):
+
+| Tier | MIME | Input / framing | 8 s payload | Airtime at `MEDIUM_FAST` |
+| --- | --- | --- | --- | --- |
+| tiny | `audio/c2-1300` | 8 kHz mono s16; 320 samples = 40 ms → 52 bits = 7 B frames | ≈ 1.4 KiB | ~7 s |
+| medium | `audio/c2-3200` | 8 kHz mono s16; 160 samples = 20 ms → 64 bits = 8 B frames | ≈ 3.2 KiB | ~13 s |
+| high | `audio/ogg; codecs=opus` | Opus mono ~12 kbps, 20 ms frames | ≈ 12 KiB | ~43 s |
+
+Codec2 payloads are concatenated frames with fixed byte lengths (7 and 8 bytes); decoders MUST
+ignore a trailing partial frame and MUST reject payloads with an unsupported mode. Encoders drop
+a trailing partial PCM frame. The tiny tier is the intended default on constrained profiles: an
+8-second intelligible voice note costs less than one 640 px image. Tier metadata (sizes, MIME,
+sample rates, duration caps) lives in `content/presets/media.json` and is shared by all clients.
+No wire-format change: resources already carry MIME + bytes.
 
 **Region legal maxima.** Defaults are the legal maxima: selecting a region sets the TX power to
 `region.max_power_dbm`, the duty-cycle budget to `region.duty_cycle_pct` and the centre frequency

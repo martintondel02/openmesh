@@ -594,6 +594,29 @@ export function createDemoDataset(nowMs: number = Date.now()): DemoDataset {
       waveform: voiceNote.waveform,
     }),
     directMessage({
+      msg_id: 1016,
+      peer: DEMO_ANNE_ID,
+      from: DEMO_ANNE_ID,
+      to: ownId,
+      kind: 'attachment',
+      text: null,
+      sent_at_ms: nowMs - 40 * MINUTE,
+      read: true,
+      delivered: true,
+      outgoing: false,
+      attachment: {
+        id: 'att_voicec2tny01',
+        mime: 'audio/c2-1300',
+        size: 1_295,
+        sha256: seededBase64(415, 32),
+        duration_ms: 7_400,
+        name: 'voice-tiny.c2',
+        progress: 1,
+      },
+      localUrl: voiceNote.dataUrl,
+      waveform: voiceNote.waveform,
+    }),
+    directMessage({
       msg_id: 1008,
       peer: DEMO_ANNE_ID,
       from: ownId,
@@ -777,7 +800,7 @@ export function createDemoDataset(nowMs: number = Date.now()): DemoDataset {
   };
 
   const hello: HelloData = {
-    bridge_version: '0.5.1-demo',
+    bridge_version: '0.6.0-demo',
     protocol: 'omp/1',
     node: { node_id: ownId, name: 'martin-nord', class: 'client', caps: 0b1010001 },
     radios: [

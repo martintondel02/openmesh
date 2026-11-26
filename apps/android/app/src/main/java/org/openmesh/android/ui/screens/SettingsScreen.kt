@@ -43,6 +43,7 @@ import androidx.compose.ui.unit.dp
 import org.openmesh.android.data.model.RadioStatus
 import org.openmesh.android.data.repository.MediaKind
 import org.openmesh.android.data.regulatory.RegionLimits
+import org.openmesh.android.media.MediaTierPolicy
 import org.openmesh.android.data.regulatory.RegulatoryMapper
 import org.openmesh.android.data.regulatory.RegulatoryOverride
 import org.openmesh.android.data.repository.MeshRepository
@@ -286,6 +287,57 @@ fun SettingsScreen(
                         subtitle = "Store-capable repeaters may hold encrypted envelopes for offline peers for 72 h.",
                         checked = settings.storeForward,
                         onCheckedChange = { value -> repository.updateSettings { it.copy(storeForward = value) } },
+                    )
+                }
+            }
+
+            SectionTitle("Media tiers")
+            MeshCard {
+                Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("Default image tier", style = MaterialTheme.typography.titleMedium)
+                    androidx.compose.foundation.layout.FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        repository.mediaTiers.imageOrder.forEach { id ->
+                            FilterChip(
+                                selected = settings.defaultImageTier == id,
+                                onClick = { repository.setDefaultImageTier(id) },
+                                label = {
+                                    Text(
+                                        if (id == "original") "Original"
+                                        else id.replaceFirstChar { it.uppercase() } + " ${repository.mediaTiers.images.getValue(id).maxDim}",
+                                    )
+                                },
+                            )
+                        }
+                    }
+                    Text(
+                        "Tiers are targets; the composer shows the measured bytes and airtime. Original is blocked on long-range profiles.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MeshOnSurfaceVariant,
+                    )
+                    Text("Default voice tier", style = MaterialTheme.typography.titleMedium)
+                    androidx.compose.foundation.layout.FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        repository.mediaTiers.voiceOrder.forEach { id ->
+                            val info = repository.mediaTiers.voice.getValue(id)
+                            FilterChip(
+                                selected = settings.defaultVoiceTier == id,
+                                onClick = { repository.setDefaultVoiceTier(id) },
+                                label = {
+                                    Text(
+                                        when (id) {
+                                            "tiny" -> "Tiny 1.3k"
+                                            "medium" -> "Medium 3.2k"
+                                            else -> "High Opus"
+                                        },
+                                    )
+                                },
+                            )
+                        }
+                    }
+                    Text(
+                        "Tiny/medium use Codec2 via the Rust FFI at 8 kHz mono; high uses the platform Opus/AAC recorder. " +
+                            "Effective duration = min(tier max, profile cap / bitrate).",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MeshOnSurfaceVariant,
                     )
                 }
             }

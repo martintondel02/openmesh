@@ -19,6 +19,8 @@ import { Avatar, IconButton } from '../../components/ui/primitives';
 import { DeliveryTicks, SignalBars } from '../../components/ui/signals';
 import { Modal } from '../../components/ui/overlay';
 import { HelpLink } from '../../components/ui/help';
+import { isCodec2Mime, voiceAttachmentLabel, voiceTierForMime } from '../../lib/media-tiers';
+import { playCodec2Payload } from '../../voice/pcm';
 
 export type AnyChatMessage = ChatMessage | ChatGroupMessage;
 
@@ -192,18 +194,26 @@ export function VoiceWaveform({
 function VoiceAttachment({ message, own }: { message: AnyChatMessage; own: boolean }) {
   const { src, loading, error } = useAttachmentSrc(message);
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const playbackRef = useRef<{ stop: () => void } | null>(null);
+  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const [playing, setPlaying] = useState(false);
   const [currentMs, setCurrentMs] = useState(0);
-  const durationMs = message.attachment?.duration_ms ?? 0;
+  const [decoderError, setDecoderError] = useState<string | null>(null);
+  const attachment = message.attachment;
+  const mime = attachment?.mime ?? null;
+  const codec2 = isCodec2Mime(mime);
+  const remoteCodec2 = codec2 && !message.localUrl;
+  const durationMs = attachment?.duration_ms ?? 0;
   const waveform = useMemo(
-    () => message.waveform?.length ? message.waveform : speechWaveform(durationMs || 4000, 32, 5),
+    () => (message.waveform?.length ? message.waveform : speechWaveform(durationMs || 4000, 32, 5)),
     [message.waveform, durationMs],
   );
   const progress = durationMs > 0 ? Math.min(1, currentMs / durationMs) : 0;
   const seekWidthRef = useRef<HTMLDivElement>(null);
+  const label = voiceAttachmentLabel(mime, durationMs, attachment?.size ?? null);
 
   useEffect(() => {
-    if (!src) return;
+    if (!src || remoteCodec2) return;
     const audio = new Audio(src);
     audio.preload = 'metadata';
     audioRef.current = audio;
@@ -226,9 +236,51 @@ function VoiceAttachment({ message, own }: { message: AnyChatMessage; own: boole
       audio.removeEventListener('play', onPlay);
       audioRef.current = null;
     };
-  }, [src]);
+  }, [src, remoteCodec2]);
 
-  const toggle = () => {
+  useEffect(() => {
+    return () => {
+      playbackRef.current?.stop();
+      if (timerRef.current) clearInterval(timerRef.current);
+    };
+  }, []);
+
+  const stopRemotePlayback = () => {
+    playbackRef.current?.stop();
+    playbackRef.current = null;
+    if (timerRef.current) clearInterval(timerRef.current);
+    timerRef.current = null;
+    setPlaying(false);
+    setCurrentMs(0);
+  };
+
+  const toggle = async () => {
+    if (remoteCodec2) {
+      if (playing) {
+        stopRemotePlayback();
+        return;
+      }
+      if (!src) return;
+      setDecoderError(null);
+      try {
+        const payload = new Uint8Array(await (await fetch(src)).arrayBuffer());
+        const tier = voiceTierForMime(mime);
+        if (!tier || tier === 'high') throw new Error('Not a Codec2 payload');
+        const playback = await playCodec2Payload(payload, tier);
+        playbackRef.current = playback;
+        setPlaying(true);
+        const started = performance.now();
+        timerRef.current = setInterval(() => {
+          const elapsed = performance.now() - started;
+          setCurrentMs(Math.min(playback.durationMs, elapsed));
+          if (elapsed >= playback.durationMs) stopRemotePlayback();
+        }, 120);
+      } catch (cause) {
+        setDecoderError(cause instanceof Error ? cause.message : 'Codec2 decoder unavailable');
+        setPlaying(false);
+      }
+      return;
+    }
     const audio = audioRef.current;
     if (!audio) return;
     if (audio.paused) {
@@ -242,6 +294,7 @@ function VoiceAttachment({ message, own }: { message: AnyChatMessage; own: boole
   };
 
   const seek = (event: ReactMouseEvent<HTMLDivElement>) => {
+    if (remoteCodec2) return;
     const audio = audioRef.current;
     const element = seekWidthRef.current;
     if (!audio || !element || !Number.isFinite(audio.duration)) return;
@@ -255,33 +308,52 @@ function VoiceAttachment({ message, own }: { message: AnyChatMessage; own: boole
   const shownMs = playing || currentMs > 0 ? currentMs : totalMs;
 
   return (
-    <div className={cn('mt-1 flex w-[min(19rem,70vw)] items-center gap-2.5 rounded-xl border px-2.5 py-2', own ? 'border-emerald-300/15 bg-emerald-950/25' : 'border-white/[0.07] bg-white/[0.03]')}>
-      <button
-        type="button"
-        onClick={toggle}
-        disabled={!src}
-        aria-label={playing ? 'Pause voice message' : 'Play voice message'}
-        className={cn(
-          'grid h-8 w-8 shrink-0 place-items-center rounded-full transition-colors',
-          own ? 'bg-emerald-400 text-emerald-950 hover:bg-emerald-300' : 'bg-white/10 text-white hover:bg-white/15',
-          !src && 'opacity-50',
-        )}
-      >
-        {loading ? (
-          <span className="h-3 w-3 animate-spin rounded-full border-2 border-current border-t-transparent" />
-        ) : playing ? (
-          <Pause className="h-3.5 w-3.5" fill="currentColor" aria-hidden="true" />
-        ) : (
-          <Play className="ml-0.5 h-3.5 w-3.5" fill="currentColor" aria-hidden="true" />
-        )}
-      </button>
-      <div ref={seekWidthRef} onClick={seek} className="flex min-w-0 flex-1 cursor-pointer items-center" role="presentation">
-        <VoiceWaveform waveform={waveform} progress={progress} />
+    <div
+      className={cn(
+        'mt-1 w-[min(19rem,70vw)] rounded-xl border px-2.5 py-2',
+        own ? 'border-emerald-300/15 bg-emerald-950/25' : 'border-white/[0.07] bg-white/[0.03]',
+      )}
+    >
+      <div className="flex items-center gap-2.5">
+        <button
+          type="button"
+          onClick={() => void toggle()}
+          disabled={!src}
+          aria-label={playing ? 'Pause voice message' : 'Play voice message'}
+          className={cn(
+            'grid h-8 w-8 shrink-0 place-items-center rounded-full transition-colors',
+            own ? 'bg-emerald-400 text-emerald-950 hover:bg-emerald-300' : 'bg-white/10 text-white hover:bg-white/15',
+            !src && 'opacity-50',
+          )}
+        >
+          {loading ? (
+            <span className="h-3 w-3 animate-spin rounded-full border-2 border-current border-t-transparent" />
+          ) : playing ? (
+            <Pause className="h-3.5 w-3.5" fill="currentColor" aria-hidden="true" />
+          ) : (
+            <Play className="ml-0.5 h-3.5 w-3.5" fill="currentColor" aria-hidden="true" />
+          )}
+        </button>
+        <div
+          ref={seekWidthRef}
+          onClick={seek}
+          className={cn('flex min-w-0 flex-1 items-center', remoteCodec2 ? 'cursor-default' : 'cursor-pointer')}
+          role="presentation"
+        >
+          <VoiceWaveform waveform={waveform} progress={progress} />
+        </div>
+        <span className="shrink-0 font-mono text-3xs tabular-nums text-slate-400">{formatDuration(shownMs)}</span>
       </div>
-      <span className="shrink-0 font-mono text-3xs tabular-nums text-slate-400">{formatDuration(shownMs)}</span>
-      {error ? (
-        <span className="sr-only">{error}</span>
-      ) : null}
+      <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-3xs text-slate-500">
+        <span>{label}</span>
+        {decoderError ? (
+          <span className="flex items-center gap-1 text-amber-300/90" title={decoderError}>
+            <AlertTriangle className="h-2.5 w-2.5" aria-hidden="true" />
+            Codec2 decoder unavailable
+          </span>
+        ) : null}
+        {error ? <span className="flex items-center gap-1 text-amber-300/90">Audio unavailable</span> : null}
+      </div>
     </div>
   );
 }

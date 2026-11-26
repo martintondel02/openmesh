@@ -40,3 +40,7 @@ apps/android/app/src/main/java/uniffi/
 apps/android/app/src/main/assets/help/
 apps/android/app/src/main/assets/presets/
 apps/android/local.properties
+
+# Generated Codec2 WASM (scripts/build-voice-wasm.sh)
+apps/web/src/voice/openmesh_voice.wasm
+apps/web/public/voice/openmesh_voice.wasm

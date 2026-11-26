@@ -1,0 +1,16 @@
+[package]
+name = "openmesh-voice-wasm"
+description = "WASM C-ABI wrapper around openmesh-voice for the web client (Codec2 tiny/medium)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[lib]
+name = "openmesh_voice_wasm"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+openmesh-voice = { workspace = true }

@@ -43,6 +43,8 @@ data class LocalPrefs(
     val overridePowerDbm: Int? = null,
     val overrideFreqKhz: Long? = null,
     val overrideReason: String? = null,
+    val defaultImageTier: String = "medium",
+    val defaultVoiceTier: String = "tiny",
 )
 
 /** DataStore-backed app preferences and identity ciphertext (never the raw seed). */
@@ -69,6 +71,8 @@ class AppPreferences(private val context: Context) {
         val overridePower = intPreferencesKey("override_power_dbm")
         val overrideFreq = longPreferencesKey("override_frequency_khz")
         val overrideReason = stringPreferencesKey("override_reason")
+        val defaultImageTier = stringPreferencesKey("default_image_tier")
+        val defaultVoiceTier = stringPreferencesKey("default_voice_tier")
     }
 
     val prefs: Flow<LocalPrefs> = context.dataStore.data.map { p ->
@@ -94,6 +98,8 @@ class AppPreferences(private val context: Context) {
             overridePowerDbm = p[Keys.overridePower],
             overrideFreqKhz = p[Keys.overrideFreq],
             overrideReason = p[Keys.overrideReason],
+            defaultImageTier = p[Keys.defaultImageTier] ?: "medium",
+            defaultVoiceTier = p[Keys.defaultVoiceTier] ?: "tiny",
         )
     }
 
@@ -114,6 +120,9 @@ class AppPreferences(private val context: Context) {
     suspend fun setDemoMode(value: Boolean) = edit { it[Keys.demoMode] = value }
 
     suspend fun setIdentityCiphertext(value: String) = edit { it[Keys.identityCiphertext] = value }
+
+    suspend fun setDefaultImageTier(value: String) = edit { it[Keys.defaultImageTier] = value }
+    suspend fun setDefaultVoiceTier(value: String) = edit { it[Keys.defaultVoiceTier] = value }
 
     suspend fun setOverride(
         enabled: Boolean,

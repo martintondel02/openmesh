@@ -328,6 +328,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e0921b3876b3a1df8a1c9f912e7f94342458022c2e84288015893d83c4d62a79"
 
 [[package]]
+name = "codec2"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3c3c8ba70382a99c0b5ebadf6ad50e7d98fb6eb9bcc4c0e30d422f6321798d99"
+
+[[package]]
 name = "colorchoice"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -811,7 +817,7 @@ checksum = "c08d65885ee38876c4f86fa503fb49d7b507c2b62552df7c70b2fce627e06381"
 
 [[package]]
 name = "openmesh-bridge"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "base64",
@@ -840,7 +846,7 @@ dependencies = [
 
 [[package]]
 name = "openmesh-cli"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -854,7 +860,7 @@ dependencies = [
 
 [[package]]
 name = "openmesh-core"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "chacha20poly1305",
  "ciborium",
@@ -873,10 +879,11 @@ dependencies = [
 
 [[package]]
 name = "openmesh-ffi"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "base64",
  "openmesh-core",
+ "openmesh-voice",
  "serde",
  "serde_json",
  "sha2",
@@ -886,7 +893,7 @@ dependencies = [
 
 [[package]]
 name = "openmesh-sim"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -895,6 +902,20 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+]
+
+[[package]]
+name = "openmesh-voice"
+version = "0.6.0"
+dependencies = [
+ "codec2",
+]
+
+[[package]]
+name = "openmesh-voice-wasm"
+version = "0.6.0"
+dependencies = [
+ "openmesh-voice",
 ]
 
 [[package]]

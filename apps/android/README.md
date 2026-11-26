@@ -1,6 +1,6 @@
 # OpenMesh for Android
 
-Standalone Android client for OpenMesh v0.5.1 (regulatory maxima + emergency override). The Rust OMP/1 protocol engine runs
+Standalone Android client for OpenMesh v0.6.0 (regulatory maxima + emergency override). The Rust OMP/1 protocol engine runs
 **on the phone** through UniFFI; the LoRa radio is a dumb authenticated companion pipe over BLE or
 USB. No bridge, no server, no account.
 
@@ -95,6 +95,35 @@ Effective TX power is always clamped to the radio hardware cap (SX1262 boards 22
 
 QA tip (debug builds): long-press the “About & agents” title → **Reset & restart** clears the
 onboarding flag for re-testing; the override itself can be disabled in Settings at any time.
+
+---
+
+## Media tiers and tiny voice (v0.6.0)
+
+Tier metadata is data, not code: `content/presets/media.json` is copied to `assets/presets/media.json`
+by Gradle and parsed by `MediaTiers.kt` (JVM parity test against the real repository file).
+
+| Tier | Image target | Voice codec / MIME | Bitrate | Max duration |
+| --- | --- | --- | --- | --- |
+| Tiny | 320 px WebP q0.35 | Codec2 1300 · `audio/c2-1300` | 1.3 kbps (175 B/s) | 30 s |
+| Medium | 640 px WebP q0.55 | Codec2 3200 · `audio/c2-3200` | 3.2 kbps (400 B/s) | 20 s |
+| High | 1280 px WebP q0.70 | Opus/OGG (API 29+) or AAC/MP4 | ~12 kbps | 15 s |
+| Original | no resize (explicit confirm) | — | — | — |
+
+* **Images**: the composer shows a tier menu, compresses with `Bitmap.compress(WEBP_LOSSY)`, then a
+  preview with the **actual bytes**, estimated airtime and % of the hourly duty budget. The default
+  is the largest tier whose target fits the active profile cap; **Original** requires a confirmation
+  and is disabled on `LONG_*` profiles.
+* **Voice**: recorder tier selector. Tiny/medium record raw 8 kHz mono s16le PCM with `AudioRecord`
+  and encode through the Rust Codec2 FFI (`openmeshVoiceEncode`); the effective duration cap is
+  `min(tier max, profile cap / tier bytes-per-second)` and the same bytes+airtime preview is shown
+  before sending. High uses the platform recorder (OGG/Opus on API 29+, AAC/MP4 fallback).
+* **Playback**: Codec2 attachments are decoded through `openmeshVoiceDecode` and played with
+  `AudioTrack` (8 kHz mono); Opus/AAC use `MediaPlayer`. Bubbles label format, duration and size.
+* **Settings**: default image and voice tier are persisted in DataStore (defaults from
+  `media.json`: medium image, tiny voice) and used by the composer/recorder.
+* Wire format is unchanged: attachments carry MIME + bytes as before; Codec2 payloads are raw
+  frame streams (7 B/40 ms tiny, 8 B/20 ms medium).
 
 ---
 
@@ -238,7 +267,7 @@ cd apps/android
 cargo test -p openmesh-ffi          # 8/8
 ```
 
-Current results: **62/62 JVM unit tests pass**, `lintDebug` passes, `assembleDebug` produces
+Current results: **77/77 JVM unit tests pass**, `lintDebug` passes, `assembleDebug` produces
 `app/build/outputs/apk/debug/app-debug.apk` (~23 MB), `assembleRelease` produces an unsigned
 ~5.1 MB APK. The APK contains `assets/help/*` (17 topics + index), `assets/presets/setup.json`, and
 `lib/{arm64-v8a,armeabi-v7a,x86_64}/libopenmesh_ffi.so`.
@@ -307,6 +336,20 @@ running instead of crashing the app on first launch. Once the user grants Blueto
 or accepts the USB permission, the service runs as a normal `connectedDevice` service.
 
 ## Device verification
+**v0.6.0 media-tier spot-check (Pixel-class A069P, Android 17, build 0.6.0/versionCode 7):**
+
+- **Tiny voice:** recorded 17 s with `AudioRecord` → FFI `openmeshVoiceEncode("tiny")` → 2.9 KiB
+  `audio/c2-1300`; bubble label "Codec2 1.3k · 17 s · 2.9 KiB"; airtime 11.3 s / 3.2 % of the
+  hourly duty; playback via FFI decode + `AudioTrack` confirmed (AudioTrack session in logcat),
+  no crash. (Transfer shows failed with no radio attached, as expected.)
+- **Image tiers:** all four chips visible (Tiny 320 / Medium 640 / High 1280 / Original); Tiny on a
+  1260×2800 screenshot → measured 1.7 KiB WebP, 144×320, ≈7.1 s airtime / 2.0 % duty, sent and
+  shown as "WebP · 1.7 KiB"; Original → 92.2 KiB PNG with over-cap warning + confirmation
+  checkbox, Send correctly blocked.
+- Compression trace visible in `adb logcat -s OpenMesh` (`image compress: begin … webp … success`);
+  no FATAL/ANR. (Web side: 270 tests incl. a real Codec2 WASM round-trip; cross-client playback
+  over the mesh still needs radios.)
+
 
 **v0.5.1 regulatory-override spot-check (Pixel-class A069P, Android 17, build 0.5.1/versionCode 6):**
 

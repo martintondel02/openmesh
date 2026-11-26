@@ -20,7 +20,7 @@ git diff --exit-code -- protocol/vectors || {
 }
 
 echo "==> simulator"
-cargo run -q -p openmesh-sim -- --profile ci
+cargo run -q -p openmesh-sim
 
 if [ -d apps/web/node_modules ]; then
   echo "==> web"

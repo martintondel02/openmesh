@@ -4,7 +4,8 @@
  * `compression.ts`; this file only touches DOM APIs.
  */
 
-import { planCompression, type CompressionPlan } from './compression';
+import { planCompression, planDimensions, type CompressionPlan } from './compression';
+import { imageTier, type ImageTierId } from './media-tiers';
 
 export interface CompressedImage {
   blob: Blob;
@@ -163,6 +164,16 @@ export async function compressImage(blob: Blob, options: CompressOptions): Promi
   }
 }
 
+/** Read the pixel dimensions of an image without retaining it. */
+export async function readImageDimensions(blob: Blob): Promise<{ width: number; height: number }> {
+  const decoded = await decodeImage(blob);
+  try {
+    return { width: decoded.width, height: decoded.height };
+  } finally {
+    decoded.close();
+  }
+}
+
 /** Validate a dropped/picked file before we spend CPU on it. */
 export function validateImageFile(file: File): string | null {
   if (!file.type.startsWith('image/')) return 'Only images (JPEG, PNG, WebP, GIF, SVG) can be sent from the web client.';
@@ -175,4 +186,124 @@ export function fallbackImageName(file: File): string {
   if (file.name) return file.name;
   const extension = file.type.split('/')[1]?.replace('+xml', '') || 'jpg';
   return `image-${Date.now().toString(36)}.${extension}`;
+}
+
+
+/** Tier label carried alongside the compressed result (web-only). */
+export interface TierCompressedImage extends CompressedImage {
+  tier: ImageTierId;
+  /** True for `original`: the user confirmed sending the unmodified file. */
+  original: boolean;
+}
+
+/**
+ * Compress to one of the shared tiers (Tiny/Medium/High) or pass the original through.
+ * Contract: downscale to `max_dim`, encode WebP at `quality`; actual bytes are shown later.
+ */
+export async function compressImageToTier(blob: Blob, tierId: ImageTierId): Promise<TierCompressedImage> {
+  const tier = imageTier(tierId);
+  const decoded = await decodeImage(blob);
+  try {
+    if (tier.id === 'original') {
+      return {
+        tier: 'original',
+        original: true,
+        blob,
+        objectUrl: URL.createObjectURL(blob),
+        mime: blob.type || 'application/octet-stream',
+        width: decoded.width,
+        height: decoded.height,
+        quality: 1,
+        originalBytes: blob.size,
+        originalWidth: decoded.width,
+        originalHeight: decoded.height,
+        plan: {
+          width: decoded.width,
+          height: decoded.height,
+          quality: 1,
+          estimatedBytes: blob.size,
+          scale: 1,
+          iterations: 0,
+          atFloor: false,
+        },
+        attempts: 0,
+      };
+    }
+    const dims = planDimensions(decoded.width, decoded.height, tier.maxDim ?? 1600, tier.maxDim ?? 1600);
+    const canvas = createCanvas(dims.width, dims.height);
+    const context = canvas.getContext('2d');
+    if (!context) throw new Error('Canvas 2D is unavailable in this browser');
+    context.imageSmoothingEnabled = true;
+    context.imageSmoothingQuality = 'high';
+    context.drawImage(decoded.source, 0, 0, dims.width, dims.height);
+    const mime = supportsWebp() ? 'image/webp' : 'image/jpeg';
+    const quality = tier.quality ?? 0.6;
+    const encoded = await canvasToBlob(canvas, mime, quality);
+    return {
+      tier: tier.id,
+      original: false,
+      blob: encoded,
+      objectUrl: URL.createObjectURL(encoded),
+      mime,
+      width: dims.width,
+      height: dims.height,
+      quality,
+      originalBytes: blob.size,
+      originalWidth: decoded.width,
+      originalHeight: decoded.height,
+      plan: {
+        width: dims.width,
+        height: dims.height,
+        quality,
+        estimatedBytes: encoded.size,
+        scale: dims.width / Math.max(1, decoded.width),
+        iterations: 1,
+        atFloor: false,
+      },
+      attempts: 1,
+    };
+  } finally {
+    decoded.close();
+  }
+}
+
+/**
+ * Deterministic synthetic image used by demo-mode screenshots/tests (no file picker needed).
+ * A 1600×1067 landscape gradient with simple shapes so tier resizing is visible.
+ */
+export async function createDemoImageFile(width = 1600, height = 1067): Promise<File> {
+  const canvas = createCanvas(width, height);
+  const context = canvas.getContext('2d');
+  if (!context) throw new Error('Canvas 2D is unavailable in this browser');
+  const sky = context.createLinearGradient(0, 0, 0, height);
+  sky.addColorStop(0, '#0f2a3f');
+  sky.addColorStop(0.52, '#f59e0b');
+  sky.addColorStop(1, '#0b1220');
+  context.fillStyle = sky;
+  context.fillRect(0, 0, width, height);
+  context.fillStyle = 'rgba(15, 23, 42, 0.92)';
+  context.beginPath();
+  context.moveTo(0, height * 0.72);
+  context.lineTo(width * 0.24, height * 0.44);
+  context.lineTo(width * 0.46, height * 0.7);
+  context.lineTo(width * 0.7, height * 0.32);
+  context.lineTo(width, height * 0.66);
+  context.lineTo(width, height);
+  context.lineTo(0, height);
+  context.closePath();
+  context.fill();
+  context.fillStyle = '#34d399';
+  context.beginPath();
+  context.arc(width * 0.76, height * 0.2, height * 0.055, 0, Math.PI * 2);
+  context.fill();
+  context.strokeStyle = 'rgba(255,255,255,0.26)';
+  context.lineWidth = 3;
+  context.beginPath();
+  context.arc(width * 0.18, height * 0.26, height * 0.07, 0, Math.PI * 2);
+  context.stroke();
+  context.fillStyle = 'rgba(226,232,240,0.85)';
+  context.font = `${Math.round(height * 0.035)}px sans-serif`;
+  context.fillText('Demo ridge · tier preview', width * 0.055, height * 0.91);
+  const encoded = await canvasToBlob(canvas, 'image/webp', 0.86);
+  return new File([encoded], 'demo-ridge.webp', { type: encoded.type || 'image/webp' });
 }
