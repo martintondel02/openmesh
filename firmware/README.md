@@ -361,14 +361,16 @@ clean PlatformIO install):
 | Link | add `-Wl,--wrap=malloc/free/realloc/calloc` (required by Adafruit FreeRTOS `heap_3`), and pin `tool-adafruit-nrfutil` / `tool-bossac-nordicnrf52` for the upload target |
 | RadioLib 7 | nRF52 SPI pins via `SPI.setPins(miso, sck, mosi)` + `SPI.begin()`, and pass `SPIClass` by reference to `Module` |
 | Runtime | use `delay()` instead of direct RTC1/WFE from the scheduler loop (FreeRTOS/SoftDevice own the low-power clock domain) |
-| USB/BLE | T1000-E USB-detect is **active-high**; BLE is enabled only when USB is absent, because bringing BLE up with USB attached re-enumerated CDC on this board |
+| USB/BLE | **Known issue:** on this first article, bringing BLE up with USB attached intermittently re-enumerates CDC. BLE advertising itself works (verified with a scan-response name); the USB/BLE coexistence fix is still open |
 | RAM | 16 peers / 16 stored envelopes (the full 2048-entry dedup table is kept) to leave stack headroom next to S140 |
-| Diagnostics | `[env:t1000e_probe]` (`firmware/probe/main.cpp`) is a USB-CDC + LED first-article probe; `[om]` serial markers in `setup()` show the last completed init step |
+| Diagnostics | `[env:t1000e_probe]` (`firmware/probe/main.cpp`) is a USB-CDC + LED first-article probe; `[om]` serial markers and short settle delays in `setup()` keep the boot path observable |
 
-Verified on hardware: UF2/DFU flashing, boot, stable USB CDC (no re-enumeration with the BLE gate),
-USB companion **Ping → Pong** and status/`radio=ok`, GPS UART init, BLE advertising with scan-response
-name when running on battery. Not yet measured: RF peer TX/RX (needs a second node or field test),
-Android BLE companion handshake, sleep current, battery calibration, and the other three boards.
+Verified on hardware: build, UF2 and nrfutil flashing, boot, USB CDC enumeration, USB companion
+**Ping → Pong**, `radio=ok`, GPS UART init, and BLE advertising with a scan-response name. Not yet
+verified: RF peer TX/RX (needs a second node/field test), Android BLE companion handshake,
+USB/BLE coexistence (BLE-on-USB re-enumerates CDC), sleep current, battery calibration, and the
+other three boards. The first-article unit currently needs a charged battery before the next
+flash; a battery-drained board sits in its UF2 bootloader instead of starting the application.
 
 ## 9. Known issues, limitations and spec gaps
 

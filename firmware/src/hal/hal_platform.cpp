@@ -51,12 +51,24 @@ void randomBytes(void* ctx, uint8_t* out, size_t len) {
 }
 
 void sleepMs(uint32_t ms) {
-    // The Adafruit core runs FreeRTOS and the SoftDevice owns the low-power clock domain; poking
-    // RTC1/WFE directly from the scheduler loop can reset or wedge the radio. Yield to the RTOS;
-    // the radio keeps its own state and callers only sleep between scheduler ticks.
+    // Light sleep: RTC1 wake-up with the 32.768 kHz LFCLK, then WFE. The radio keeps its own
+    // state; callers only sleep between scheduler ticks.
     if (ms == 0) return;
     if (ms > 3600000u) ms = 3600000u;
-    delay(ms);
+    NRF_CLOCK->TASKS_LFCLKSTART = 1;
+    for (volatile int i = 0; i < 100000 && NRF_CLOCK->EVENTS_LFCLKSTARTED == 0; ++i) {
+    }
+    NRF_CLOCK->EVENTS_LFCLKSTARTED = 0;
+    NRF_RTC1->TASKS_STOP = 1;
+    NRF_RTC1->TASKS_CLEAR = 1;
+    NRF_RTC1->PRESCALER = 0;  // 32768 Hz
+    NRF_RTC1->CC[0] = ms * 32;
+    NRF_RTC1->EVENTS_COMPARE[0] = 0;
+    NRF_RTC1->INTENSET = RTC_INTENSET_COMPARE0_Msk;
+    NRF_RTC1->TASKS_START = 1;
+    __WFE();
+    NRF_RTC1->TASKS_STOP = 1;
+    NRF_RTC1->EVENTS_COMPARE[0] = 0;
 }
 
 void initUx(const board::Board& board) {

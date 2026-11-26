@@ -39,10 +39,11 @@ telemetry and region duty-cycle budgeting. Store-and-forward is enabled by defau
 and gateways only (it needs the larger flash/queue budget and mains/solar power).
 
 > **First article (2026-11-26):** the Seeed T1000-E now builds locally with PlatformIO, flashes via
-> UF2 and nrfutil, boots, reports `radio=ok`, answers the USB companion Ping, and advertises BLE
-> (with the USB-present gate). The other three board targets still need first-article build/boot
-> checks. Build fixes and the verified/not-yet-verified list live in
-> [firmware/README.md §8.1](../../firmware/README.md).
+> UF2/nrfutil, boots, reports `radio=ok`, answers the USB companion Ping, and advertises BLE.
+> Open issues on this first article: USB/BLE coexistence (BLE-on-USB re-enumerates CDC), a charged
+> battery is required for the application to start, and RF peer TX/RX still needs a second node.
+> The other three board targets still need first-article build/boot checks. Build fixes and the
+> verified/not-yet-verified list live in [firmware/README.md §8.1](../../firmware/README.md).
 
 ---
 
