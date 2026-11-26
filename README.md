@@ -13,6 +13,9 @@ No accounts. No cell towers. No cloud. Just radios, repeaters and your people.
 
 ![OpenMesh web client — encrypted group chat over LoRa](docs/assets/screenshots/chats.jpg)
 
+> **Roadmap:** shipped through **v0.7.1** · next: **OpenWeb — pages over the mesh** (v0.8) →
+> [visual roadmap & milestones](docs/ROADMAP.md)
+
 **Docs:** [Quick start](docs/QUICKSTART.md) ·
 [Architecture](docs/architecture/ARCHITECTURE.md) ·
 [Protocol spec](docs/architecture/PROTOCOL.md) ·
