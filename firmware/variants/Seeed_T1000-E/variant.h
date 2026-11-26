@@ -47,6 +47,10 @@ extern "C" {
 #define PIN_3V3_ACC_EN (32 + 7) // P1.7, Power to Acc
 
 #define PIN_LED1 (0 + 24) // P0.24
+
+#ifndef LED_BUILTIN
+#define LED_BUILTIN PIN_LED1
+#endif
 #define LED_POWER PIN_LED1
 #define LED_BLUE -1    // Actually green
 #define LED_STATE_ON 1 // State when LED is lit

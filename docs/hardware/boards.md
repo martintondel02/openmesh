@@ -1,6 +1,6 @@
 # OpenMesh hardware support
 
-**Status:** v0.1.0 · normative for the four reference boards
+**Status:** v0.7.1 · normative for the four reference boards
 **Firmware:** `firmware/` (PlatformIO, C++17) · **Flashers:** `apps/flasher/` (web), `tools/flash/` (CLI)
 
 OpenMesh v0.1 supports four reference boards. All four run the same firmware codebase; the board
@@ -37,6 +37,12 @@ relaying, deduplicated forwarding, AEAD direct and channel messages, acknowledge
 store-and-forward on repeaters, USB/BLE companion link, GNSS NMEA parsing, battery/solar
 telemetry and region duty-cycle budgeting. Store-and-forward is enabled by default on repeaters
 and gateways only (it needs the larger flash/queue budget and mains/solar power).
+
+> **First article (2026-11-26):** the Seeed T1000-E now builds locally with PlatformIO, flashes via
+> UF2 and nrfutil, boots, reports `radio=ok`, answers the USB companion Ping, and advertises BLE
+> (with the USB-present gate). The other three board targets still need first-article build/boot
+> checks. Build fixes and the verified/not-yet-verified list live in
+> [firmware/README.md §8.1](../../firmware/README.md).
 
 ---
 

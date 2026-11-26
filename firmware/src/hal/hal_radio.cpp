@@ -25,10 +25,17 @@ bool Radio::begin(const board::Board& board, const LoraProfile& profile, const R
         digitalWrite((uint32_t)board.radio.power_en, HIGH);
         delay(10);
     }
+#if defined(ARDUINO_ARCH_NRF52)
+    // Adafruit nRF52 SPI: pins are configured separately from begin(), and RadioLib 7.x
+    // takes the SPIClass by reference (not pointer).
+    SPI.setPins((uint8_t)board.radio.miso, (uint8_t)board.radio.sck, (uint8_t)board.radio.mosi);
+    SPI.begin();
+#else
     SPI.begin((int8_t)board.radio.sck, (int8_t)board.radio.miso, (int8_t)board.radio.mosi,
               (int8_t)board.radio.cs);
+#endif
     auto* module = new Module((uint32_t)board.radio.cs, (uint32_t)board.radio.irq,
-                              (uint32_t)board.radio.reset, (uint32_t)board.radio.busy, &SPI);
+                              (uint32_t)board.radio.reset, (uint32_t)board.radio.busy, SPI);
     auto* radio = new RadioLibRadio(module);
     module_ = module;
     radio_ = radio;

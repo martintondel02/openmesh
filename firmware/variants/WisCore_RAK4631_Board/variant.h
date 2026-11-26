@@ -45,6 +45,10 @@ extern "C" {
 
 // LEDs
 #define PIN_LED1 (35)
+
+#ifndef LED_BUILTIN
+#define LED_BUILTIN PIN_LED1
+#endif
 #define LED_BLUE (36)
 
 #define LED_GREEN PIN_LED1

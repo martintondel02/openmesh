@@ -347,14 +347,37 @@ select it in `platformio.ini`, add the board to `apps/flasher/boards.json` and `
 > vectors (44 cases / 3 421 assertions) and the native PlatformIO env. The four hardware-target
 > PlatformIO builds need first-article board bring-up (`firmware/boards/pio/`,
 > `firmware/variants/`, SoftDevice linker script) and are marked best-effort in CI; see §9.
+## 8.1 First-article bring-up — Seeed T1000-E (2026-11-26)
+
+The T1000-E was the first physical board. It now compiles, flashes, boots and answers the USB
+companion link. Bring-up required these fixes (all in-tree, so `pio run -e t1000e` works from a
+clean PlatformIO install):
+
+| Area | Fix |
+| --- | --- |
+| Toolchain | pin `toolchain-gccarmnoneeabi@1.100301.220327` (GCC 10.3): GCC 7.2's `arm_acle.h` is not C++17-safe; `build_unflags = -std=gnu++11` so the firmware's `-std=gnu++17` wins |
+| CMSIS/TinyUSB | add `platformio/framework-cmsis` and `extra_scripts/openmesh_nrf52.py`, which adds the CMSIS include and the TinyUSB library include (`cores/nRF5/TinyUSB` is missing from the plain git framework checkout) |
+| Framing | include `boards/*.cpp` in `build_src_filter`; `LED_BUILTIN` added to the variant headers |
+| Link | add `-Wl,--wrap=malloc/free/realloc/calloc` (required by Adafruit FreeRTOS `heap_3`), and pin `tool-adafruit-nrfutil` / `tool-bossac-nordicnrf52` for the upload target |
+| RadioLib 7 | nRF52 SPI pins via `SPI.setPins(miso, sck, mosi)` + `SPI.begin()`, and pass `SPIClass` by reference to `Module` |
+| Runtime | use `delay()` instead of direct RTC1/WFE from the scheduler loop (FreeRTOS/SoftDevice own the low-power clock domain) |
+| USB/BLE | T1000-E USB-detect is **active-high**; BLE is enabled only when USB is absent, because bringing BLE up with USB attached re-enumerated CDC on this board |
+| RAM | 16 peers / 16 stored envelopes (the full 2048-entry dedup table is kept) to leave stack headroom next to S140 |
+| Diagnostics | `[env:t1000e_probe]` (`firmware/probe/main.cpp`) is a USB-CDC + LED first-article probe; `[om]` serial markers in `setup()` show the last completed init step |
+
+Verified on hardware: UF2/DFU flashing, boot, stable USB CDC (no re-enumeration with the BLE gate),
+USB companion **Ping → Pong** and status/`radio=ok`, GPS UART init, BLE advertising with scan-response
+name when running on battery. Not yet measured: RF peer TX/RX (needs a second node or field test),
+Android BLE companion handshake, sleep current, battery calibration, and the other three boards.
+
 ## 9. Known issues, limitations and spec gaps
 
 These are tracked for v0.1.x/M1 and are worth reading before trusting the firmware in the field.
 
-1. **Hardware builds unverified locally.** The host library and tests are compiled; the four
-   Arduino/PlatformIO environments were not compiled on the development machine (toolchain
-   download). CI builds them. Radio bring-up, GNSS bauds, ADC calibration and sleep current need
-   first-article measurement.
+1. **Hardware builds and first article.** The host library/tests and the T1000-E target build
+   locally, and the T1000-E boots/flashes with the USB companion link verified (§8.1). The other
+   three board environments still need first-article build/boot checks; GNSS bauds, ADC
+   calibration, sleep current and RF peer TX/RX need hardware measurement.
 2. **Deep sleep missing for trackers.** v0.1 keeps the receiver on continuously and uses light
    sleep only; battery life is therefore days, not months. The power table reflects that. The
    scheduler and `PowerPolicy` already emit low-power hints.

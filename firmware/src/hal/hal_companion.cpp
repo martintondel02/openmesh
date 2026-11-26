@@ -18,8 +18,11 @@ namespace hal {
 #if defined(ARDUINO_ARCH_NRF52) || defined(NRF52_SERIES) || defined(ESP32)
 bool UsbTransport::begin() {
     // USB CDC is initialised by the Arduino core; nRF52 TinyUSB and ESP32-S3 USB-OTG both
-    // expose it as Serial. Keep the baud rate for compatibility with serial monitors.
-    Serial.begin(115200);
+    // expose it as Serial. The main setup already calls Serial.begin(115200) before the init
+    // log markers; calling it again re-enumerates USB (and fights the BLE SoftDevice init).
+    if (!begun_ && Serial) {
+        Serial.begin(115200);
+    }
     begun_ = true;
     return true;
 }
@@ -53,21 +56,30 @@ namespace {
 BLEUart g_bleuart;
 }
 bool BleTransport::begin(const char* device_name) {
-    Bluefruit.begin();
+    const bool sd_ok = Bluefruit.begin();
     Bluefruit.setName(device_name);
     Bluefruit.setTxPower(4);
     Bluefruit.Periph.setConnectCallback(nullptr);
     Bluefruit.Periph.setConnInterval(9, 12);
-    g_bleuart.begin();
+    // BLEUart::begin() returns err_t (0 = ERROR_NONE), not bool.
+    const err_t uart_err = g_bleuart.begin();
     Bluefruit.Advertising.addFlags(BLE_GAP_ADV_FLAGS_LE_ONLY_GENERAL_DISC_MODE);
     Bluefruit.Advertising.addTxPower();
     Bluefruit.Advertising.addService(g_bleuart);
+    // The 128-bit service UUID already fills the advertising packet; put the device name in the
+    // scan response so phone/Linux scanners can show "Seeed SenseCAP T1000-E".
+    Bluefruit.ScanResponse.addName();
     Bluefruit.Advertising.restartOnDisconnect(true);
     Bluefruit.Advertising.setInterval(32, 244);
     Bluefruit.Advertising.setFastTimeout(30);
-    Bluefruit.Advertising.start(0);
-    enabled_ = true;
-    return true;
+    const bool adv_ok = Bluefruit.Advertising.start(0);
+    uint8_t mac[6] = {0};
+    Bluefruit.getAddr(mac);
+    Serial.printf("[om] ble init: sd=%d uart_err=%d adv=%d mac=%02X:%02X:%02X:%02X:%02X:%02X name=%s\n",
+                  sd_ok ? 1 : 0, (int)uart_err, adv_ok ? 1 : 0,
+                  mac[5], mac[4], mac[3], mac[2], mac[1], mac[0], device_name);
+    enabled_ = sd_ok && (uart_err == ERROR_NONE) && adv_ok;
+    return enabled_;
 }
 
 int BleTransport::read(uint8_t* buffer, size_t capacity) {

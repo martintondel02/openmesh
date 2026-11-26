@@ -21,6 +21,10 @@
 //  LEDs
 //  LEDs
 #define PIN_LED1 (12) // LED        P1.15
+
+#ifndef LED_BUILTIN
+#define LED_BUILTIN PIN_LED1
+#endif
 #define PIN_LED2 (11) //
 
 #define LED_GREEN PIN_LED1

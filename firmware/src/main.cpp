@@ -448,28 +448,52 @@ void applyRadioConfigIfChanged() {
 }  // namespace
 
 void setup() {
+    // USB/serial first: the init markers below must be visible even if a later step fails.
+    Serial.begin(115200);
+    delay(250);
+    Serial.println();
+    Serial.println("[om] setup: begin");
     g_board = &board::get();
+    Serial.printf("[om] board=%s\n", g_board->id); Serial.flush();
     hal::initUx(*g_board);
     hal::setLed(true);
-    Serial.begin(115200);
-    delay(150);
+    Serial.println("[om] ux"); Serial.flush();
     g_storage.begin();
+    Serial.println("[om] storage"); Serial.flush();
     if (!loadOrCreateIdentity()) {
         sendEvent("error", "identity");
+        Serial.println("[om] identity: ERROR");
+    } else {
+        Serial.println("[om] identity"); Serial.flush();
     }
     configureEngine();
+    Serial.println("[om] engine"); Serial.flush();
     if (g_board->gps.module != board::GnssModule::None) {
         hal::gpsBegin(*g_board);
+        Serial.println("[om] gps"); Serial.flush();
     }
     const bool radio_ok = g_radio.begin(*g_board, *g_engine.config().profile,
                                         *g_engine.config().region,
                                         g_engine.config().tx_power_dbm,
                                         g_engine.config().frequency_override_khz);
+    Serial.printf("[om] radio=%s\n", radio_ok ? "ok" : "ERROR"); Serial.flush();
     g_usb.begin();
-    if (OM_ENABLE_BLE) {
+    Serial.println("[om] usb"); Serial.flush();
+    // BLE and USB sharing this board's clock/USB path re-enumerate CDC when BLE comes up. Run BLE
+    // only on battery; when USB is attached, keep the wired companion link stable (Android USB,
+    // bridge serial). The board's usb_detect pin is active-low.
+    bool usb_present = true;
+    if (g_board->power.usb_detect >= 0) {
+        // T1000-E USB-detect (P0.05) is active-high: VBUS present reads HIGH.
+        usb_present = digitalRead((uint32_t)g_board->power.usb_detect) == HIGH;
+    }
+    if (OM_ENABLE_BLE && !usb_present) {
         char device_name[24];
         std::snprintf(device_name, sizeof(device_name), "%s", g_board->display_name);
-        g_ble.begin(device_name);
+        const bool ble_ok = g_ble.begin(device_name);
+        Serial.printf("[om] ble=%s (battery)\n", ble_ok ? "ok" : "ERROR"); Serial.flush();
+    } else if (OM_ENABLE_BLE) {
+        Serial.println("[om] ble: USB attached, wired companion mode"); Serial.flush();
     }
     hal::setLed(false);
     g_applied_radio.profile = g_engine.config().profile;
