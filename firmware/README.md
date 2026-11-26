@@ -1,6 +1,6 @@
 # OpenMesh firmware
 
-**Firmware version:** 0.7.0 · legal-maximum region table, board PA caps and the warning-gated
+**Firmware version:** 0.7.1 · legal-maximum region table, board PA caps and the warning-gated
 regulatory override (see §3.1).
 
 One C++17 codebase for all four reference boards: Seeed SenseCAP T1000-E (nRF52840 + LR1110),

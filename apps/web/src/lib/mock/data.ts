@@ -805,7 +805,7 @@ export function createDemoDataset(nowMs: number = Date.now()): DemoDataset {
   };
 
   const hello: HelloData = {
-    bridge_version: '0.7.0-demo',
+    bridge_version: '0.7.1-demo',
     protocol: 'omp/1',
     node: { node_id: ownId, name: 'martin-nord', class: 'client', caps: 0b1010001 },
     radios: [

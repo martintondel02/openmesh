@@ -1,5 +1,6 @@
 import { defineConfig } from 'vitest/config';
 import react from '@vitejs/plugin-react';
+import tailwindcss from '@tailwindcss/vite';
 
 // https://vite.dev/config/
 // The web/PWA build uses absolute asset URLs so deep links such as /help/security
@@ -8,7 +9,7 @@ const isTauriBuild = Boolean(process.env.TAURI_ENV_PLATFORM || process.env.TAURI
 
 export default defineConfig({
   base: isTauriBuild ? './' : '/',
-  plugins: [react()],
+  plugins: [react(), tailwindcss()],
   server: {
     port: 5173,
     strictPort: false,

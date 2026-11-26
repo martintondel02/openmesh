@@ -5,6 +5,26 @@ All notable changes to this project are documented here. The format follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Protocol changes are called out
 explicitly.
 
+## [0.7.1] - 2026-11-26
+
+### Changed — dependency maintenance (no functional or wire changes)
+
+- **Tailwind CSS 4.3.5** migration in the web client: `@tailwindcss/vite` 4.3.5, `@import
+  "tailwindcss"` + `@config "../tailwind.config.ts"`, removed `postcss`/`autoprefixer` and the
+  PostCSS config, and updated v4 utility renames (`shadow-sm`→`shadow-xs`, `rounded-sm`→`rounded-xs`,
+  `backdrop-blur-sm`→`backdrop-blur-xs`). Custom theme (colors, fonts, shadows, animations) kept;
+  build/tests/demo verified with no visual drift.
+- `@vitejs/plugin-react` 5.2.0 and `@types/node` 26.6.7 adopted (PR #11 merged; #8/#10 superseded).
+- Rust lockfile kept on the latest semver-compatible versions (zerocopy 0.8.66); the combined
+  major-version Dependabot PR (#14) was closed: ed25519-dalek/x25519-dalek 3, chacha20poly1305/
+  sha2/hkdf 0.11/0.13, rand 0.10, base64 0.23, tokio-tungstenite 0.30 and uniffi 0.29 touch the
+  crypto/wire/FFI layers and need a dedicated migration.
+- Dependabot policy now groups **minor/patch** updates and ignores Rust major versions (majors are
+  tracked as a migration task; security updates are unaffected). npm major updates stay individual.
+
+### Fixed
+- CI dependency noise from incompatible grouped major upgrades.
+
 ## [0.7.0] - 2026-11-26
 
 ### Added — remote operations and gateways

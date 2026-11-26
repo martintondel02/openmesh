@@ -1,6 +1,5 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+@import "tailwindcss";
+@config "../tailwind.config.ts";
 
 @layer base {
   :root {
@@ -89,7 +88,7 @@
 @layer components {
   /* Flat, slightly lifted surface used by most cards/panels. */
   .surface {
-    @apply rounded-2xl border border-white/[0.06] bg-ink-875/80 shadow-panel backdrop-blur-sm;
+    @apply rounded-2xl border border-white/[0.06] bg-ink-875/80 shadow-panel backdrop-blur-xs;
   }
 
   .surface-muted {
@@ -375,7 +374,7 @@
   }
 
   .help-markdown a {
-    @apply rounded-sm font-medium text-emerald-300 underline decoration-emerald-400/40 underline-offset-2 hover:text-emerald-200 hover:decoration-emerald-300;
+    @apply rounded-xs font-medium text-emerald-300 underline decoration-emerald-400/40 underline-offset-2 hover:text-emerald-200 hover:decoration-emerald-300;
   }
 
   .help-markdown ul {

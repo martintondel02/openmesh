@@ -196,7 +196,7 @@ export function Composer({ thread }: { thread: ActiveThread }) {
       onDrop={onDrop}
     >
       {dragActive ? (
-        <div className="pointer-events-none absolute inset-2 z-20 grid place-items-center rounded-xl border-2 border-dashed border-emerald-400/60 bg-emerald-400/[0.08] backdrop-blur-sm">
+        <div className="pointer-events-none absolute inset-2 z-20 grid place-items-center rounded-xl border-2 border-dashed border-emerald-400/60 bg-emerald-400/[0.08] backdrop-blur-xs">
           <div className="flex items-center gap-2 text-sm font-medium text-emerald-200">
             <ImagePlus className="h-4 w-4" aria-hidden="true" />
             Drop an image to compress and send

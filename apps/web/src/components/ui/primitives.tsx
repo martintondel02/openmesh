@@ -389,7 +389,7 @@ export function SegmentedControl<T extends string>({
             onClick={() => onChange(option.value)}
             className={cn(
               'focus-ring inline-flex items-center gap-1.5 rounded-[7px] px-2.5 py-1 text-xs font-medium transition-colors',
-              selected ? 'bg-white/[0.09] text-white shadow-sm' : 'text-slate-400 hover:text-slate-200',
+              selected ? 'bg-white/[0.09] text-white shadow-xs' : 'text-slate-400 hover:text-slate-200',
             )}
           >
             {Icon ? <Icon className="h-3.5 w-3.5" aria-hidden="true" /> : null}

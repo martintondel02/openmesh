@@ -1,15 +1,26 @@
 version: 2
 updates:
+  # Rust: only minor/patch updates are grouped automatically. Major versions touch the wire,
+  # crypto or FFI layers and get a dedicated migration task instead of a weekly mega-PR.
   - package-ecosystem: cargo
     directory: "/"
     schedule: { interval: weekly }
     open-pull-requests-limit: 5
     groups:
-      rust-deps: { patterns: ["*"] }
+      rust-minor-patch:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
   - package-ecosystem: npm
     directory: "/apps/web"
     schedule: { interval: weekly }
     open-pull-requests-limit: 5
+    groups:
+      npm-minor-patch:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
   - package-ecosystem: github-actions
     directory: "/"
     schedule: { interval: monthly }

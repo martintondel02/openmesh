@@ -191,7 +191,7 @@ export function Term({ term, className }: { term: string; className?: string }) 
         aria-describedby={anchor.open ? popoverId : undefined}
         onClick={toggle}
         className={cn(
-          'focus-ring cursor-help rounded-sm decoration-slate-500/70 decoration-dotted underline-offset-2 hover:text-slate-200 hover:decoration-emerald-400/70',
+          'focus-ring cursor-help rounded-xs decoration-slate-500/70 decoration-dotted underline-offset-2 hover:text-slate-200 hover:decoration-emerald-400/70',
           className,
         )}
       >

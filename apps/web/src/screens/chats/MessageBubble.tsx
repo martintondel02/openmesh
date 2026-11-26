@@ -461,7 +461,7 @@ export function MessageBubble({ message, peerName, showAvatar, showSender, resol
 
           <div
             className={cn(
-              'min-w-0 max-w-full rounded-2xl border px-3 py-2 text-[13.5px] leading-relaxed shadow-sm',
+              'min-w-0 max-w-full rounded-2xl border px-3 py-2 text-[13.5px] leading-relaxed shadow-xs',
               own
                 ? 'rounded-br-md border-emerald-300/15 bg-gradient-to-br from-emerald-400/[0.16] to-emerald-500/[0.09] text-slate-100'
                 : 'rounded-bl-md border-white/[0.06] bg-ink-800/85 text-slate-200',
@@ -559,7 +559,7 @@ export function MessageBubble({ message, peerName, showAvatar, showSender, resol
 export function DaySeparator({ label }: { label: string }) {
   return (
     <li className="sticky top-0 z-10 -mx-3 flex justify-center bg-ink-950 px-3 pb-1.5 pt-1 md:-mx-6">
-      <span className="rounded-full border border-white/[0.08] bg-ink-900/95 px-2.5 py-0.5 text-3xs font-medium uppercase tracking-[0.1em] text-slate-500 shadow-sm backdrop-blur">
+      <span className="rounded-full border border-white/[0.08] bg-ink-900/95 px-2.5 py-0.5 text-3xs font-medium uppercase tracking-[0.1em] text-slate-500 shadow-xs backdrop-blur">
         {label}
       </span>
     </li>

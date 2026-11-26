@@ -84,7 +84,7 @@ envelopes) and reject what makes life hard on a 240-byte MTU: global routing sta
 per message, and client stacks nobody wants to use. Details and trade-offs:
 [ADR-0001](docs/adr/0001-own-protocol-vs-reticulum.md), [research notes](docs/research/).
 
-## Feature status (v0.7.0)
+## Feature status (v0.7.1)
 
 | Area | Status |
 | --- | --- |
