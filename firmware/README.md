@@ -347,11 +347,12 @@ select it in `platformio.ini`, add the board to `apps/flasher/boards.json` and `
 > vectors (44 cases / 3 421 assertions) and the native PlatformIO env. The four hardware-target
 > PlatformIO builds need first-article board bring-up (`firmware/boards/pio/`,
 > `firmware/variants/`, SoftDevice linker script) and are marked best-effort in CI; see §9.
-## 8.1 First-article bring-up — Seeed T1000-E (2026-11-26)
+## 8.1 First-article bring-up — T1000-E and RAK4631 (2026-11-26/27)
 
-The T1000-E was the first physical board. It now compiles, flashes, boots and answers the USB
-companion link. Bring-up required these fixes (all in-tree, so `pio run -e t1000e` works from a
-clean PlatformIO install):
+The T1000-E was the first physical board; the RAK4631 WisBlock 4631 followed. Both now compile,
+flash, boot, answer the USB companion link and pass a two-node RF test in both directions on
+their BLE-compiled-out images (`env:t1000e_usb`, `env:rak4631_usb`). Bring-up required these fixes
+(all in-tree, so the board envs work from a clean PlatformIO install):
 
 | Area | Fix |
 | --- | --- |
@@ -360,32 +361,42 @@ clean PlatformIO install):
 | Framing | include `boards/*.cpp` in `build_src_filter`; `LED_BUILTIN` added to the variant headers |
 | Link | add `-Wl,--wrap=malloc/free/realloc/calloc` (required by Adafruit FreeRTOS `heap_3`), and pin `tool-adafruit-nrfutil` / `tool-bossac-nordicnrf52` for the upload target |
 | RadioLib 7 | nRF52 SPI pins via `SPI.setPins(miso, sck, mosi)` + `SPI.begin()`, and pass `SPIClass` by reference to `Module` |
-| Runtime | use `delay()` instead of direct RTC1/WFE from the scheduler loop (FreeRTOS/SoftDevice own the low-power clock domain) |
-| USB/BLE | **Known issue:** on this first article, bringing BLE up with USB attached intermittently re-enumerates CDC. BLE advertising itself works (verified with a scan-response name); the USB/BLE coexistence fix is still open |
+| RadioLib 7 RX | poll the radio IRQ flags (`getIrqFlags`/`getPacketLength`/`readData`/`clearIrqFlags`): `PhysicalLayer::available()` is the direct-receive buffer and is always 0 in LoRa packet mode, so the original receive path never read a frame |
+| LR1110 RF switch | the T1000-E sub-GHz antenna switch is driven by the LR1110's DIO5-DIO8; RadioLib `begin()` does not install the switch table, so the board-specific Meshtastic T1000-E table must be set via `setRfSwitchTable()` (see `src/hal/hal_radio.cpp`) |
+| RAK startup | **do not** add `-Wl,--defsym=__StackSize=...`: it changes the symbol the Adafruit startup stack-fill loop uses while the linker keeps `__StackLimit`, so the fill runs past the end of RAM and the chip faults before `setup()` (the former 16 KiB "fix" was the RAK blocker; the 2 KiB linker stack is ISR/SoftDevice-only) |
+| Runtime / sleep | `sleepMs()` calls `delay()` (TinyUSB CDC flush + `vTaskDelay`) instead of a busy loop, so the FreeRTOS tickless-idle low-power state is used; direct RTC1/WFE pokes remain forbidden (FreeRTOS/SoftDevice own the clock domain) |
+| Companion stack | the Adafruit loop task has a 4 KiB stack (1024 words); the companion chunk/SLIP/message buffers (≈7.7 KiB worst case) live in file-scope statics in `src/main.cpp`, not on that stack |
+| USB/BLE | **Known issue:** BLE-on images have unstable USB on both first articles. RAK4631 BLE advertising works but its USB CDC does not enumerate reliably; the T1000-E BLE-on image power-cycles this unit. The verified companion/RF images are the BLE-compiled-out envs; coexistence is still open |
 | RAM | 16 peers / 16 stored envelopes (the full 2048-entry dedup table is kept) to leave stack headroom next to S140 |
 | Diagnostics | `[env:t1000e_probe]` (`firmware/probe/main.cpp`) is a USB-CDC + LED first-article probe; `[om]` serial markers and short settle delays in `setup()` keep the boot path observable |
 
-Verified on hardware: build, UF2 and nrfutil flashing, boot, USB CDC enumeration, USB companion
-**Ping → Pong**, `radio=ok`, GPS UART init, and BLE advertising with a scan-response name.
+Verified on hardware 2026-11-27: build, UF2 (`0xADA52840`) and nrfutil flashing on both boards,
+boot, USB CDC enumeration, USB companion **Ping/Pong + HelloAck + Stats**, `radio=ok`, light sleep
+(uptime and companion stay live), and the two-node RF test
+([`tools/two_node_test.py`](tools/two_node_test.py)) passing **A->B and B->A** with advancing
+`tx_frames`/`airtime_ms`/`rx_frames` (EU868 / MEDIUM_FAST / 869525 kHz). BLE advertising works on
+the RAK4631 (host scan sees `RAK WisBlock 4631 solar`), but BLE-on images are not yet viable wired
+companion nodes.
 
-Current board-by-board state, diagnostics and the next steps are tracked in
+Current board-by-board state, root causes, diagnostics and next steps are tracked in
 [hardware bring-up status, 2026-11-27](../docs/hardware/bringup-status-2026-11-27.md). Not yet
-verified: RF peer TX/RX (needs a second node/field test), Android BLE companion handshake,
-USB/BLE coexistence (BLE-on-USB re-enumerates CDC), sleep current, battery calibration, and the
-other three boards. The first-article unit currently needs a charged battery before the next
-flash; a battery-drained board sits in its UF2 bootloader instead of starting the application.
+verified: BLE/USB coexistence (open, see §4 of that file), the BLE companion handshake
+(Android/host), sleep current and deep sleep, battery calibration, first-boot storage writes on
+BLE-off images, and the other two boards.
 
 ## 9. Known issues, limitations and spec gaps
 
 These are tracked for v0.1.x/M1 and are worth reading before trusting the firmware in the field.
 
-1. **Hardware builds and first article.** The host library/tests and the T1000-E target build
-   locally, and the T1000-E boots/flashes with the USB companion link verified (§8.1). The other
-   three board environments still need first-article build/boot checks; GNSS bauds, ADC
-   calibration, sleep current and RF peer TX/RX need hardware measurement.
+1. **Hardware builds and first article.** The host library/tests and the T1000-E and RAK4631
+   targets build locally; both boards boot, flash and pass the USB companion + two-node RF checks
+   on the BLE-compiled-out images (§8.1). BLE/USB coexistence is still open, and the remaining two
+   board environments (Seeed Solar Node P1, Heltec Wireless Tracker) still need first-article
+   build/boot checks; GNSS bauds, ADC calibration and sleep current need hardware measurement.
 2. **Deep sleep missing for trackers.** v0.1 keeps the receiver on continuously and uses light
-   sleep only; battery life is therefore days, not months. The power table reflects that. The
-   scheduler and `PowerPolicy` already emit low-power hints.
+   sleep only (nRF52: `delay()` + FreeRTOS tickless idle); battery life is therefore days, not
+   months. The power table reflects that. The scheduler and `PowerPolicy` already emit low-power
+   hints.
 3. **Battery/ADC calibration.** OCV tables come from vendor variants; divider multipliers and the
    3.0 V/3.3 V ADC references differ per board and need bench calibration (±5–10 % likely).
 4. **Spec gap — clear-text StoreOffer/StoreWant.** PROTOCOL.md §4.1 says clear bodies are only

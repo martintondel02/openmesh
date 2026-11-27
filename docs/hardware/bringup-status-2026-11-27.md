@@ -1,151 +1,239 @@
-# Hardware bring-up status — 2026-11-27
+# Hardware bring-up status — 2026-11-27 (updated end of session)
 
 **Boards:** Seeed SenseCAP T1000-E (nRF52840 + LR1110) and RAK WisBlock 4631 (nRF52840 + SX1262,
 WisBlock base board, UF2 bootloader 0.4.3 / S140 6.1.1).
 
-**Bottom line:** the T1000-E is verified working on the wired companion path. The RAK builds and
-its probe firmware runs, but the full OpenMesh application image is not started by the RAK
-bootloader yet. The two-node RF test harness is ready; it has **not** been run against two working
-OpenMesh nodes yet.
+**Bottom line:** both boards now boot the full OpenMesh application over USB, and the two-node RF
+test **passes in both directions** (`RF A->B PASS`, `RF B->A PASS`). The verified images are the
+BLE-compiled-out product builds `env:t1000e_usb` and `env:rak4631_usb`; both flash over USB without
+touching a button once an application is running. A real (light) sleep path is in place. BLE
+advertising was verified on the RAK4631, but BLE/USB coexistence is **not** solved: the BLE-on
+images have unstable USB endpoints on both boards, so they are not yet usable as wired companion
+nodes (see §5). Nothing here is release-ready and no tag was created.
 
 This file is the hand-off point for the next session. Keep it updated or replace it when the
-blocker is resolved.
+remaining issues are resolved.
 
 ---
 
-## 1. What is verified on hardware
+## 1. What is verified on hardware (final images)
 
-### T1000-E
+Final verified images (all fixes in this tree):
 
-Using `env:t1000e_usb` (full application, BLE compiled out, no-op scheduler sleep for this
-first-article test) and flashing **UF2 with family `0xADA52840`**:
+| Board | Env | Image | Flash path used |
+| --- | --- | --- | --- |
+| T1000-E | `t1000e_usb` | full app, BLE compiled out, light sleep | UF2 family `0xADA52840` copy **and** `pio run -t upload` (1200 bps touch + adafruit-nrfutil) |
+| RAK4631 | `rak4631_usb` | full app, BLE compiled out, light sleep | UF2 family `0xADA52840` copy; adafruit-nrfutil also works when the bootloader is in DFU mode |
 
-* Boots and prints `OpenMesh 0.7.1 on t1000e, node 5ea2230d7941aa78, radio ok`.
-* LR1110 init reports `radio ok`; frequency `869525 kHz`, profile `MEDIUM_FAST`, region `EU868`.
-* USB CDC companion protocol:
-  * `Ping {nonce: 0x12345678}` → `Pong {nonce: 0x12345678}`.
-  * `Hello` → `HelloAck {proto:1, fw_version:"0.7.1", node_id:5ea2230d7941aa78, max_frame:240,
-    caps:69, region:"EU868", profile:"MEDIUM_FAST"}`.
-  * `Stats` → entries including `tx_frames`, `rx_frames`, `airtime_ms`, `uptime_s`; uptime advances,
-    so the engine scheduler is ticking in this build.
-* USB enumeration is stable in this BLE-disabled build.
+* Both images print their boot banner and answer the USB companion protocol: `Ping -> Pong`,
+  `Hello -> HelloAck`, `Stats` with advancing `uptime_s`.
+* Node identities: T1000-E `5ea2230d7941aa78`, RAK4631 `685a7eda39a2ad9c`.
+* Both report `EU868` / `MEDIUM_FAST` / `869525 kHz`, TX power `15 dBm` (T1000-E LR1110 cap) and
+  `22 dBm` (RAK4631 SX1262 cap).
+* `Stats` deltas move in the expected direction under traffic: `tx_frames`, `airtime_ms`,
+  `rx_frames`, `relayed`, `dedup_drops` (see §2).
 
-### RAK4631
+### Two-node RF acceptance (2026-11-27, final run)
 
-* `env:rak4631_probe` (USB CDC + LED only) boots and prints `OPENMESH PROBE alive` over USB serial.
-* `env:rak4631_usb` (full application, BLE disabled) and `env:rak4631_early` (early stop at the top of
-  `setup()`) **do not start**: no USB CDC/serial, and the green LED only shows the bootloader's
-  2-blink pattern on reset (not the firmware's 3-blink pre-setup trace or solid setup marker).
-* The RAK UF2 bootloader is visible as a `RAK4631` drive after double-tapping reset and accepts
-  probe-sized images; it reports:
+Command (`pyserial` + `cbor2` needed, run with access to the serial group):
 
-  ```
-  UF2 Bootloader 0.4.3
-  Model: WisBlock RAK4631 Board
-  Board-ID: WisBlock-RAK4631-Board
-  SoftDevice: S140 6.1.1
-  ```
+```bash
+python3 firmware/tools/two_node_test.py /dev/ttyACM0 /dev/ttyACM1
+```
 
-* Build fixes already in the tree: RAK uses its board-provided S140 6.1.1 linker script (not the
-  T1000-E v7 script), GCC 10.3 toolchain, `framework-cmsis`, nrfutil/bossac packages, RadioLib 7
-  SX1262 API fix, and an attempted main-stack increase from 2 KB to 16 KB.
+Observed A = T1000-E, B = RAK4631:
+
+```
+/dev/ttyACM0 ping True
+/dev/ttyACM0 hello {... caps: 69  region: EU868 profile: MEDIUM_FAST}
+/dev/ttyACM0 stats {rx_frames: 1, tx_frames: 2, relayed: 1, airtime_ms: 989, uptime_s: 246, ...}
+/dev/ttyACM1 ping True
+/dev/ttyACM1 hello {... caps: 583 region: EU868 profile: MEDIUM_FAST}
+/dev/ttyACM1 stats {rx_frames: 1, tx_frames: 1, dedup_drops: 1, airtime_ms: 499, uptime_s: 28, ...}
+A->B inject 208064a0f5...00000002
+A tx delta 3 -> 2  airtime 989
+B rx delta 2 -> 1
+RF A->B PASS
+RF B->A PASS
+```
+
+Interpretation: each node had already received the other's boot announce (`rx_frames` 1 at the
+first Stats), then the injected golden OMP frame produced one additional `rx_frames` on the peer
+in each direction; `tx_frames` and `airtime_ms` advanced on the sender. This is end-to-end RF
+proof, not just "radio init returned ok".
 
 ---
 
-## 2. Critical discovery: UF2 family ID
+## 2. Root causes found and fixed in this session
 
-The T1000-E/RAK Adafruit-style bootloaders require UF2 family **`0xADA52840`**. Generating with
-`-f 0x100` (the default many tools suggest) produces files the bootloader silently ignores. This
-explained repeated "flashed but did not boot" cycles.
+### 2.1 RAK4631 application did not start — bad `--defsym` stack size (fixed)
 
-Correct conversion:
+`env:rak4631_solar` (and everything extending it) carried
+`-Wl,--defsym=__StackSize=0x4000`. The framework linker script `nrf52_common.ld` hard-assigns
+`__StackSize = 1024 * 2` and computes `__StackLimit = __StackTop - __StackSize`, so the defsym did
+not move the stack limit (the ELF keeps `__StackLimit = 0x2003f800`, `__StackTop = 0x20040000`) but
+it **did** change the value the Adafruit `Reset_Handler` stack-fill loop uses
+(`ldr r0,=__StackLimit; ldr r1,=__StackSize; str 0xADADADAD`). The fill therefore wrote `0x4000`
+bytes starting at `0x2003f800`, i.e. **14,336 bytes past the end of nRF52840 RAM**, and the chip
+faulted before `setup()` — no USB, no LED markers, bootloader LED pattern only.
+
+Evidence: a probe/trace image byte-identical to HEAD except for the defsym booted immediately
+(enumeration as `WisCore RAK4631 Board`), and the pre-session flash at `0x26000` was byte-identical
+to a fresh `env:rak4631_trace` build (so the UF2 write was never the problem). The defsym was
+removed and replaced with an explanatory comment in `firmware/platformio.ini`. Do not re-add a
+stack defsym: the 2 KiB linker stack is for ISRs/SoftDevice only; the application thread stack
+comes from the FreeRTOS heap.
+
+### 2.2 Companion replies hung the node — stack overflow in `companionSend()` (fixed)
+
+The Adafruit nRF52 core runs `setup()`/`loop()` on a FreeRTOS task created with
+`LOOP_STACK_SZ = 1024` **words = 4 KiB** (`cores/nRF5/main.cpp`). The old companion path put
+`uint8_t chunk[2048]`, `uint8_t slip[4096]` and a `CompanionMsg` (1,608 bytes) on that stack — about
+7.7 KiB worst case. The first companion reply (Pong) corrupted the task stack; the node stopped
+answering and its USB endpoint stopped being serviced (reproduced on the T1000-E: one successful
+Ping, then a hung node). The buffers now live in file-scope statics in `firmware/src/main.cpp`
+(the firmware main loop is single-threaded), which fixed the hang and is covered by the final
+two-node run above.
+
+### 2.3 No RF reception in either direction — two independent bugs (fixed)
+
+1. **RX polling used the wrong RadioLib 7 API.** `Radio::receive()` polled
+   `radio->available()`, which is the *direct-receive* ring-buffer length and is always 0 in LoRa
+   packet mode. No packet was ever read, on either chip. It now polls the radio IRQ flags
+   (`getIrqFlags()` / `getPacketLength()` / `readData()` / `clearIrqFlags()`), drops and re-arms on
+   CRC/header errors, and uses a static discard buffer for oversized frames.
+2. **T1000-E LR1110 antenna switch was never configured.** RadioLib's LR11x0 `begin()` does not
+   install the RF switch table; on the T1000-E the sub-GHz switch is driven by DIO5-DIO8. Without
+   it, `radio.begin()` still succeeds but TX/RX is routed into a disabled RF path. The
+   board-specific table from the Meshtastic T1000-E variant was added to
+   `firmware/src/hal/hal_radio.cpp` (verified byte-identical to upstream
+   `variants/nrf52840/tracker-t1000-e/rfswitch.h`).
+
+The two-node test before these fixes transmitted on both nodes but received 0 frames in both
+directions; after the fixes it passes both directions consistently (three consecutive runs).
+
+### 2.4 Sleep / power (partially implemented)
+
+The nRF52 `sleepMs()` was a no-op busy loop. It now calls `delay()`, which in this core flushes the
+TinyUSB CDC and then does `vTaskDelay()`; with `configUSE_TICKLESS_IDLE = 1` in the Adafruit
+FreeRTOS port this lets the CPU enter the tickless-idle low-power state instead of spinning. The
+scheduler loop still polls radio/companion every 4 ms (repeater role) or 20 ms (tracker role).
+Verified indirectly on hardware (engine uptime keeps advancing and the companion link stays
+responsive in the final two-node run); **current consumption was not measured**, and deep sleep
+(radio off between windows) is still not implemented — see §6.
+
+### 2.5 UF2 family (carried over from the previous hand-off)
+
+Both Adafruit-style bootloaders silently ignore UF2 files with the wrong family. Use:
 
 ```bash
 UF2=/tmp/pio-core/packages/framework-arduinoadafruitnrf52/tools/uf2conv/uf2conv.py
 python3 "$UF2" firmware/.pio/build/<env>/firmware.hex -c -f 0xADA52840 -o image.uf2
 ```
 
-Then copy `image.uf2` to the `T1000-E` / `RAK4631` drive and unmount. For a serial/DFU path, the
-PlatformIO upload (`pio run -e <env> -t upload --upload-port /dev/ttyACMx`) works when the
-application (or probe) is running and supports the 1200 bps touch; it does not work from the UF2
-bootloader itself.
+---
+
+## 3. Flashing notes (both boards, no buttons once an app runs)
+
+* **T1000-E**: double-clicking the side button exposes the `T1000-E` UF2 drive (~2 min window);
+  `pio run -e t1000e_usb -t upload --upload-port /dev/ttyACM0` also works from a running
+  application (1200 bps touch → bootloader → adafruit-nrfutil). The bootloader does *not* speak
+  adafruit-nrfutil while it sits in UF2/MSD mode, only in DFU mode.
+* **RAK4631**: double-tapping reset exposes the `RAK4631` drive. With a running application,
+  `pio run -e rak4631_usb -t upload --upload-port /dev/ttyACM1` works (touch + nrfutil). The
+  bootloader also accepts adafruit-nrfutil directly in its DFU-mode PID (`239a:002a`). Note the RAK
+  application takes ~15–20 s to enumerate USB after boot (`device descriptor read/64` timeout then
+  success), so wait before concluding it failed.
+* USB product strings: application = `T1000-E-BOOT` (T1000-E board JSON) / `WisCore RAK4631 Board`;
+  bootloader = `T1000-E-BOOT` (Seeed PID `2886:0057` UF2 mode) / `WisBlock RAK4631`.
 
 ---
 
-## 3. Current code state (working tree at hand-off)
+## 4. BLE / USB coexistence — OPEN (not solved)
 
-### Build environments
+The BLE-first init order was introduced because Adafruit's `InternalFS` uses SoftDevice flash
+SVCs (`sd_flash_*`) that are only valid once the SoftDevice is enabled; BLE-on builds now bring
+the SoftDevice up at the top of `setup()`. This did **not** fix USB coexistence:
+
+* **RAK4631, `env:rak4631_solar` (BLE on):** BLE advertising *works* — a host BlueZ scan saw
+  `RAK WisBlock 4631 solar` — but the USB CDC endpoint does not enumerate reliably (repeated
+  re-enumeration / descriptor read timeouts), so the wired companion link is unusable. The
+  Adafruit TinyUSB ↔ SoftDevice USB-event hand-off (`usb_softdevice_pre_enable/post_enable`,
+  `usb_softdevice_pre_enable()` disables nrfx_power USB event handling) is the prime suspect on
+  this older S140 6.1.1 bootloader; the framework/core versions were also checked and the
+  per-board SoftDevice API headers do match (RAK 6.1.1, T1000-E 7.3.0).
+* **T1000-E, `env:t1000e` (BLE on):** the USB companion is not stable; this unit reset every
+  ~2.5 s with `RESETREAS = 0x00000000` (power-on-reset semantics, not a software/watchdog cause),
+  which points at supply/brownout on this first-article unit (BLE + LR1110 TX peaks) rather than a
+  firmware crash. Needs a charged battery / bench supply and a current measurement to confirm.
+* **Pre-existing hazard to fix before shipping BLE-off images on blank hardware:** in BLE-off
+  builds the SoftDevice is never enabled, but `InternalFS` still routes flash writes through
+  `sd_flash_*` SVCs; the linked `SVC_Handler` is FreeRTOS's, so a first-boot identity/store write on
+  an erased board can fault. All verified runs above used boards that already had identity/storage,
+  so this path was not exercised. Either test it explicitly (erase → flash `*_usb` → reboot twice)
+  or make BLE-on images the shipping default once coexistence is solved.
+
+Until §4 is closed, the **verified** companion/RF images are `t1000e_usb` and `rak4631_usb`.
+
+---
+
+## 5. Build environments (diagnostics kept in-tree)
 
 | Env | Purpose | State |
 | --- | --- | --- |
-| `t1000e` | Product T1000-E with BLE | Builds; **BLE init with USB attached re-enumerates CDC**; currently not the verified image |
-| `t1000e_usb` | Full app, BLE off, no-op sleep | **Verified working on T1000-E** |
-| `t1000e_probe` | USB CDC + LED probe | Boots |
-| `rak4631_solar` | Product RAK with BLE | Builds |
-| `rak4631_usb` | Full app, BLE off | Builds; **does not start on hardware** |
-| `rak4631_early` | Early stop at top of setup | Builds; does not start |
-| `rak4631_trace` | Adds pre-setup LED trace | Builds; does not start (green = bootloader pattern) |
-| `rak4631_setupmark` | Setup-only marker, no constructor | Built; not conclusively flashed/tested |
-| `rak4631_probe` | USB CDC + LED probe | Boots |
+| `t1000e` | product T1000-E with BLE | builds; BLE advertising path exists; USB instability open (§4) |
+| `t1000e_usb` | full app, BLE compiled out, light sleep | **verified: companion + RF, two-node PASS** |
+| `t1000e_probe` | USB CDC + LED probe | boots |
+| `t1000e_bigprobe` | probe + 300 KiB flash payload (bootloader size test) | builds; superseded by the §2.1 root cause |
+| `rak4631_solar` | product RAK with BLE | builds; BLE advertises, USB unusable (§4) |
+| `rak4631_usb` | full app, BLE compiled out, light sleep | **verified: companion + RF, two-node PASS** |
+| `rak4631_early` / `rak4631_trace` / `rak4631_setupmark` | startup diagnostics | obsolete after §2.1 but kept |
+| `rak4631_probe` | USB CDC + LED probe | boots |
+| `rak4631_bigprobe` | probe + 300 KiB flash payload | builds; not needed after §2.1 |
+| `native`, `native_vectors` | host unit/integration tests + golden-vector replay | pass |
 
-### Diagnostic changes currently in the working tree
-
-* `firmware/src/hal/hal_platform.cpp`: nRF52 `sleepMs()` is a no-op for first-article testing.
-  The direct RTC1/WFE implementation conflicts with FreeRTOS/SoftDevice (`millis()` freezes /
-  engine stops ticking); `delay()` was also implicated in a startup regression. **Power/sleep is
-  a follow-up, not production-ready.**
-* `firmware/src/main.cpp`: init serial markers and short settle delays, `OM_EARLY_STOP` guard,
-  `OM_BOOT_TRACE` pre-setup LED constructor.
-* `firmware/src/hal/hal_radio.cpp`: RadioLib 7 removed `SX126x::setDcDc()`; the call is omitted (LDO
-  default) until a public DC-DC API/power fix is added.
-* `firmware/platformio.ini`: RAK toolchain/linker/stack fixes and diagnostic envs listed above.
-* `firmware/tools/two_node_test.py`: two-node companion/RF harness (needs `pyserial` + `cbor2`).
-
-Host checks at hand-off: `51` firmware test cases / `3,639` assertions pass; `t1000e` and
-`t1000e_usb` build locally.
+Host checks after this session's changes: `51` firmware test cases / `3,639` assertions pass,
+including golden-vector replay (run with `firmware/ci/host_tests.sh`; the repo docs checkers are
+listed in §6).
 
 ---
 
-## 4. Two-node test plan (ready to run once RAK starts)
+## 6. Remaining work, in order
 
-1. Flash T1000-E with `t1000e_usb` and RAK with `rak4631_usb` using the correct UF2 family.
-2. Both default to `EU868` / `MEDIUM_FAST`; place them a few metres apart with antennas attached.
-3. Identify the ports (order can change; use `udevadm` serial or the HelloAck node id):
+1. **BLE/USB coexistence (§4).** Decide the target: (a) fix Adafruit TinyUSB + SoftDevice USB
+   hand-off on S140 6.1.1 (RAK bootloader 0.4.3) and power-cycle behaviour on T1000-E; or
+   (b) upgrade the RAK bootloader/SoftDevice to a newer S140 and re-test; or (c) ship BLE-off
+   images for wired companion use and treat BLE as a separate transport build. Measure current
+   with a charged battery/bench supply.
+2. **Flash-write hazard on BLE-off images** (§4 last bullet): erase → flash → reboot-twice test, or
+   enable the SoftDevice in BLE-off builds (lightweight "SD for flash + USB, BLE closed" mode).
+3. **Deep sleep / power budget.** Keep the receiver on continuously today; implement radio
+   RX windows and measure current. The scheduler and `PowerPolicy` already emit low-power hints.
+   Battery/ADC calibration and GNSS date/time remain as before (§9 in `firmware/README.md`).
+4. **Other boards** (Seeed Solar Node P1, Heltec Wireless Tracker) still need first-article
+   build/boot checks.
+5. Android BLE companion handshake and the BLE NUS companion path on nRF52.
 
-   ```bash
-   python3 firmware/tools/two_node_test.py /dev/ttyACM0 /dev/ttyACM1
-   ```
-
-4. The harness pings both, prints Hello/Stats, injects a golden OMP frame from node A, then checks
-   node B's `rx_frames` delta, and repeats B→A. `RF A->B PASS` / `RF B->A PASS` is the acceptance
-   criterion.
-5. If RX fails, check antennas, region/profile (`Stats.frequency_khz`, HelloAck profile), and
-   whether the transmitter's `tx_frames`/`airtime_ms` advanced.
+Do not release or tag until the BLE/USB question is settled and the user has reviewed the
+bring-up diff.
 
 ---
 
-## 5. Next-session debugging steps (RAK application startup)
+## 7. Repro / evidence
 
-The key open question: **why does the RAK bootloader start the probe image but not the full
-application image?** Recommended order:
+Environment used:
 
-1. **Image-size/validation test:** build a probe image with a large flash-resident dummy payload
-   (e.g. 250–350 KB) and flash it via UF2. If it boots, the bootloader is not rejecting on size;
-   if it fails, find the RAK 0.4.3 bootloader's maximum application size and reduce the image or
-   update the bootloader.
-2. **Minimal-full-app test:** make `setup()` only call `Serial.begin()` + print + halt while keeping
-   all globals (`OM_EARLY_STOP` already does this after Serial). If that does not start, the issue
-   is before setup: static constructors, linker/RAM map, or bootloader hand-off.
-3. **Static-constructor audit:** compare the RAK `.init_array`/`.data`/`.bss` map against the
-   T1000-E; test disabling `InternalFS`/storage globals, then Bluefruit globals, one at a time.
-4. **Bootloader/SoftDevice check:** confirm the RAK application is linked for S140 6.1.1 and starts
-   at `0x26000`; verify with `arm-none-eabi-nm/readelf` and the linker map. The RAK currently uses
-   the board-provided `nrf52840_s140_v6.ld`.
-5. **Fallback:** use a J-Link/SWD or RAK's nrfjprog path to flash and inspect the fault, rather than
-   guessing through UF2 cycles.
-6. Once RAK starts: run the two-node test, then revisit BLE/USB coexistence on both boards and the
-   sleep/power implementation before calling the hardware support production-ready.
+```bash
+export PATH=/tmp/pioenv/bin:$PATH
+export PLATFORMIO_CORE_DIR=/tmp/pio-core
+pio run -d firmware -e t1000e_usb
+pio run -d firmware -e rak4631_usb
+pio run -d firmware -e <env> -t upload --upload-port /dev/ttyACMx   # from a running app
+python3 firmware/tools/two_node_test.py /dev/ttyACM0 /dev/ttyACM1   # needs pyserial + cbor2
+cd firmware && ./ci/host_tests.sh
+python3 scripts/check_docs.py && python3 scripts/check_help.py && python3 scripts/check_openapi.py
+```
 
-Hardware at hand-off: RAK4631 UF2 drive visible (`/dev/disk/by-label/RAK4631`); RAK running/in
-bootloader; T1000-E enumerated in its bootloader (`239a:8029`, `/dev/ttyACM0`). If the ports move,
-re-enumerate with `lsusb` / `ls /dev/ttyACM*`.
+Serial access needs the `dialout` group (`sg dialout -c '...'`). The two-node harness exits 0 only
+when both RF directions pass. Evidence logs from the session (serial captures, RF pass log) are
+kept outside the repo under `/tmp/bringup-evidence/`; they are not committed.
