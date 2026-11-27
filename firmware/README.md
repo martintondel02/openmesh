@@ -367,15 +367,17 @@ their BLE-compiled-out images (`env:t1000e_usb`, `env:rak4631_usb`). Bring-up re
 | Runtime / sleep | `sleepMs()` calls `delay()` (TinyUSB CDC flush + `vTaskDelay`) instead of a busy loop, so the FreeRTOS tickless-idle low-power state is used; direct RTC1/WFE pokes remain forbidden (FreeRTOS/SoftDevice own the clock domain) |
 | Companion stack | the Adafruit loop task has a 4 KiB stack (1024 words); the companion chunk/SLIP/message buffers (≈7.7 KiB worst case) live in file-scope statics in `src/main.cpp`, not on that stack |
 | SoftDevice for flash | with BLE compiled out the SoftDevice is still enabled (`OM_ENABLE_SOFTDEVICE=1` in the `*_usb` envs) because Adafruit `InternalFS` writes use `sd_flash_*` SVCs; `randomBytes()` then uses the SoftDevice RNG application API instead of the SD-owned `NRF_RNG` peripheral |
-| USB/BLE | **Known issue:** BLE-on images have unstable USB on both first articles. RAK4631 BLE advertising works but its USB CDC does not enumerate reliably; the T1000-E BLE-on image power-cycles this unit. The verified companion/RF images keep the SoftDevice on with BLE closed (one expected USB re-enumeration at boot from the SD hand-off, stable afterwards); coexistence is still open |
+| USB/BLE | BLE + USB coexistence is fixed by ordering: enable the SoftDevice in `setup()` and start BLE advertising from `loop()` ~5 s after boot. Starting advertising during setup overlapped the TinyUSB/SoftDevice hand-off and radio bring-up and destabilised USB on both first articles. Verified: stable USB companion + host-visible advertising + RF two-node PASS on `t1000e` and `rak4631_solar` |
 | RAM | 16 peers / 16 stored envelopes (the full 2048-entry dedup table is kept) to leave stack headroom next to S140 |
 | Diagnostics | `[env:t1000e_probe]` (`firmware/probe/main.cpp`) is a USB-CDC + LED first-article probe; `[om]` serial markers and short settle delays in `setup()` keep the boot path observable |
 
 Verified on hardware 2026-11-27: build, UF2 (`0xADA52840`) and nrfutil flashing on both boards,
 boot, USB CDC enumeration, USB companion **Ping/Pong + HelloAck + Stats**, `radio=ok`, light sleep
-(uptime and companion stay live), the InternalFS write path used by first-boot identity/store
-writes (`env:t1000e_fswrite` wrote and read back a file with the SoftDevice enabled), and the
-two-node RF test
+(uptime and companion stay live), BLE + USB coexistence on the product images (0 USB disconnects
+after boot, host scans see `Seeed SenseCAP T1000-E` / `RAK WisBlock 4631 solar`), the InternalFS
+write path used by first-boot identity/store writes (`env:t1000e_fswrite` wrote and read back a
+file), a full blank-board first boot with a regenerated persistent identity (`env:t1000e_fsformat`
+erase → `env:t1000e` boot), and the two-node RF test
 ([`tools/two_node_test.py`](tools/two_node_test.py)) passing **A->B and B->A** with advancing
 `tx_frames`/`airtime_ms`/`rx_frames` (EU868 / MEDIUM_FAST / 869525 kHz). BLE advertising works on
 the RAK4631 (host scan sees `RAK WisBlock 4631 solar`), but BLE-on images are not yet viable wired
@@ -383,18 +385,18 @@ companion nodes.
 
 Current board-by-board state, root causes, diagnostics and next steps are tracked in
 [hardware bring-up status, 2026-11-27](../docs/hardware/bringup-status-2026-11-27.md). Not yet
-verified: BLE/USB coexistence (open, see §4 of that file), the BLE companion handshake
-(Android/host), sleep current and deep sleep, battery calibration, and the other two boards.
+verified: a BLE companion **session** (NUS Ping/Pong from a host; only advertising is proven),
+sleep current and deep sleep, battery calibration, and the other two boards.
 
 ## 9. Known issues, limitations and spec gaps
 
 These are tracked for v0.1.x/M1 and are worth reading before trusting the firmware in the field.
 
 1. **Hardware builds and first article.** The host library/tests and the T1000-E and RAK4631
-   targets build locally; both boards boot, flash and pass the USB companion + two-node RF checks
-   on the BLE-compiled-out images (§8.1). BLE/USB coexistence is still open, and the remaining two
-   board environments (Seeed Solar Node P1, Heltec Wireless Tracker) still need first-article
-   build/boot checks; GNSS bauds, ADC calibration and sleep current need hardware measurement.
+   targets build locally; both boards boot, flash and pass the USB companion + BLE + two-node RF
+   checks on their product images (§8.1). The remaining two board environments (Seeed Solar Node
+   P1, Heltec Wireless Tracker) still need first-article build/boot checks; the BLE NUS companion
+   session, GNSS bauds, ADC calibration and sleep current need hardware measurement.
 2. **Deep sleep missing for trackers.** v0.1 keeps the receiver on continuously and uses light
    sleep only (nRF52: `delay()` + FreeRTOS tickless idle); battery life is therefore days, not
    months. The power table reflects that. The scheduler and `PowerPolicy` already emit low-power

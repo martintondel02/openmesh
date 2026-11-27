@@ -3,13 +3,15 @@
 **Boards:** Seeed SenseCAP T1000-E (nRF52840 + LR1110) and RAK WisBlock 4631 (nRF52840 + SX1262,
 WisBlock base board, UF2 bootloader 0.4.3 / S140 6.1.1).
 
-**Bottom line:** both boards now boot the full OpenMesh application over USB, and the two-node RF
-test **passes in both directions** (`RF A->B PASS`, `RF B->A PASS`). The verified images are the
-BLE-compiled-out product builds `env:t1000e_usb` and `env:rak4631_usb`; both flash over USB without
-touching a button once an application is running. A real (light) sleep path is in place. BLE
-advertising was verified on the RAK4631, but BLE/USB coexistence is **not** solved: the BLE-on
-images have unstable USB endpoints on both boards, so they are not yet usable as wired companion
-nodes (see §5). Nothing here is release-ready and no tag was created.
+**Bottom line:** both boards run the full OpenMesh **product BLE images** (`env:t1000e`,
+`env:rak4631_solar`) with **USB and BLE coexisting**: stable USB companion (`Ping/Hello/Stats`),
+BLE advertising visible from a host scan, and the two-node RF test **passing in both directions**
+(`RF A->B PASS`, `RF B->A PASS`). The coexistence fix is ordering: the SoftDevice is enabled during
+`setup()` but BLE advertising starts ~5 s after boot (§4). A real (light) sleep path is in place,
+and the blank-board first boot (no identity/store) was verified end-to-end, including identity
+creation through the SoftDevice flash path (§2.6). Both boards flash over USB without touching a
+button once an application is running. Nothing here is release-ready, no tag was created, and deep
+sleep / sleep current remain unmeasured.
 
 This file is the hand-off point for the next session. Keep it updated or replace it when the
 remaining issues are resolved.
@@ -22,16 +24,22 @@ Final verified images (all fixes in this tree):
 
 | Board | Env | Image | Flash path used |
 | --- | --- | --- | --- |
-| T1000-E | `t1000e_usb` | full app, BLE closed, SoftDevice enabled (for flash), light sleep | UF2 family `0xADA52840` copy **and** `pio run -t upload` (1200 bps touch + adafruit-nrfutil) |
-| RAK4631 | `rak4631_usb` | full app, BLE closed, SoftDevice enabled (for flash), light sleep | UF2 family `0xADA52840` copy; adafruit-nrfutil also works when the bootloader is in DFU mode |
+| T1000-E | `t1000e` | **product image**: full app, SoftDevice on, BLE advertising ~5 s after boot, light sleep | UF2 family `0xADA52840` copy **and** `pio run -t upload` (1200 bps touch + adafruit-nrfutil) |
+| RAK4631 | `rak4631_solar` | **product image**: full app, SoftDevice on, BLE advertising ~5 s after boot, light sleep | UF2 family `0xADA52840` copy; adafruit-nrfutil also works when the bootloader is in DFU mode |
+| both | `t1000e_usb` / `rak4631_usb` | BLE-closed variants (SoftDevice on for flash, no advertising) — useful for wired-only bring-up | same as above |
 
 * Both images print their boot banner and answer the USB companion protocol: `Ping -> Pong`,
   `Hello -> HelloAck`, `Stats` with advancing `uptime_s`.
-* Node identities: T1000-E `5ea2230d7941aa78`, RAK4631 `685a7eda39a2ad9c`.
+* Node identities: T1000-E `7fe558cfc94d9c60` (regenerated when the InternalFS region was erased for
+  the blank-board first-boot test in §2.6), RAK4631 `685a7eda39a2ad9c`.
 * Both report `EU868` / `MEDIUM_FAST` / `869525 kHz`, TX power `15 dBm` (T1000-E LR1110 cap) and
   `22 dBm` (RAK4631 SX1262 cap).
 * `Stats` deltas move in the expected direction under traffic: `tx_frames`, `airtime_ms`,
   `rx_frames`, `relayed`, `dedup_drops` (see §2).
+* BLE + USB coexistence (product images): host BlueZ scans see `Seeed SenseCAP T1000-E` and
+  `RAK WisBlock 4631 solar`; 0 USB disconnects after boot on both boards while advertising, and the
+  USB companion `caps` include the BLE capability (101 / 615); two-node RF still passes with the
+  BLE images loaded (§4).
 
 ### Two-node RF acceptance (2026-11-27, final run)
 
@@ -149,8 +157,21 @@ Verified on hardware 2026-11-27:
   extra USB re-enumeration during boot is expected), then stay enumerated: 0 USB disconnects after
   boot while running the two-node test, and the companion link + RF remain healthy.
 
-A fresh board (erased identity/store) was not physically available to test the full first-boot
-path end to end, but the write mechanism it depends on is now exercised and working.
+The full blank-board path was then exercised end to end on the T1000-E (2026-11-27):
+
+1. `env:t1000e_fsformat` (diagnostic InternalFS format probe) erased and reformatted the InternalFS
+   region: `FSPROBE stage=3 msg=formatted`.
+2. Flashing `env:t1000e` booted normally, found no seed, generated a **new node identity**
+   (`7fe558cfc94d9c60`, replacing `5ea2230d7941aa78`), saved it through the SoftDevice flash path,
+   and answered the companion link.
+3. A device-initiated reset (companion `Reset` command) rebooted the node; the identity persisted
+   and the companion link came back. The reset handler now uses `sd_nvic_SystemReset()` while the
+   SoftDevice is enabled (Nordic's supported path) instead of a plain `NVIC_SystemReset()`; device-
+   initiated resets can renumber the `/dev/ttyACM*` node, so ports must be re-detected after one.
+4. The two-node RF test passed again with the new identity.
+
+Also verified with the same images: `env:t1000e_fswrite` wrote and read back a file
+(`FSPROBE stage=5 msg=read=19 data=fsprobe-0123456789`).
 
 ---
 
@@ -170,41 +191,51 @@ path end to end, but the write mechanism it depends on is now exercised and work
 
 ---
 
-## 4. BLE / USB coexistence — OPEN (not solved)
+## 4. BLE / USB coexistence — SOLVED by advertising after boot (verified both boards)
 
-The BLE-first init order was introduced because Adafruit's `InternalFS` uses SoftDevice flash
-SVCs (`sd_flash_*`) that are only valid once the SoftDevice is enabled; BLE-on builds now bring
-the SoftDevice up at the top of `setup()`. This did **not** fix USB coexistence:
+**Symptom (earlier in the session):** BLE-on images were unusable as wired companion nodes. The
+T1000-E power-on-reset every ~2.5 s (`RESETREAS = 0x00000000`, i.e. supply/power-on semantics, not
+a software/watchdog cause), and the RAK4631's USB CDC re-enumerated or failed descriptor reads while
+its BLE advertising worked.
 
-* **RAK4631, `env:rak4631_solar` (BLE on):** BLE advertising *works* — a host BlueZ scan saw
-  `RAK WisBlock 4631 solar` — but the USB CDC endpoint does not enumerate reliably (repeated
-  re-enumeration / descriptor read timeouts), so the wired companion link is unusable. The
-  Adafruit TinyUSB ↔ SoftDevice USB-event hand-off (`usb_softdevice_pre_enable/post_enable`,
-  `usb_softdevice_pre_enable()` disables nrfx_power USB event handling) is the prime suspect on
-  this older S140 6.1.1 bootloader; the framework/core versions were also checked and the
-  per-board SoftDevice API headers do match (RAK 6.1.1, T1000-E 7.3.0).
-* **T1000-E, `env:t1000e` (BLE on):** the USB companion is not stable; this unit reset every
-  ~2.5 s with `RESETREAS = 0x00000000` (power-on-reset semantics, not a software/watchdog cause),
-  which points at supply/brownout on this first-article unit (BLE + LR1110 TX peaks) rather than a
-  firmware crash. Needs a charged battery / bench supply and a current measurement to confirm.
-* **Resolved in the verified images:** the flash-write hazard that came from running BLE-off images
-  with the SoftDevice disabled is fixed by `OM_ENABLE_SOFTDEVICE=1` (see §2.6). What remains open is
-  only the BLE-on USB instability above.
+**Root cause / fix:** starting BLE advertising *during* `setup()` overlaps the TinyUSB ↔ SoftDevice
+hand-off and the radio bring-up (LR1110/SX1262 init and the first announce transmission), and that
+combination destabilises the USB/power path on both first articles. The firmware now:
 
-Until §4 is closed, the **verified** companion/RF images are `t1000e_usb` and `rak4631_usb`.
+* enables the SoftDevice at the top of `setup()` (`hal::beginSoftDevice()`, no BLE yet, BLE
+  transport configured but not advertising), and
+* starts BLE advertising from `loop()` once ~5 s have passed (`g_ble.begin(name)` on the first loop
+  iteration after that threshold).
 
----
+The SoftDevice-first ordering is also required for `InternalFS` flash writes (`sd_flash_*` SVCs),
+see §2.6. The BLE-first/`OM_ENABLE_SOFTDEVICE` architecture from earlier in the session is retained.
+
+**Verified on hardware 2026-11-27 with the product images:**
+
+| Check | T1000-E (`t1000e`) | RAK4631 (`rak4631_solar`) |
+| --- | --- | --- |
+| USB disconnects after boot | 0 | 0 |
+| USB companion Ping/Hello/Stats | PASS (`caps` 101, includes BLE) | PASS (`caps` 615, includes BLE) |
+| BLE advertising seen by host BlueZ | `Seeed SenseCAP T1000-E` | `RAK WisBlock 4631 solar` |
+| Two-node RF test | **PASS both directions** | **PASS both directions** |
+
+**Consequences for the earlier bootloader question:** no RAK bootloader/SoftDevice upgrade is
+needed for coexistence, and none was attempted — **no SWD/J-Link probe was connected**, so flashing
+a bootloader/SD would have been unrecoverable-if-wrong; the older S140 6.1.1 works with the
+advertising-after-boot ordering. What is still not verified is a BLE **companion** session
+(NUS write/read from a phone/host) — only advertising is proven; the USB companion is proven.
 
 ## 5. Build environments (diagnostics kept in-tree)
 
 | Env | Purpose | State |
 | --- | --- | --- |
-| `t1000e` | product T1000-E with BLE | builds; BLE advertising path exists; USB instability open (§4) |
+| `t1000e` | product T1000-E with BLE | **verified: BLE + USB coexist, advertising, companion, RF two-node PASS** |
 | `t1000e_usb` | full app, BLE closed, SoftDevice on, light sleep | **verified: companion + RF, two-node PASS** |
 | `t1000e_probe` | USB CDC + LED probe | boots |
 | `t1000e_fswrite` | InternalFS write probe (SoftDevice on, BLE closed) | **verified: writes and reads back a file** |
+| `t1000e_fsformat` | InternalFS erase/reformat probe (blank-board test) | **verified: erased identity/store; blank-board first boot then verified** |
 | `t1000e_bigprobe` | probe + 300 KiB flash payload (bootloader size test) | builds; superseded by the §2.1 root cause |
-| `rak4631_solar` | product RAK with BLE | builds; BLE advertises, USB unusable (§4) |
+| `rak4631_solar` | product RAK with BLE | **verified: BLE + USB coexist, advertising, companion, RF two-node PASS** |
 | `rak4631_usb` | full app, BLE closed, SoftDevice on, light sleep | **verified: companion + RF, two-node PASS** |
 | `rak4631_early` / `rak4631_trace` / `rak4631_setupmark` | startup diagnostics | obsolete after §2.1 but kept |
 | `rak4631_probe` | USB CDC + LED probe | boots |
@@ -219,23 +250,19 @@ listed in §6).
 
 ## 6. Remaining work, in order
 
-1. **BLE/USB coexistence (§4).** Decide the target: (a) fix Adafruit TinyUSB + SoftDevice USB
-   hand-off on S140 6.1.1 (RAK bootloader 0.4.3) and the power/advertising behaviour on T1000-E; or
-   (b) upgrade the RAK bootloader/SoftDevice to a newer S140 and re-test; or (c) ship the verified
-   BLE-closed images for wired companion use and treat BLE as a separate transport build. Measure
-   current with a charged battery/bench supply. Hint from this session: enabling the SoftDevice
-   with BLE closed is stable on both boards (USB stays up after the one-time boot hand-off), so
-   the T1000-E BLE-on resets are likely drawn by BLE advertising/radio activity rather than by the
-   hand-off itself; starting BLE advertising *after* boot (SoftDevice already enabled) is worth
-   testing as the next coexistence experiment.
-2. **Deep sleep / power budget.** Keep the receiver on continuously today; implement radio
-   RX windows and measure current. The scheduler and `PowerPolicy` already emit low-power hints.
+1. **BLE companion transport (NUS).** Advertising is verified on both boards and the USB companion
+   is verified end to end, but no BLE **session** has been exercised yet: connect to the NUS, write a
+   Ping, receive a Pong. Then run the two-node harness over BLE on one side.
+2. **Deep sleep / power budget.** The receiver stays on continuously today; implement radio RX
+   windows and measure current (light sleep via `delay()` + FreeRTOS tickless idle is in place).
    Battery/ADC calibration and GNSS date/time remain as before (§9 in `firmware/README.md`).
 3. **Other boards** (Seeed Solar Node P1, Heltec Wireless Tracker) still need first-article
    build/boot checks.
-4. Android BLE companion handshake and the BLE NUS companion path on nRF52.
+4. **Optional:** the coexistence fix should be stress-tested across long runs and repeated
+   advertising/connection cycles; also consider whether a shorter post-boot delay than 5 s is still
+   stable.
 
-Do not release or tag until the BLE/USB question is settled and the user has reviewed the
+Do not release or tag until the remaining power/current work is done and the user has reviewed the
 bring-up diff.
 
 ---
