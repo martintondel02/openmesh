@@ -17,6 +17,10 @@ using RadioLibRadio = LR1110;
 using RadioLibRadio = SX1262;
 #endif
 
+// Oversized-frame discard buffer: receive() runs on the 4 KiB loop task stack, so this must not be
+// a local. The firmware main loop is single-threaded.
+uint8_t g_radio_discard[255];
+
 bool Radio::begin(const board::Board& board, const LoraProfile& profile, const Region& region,
                   int8_t tx_power_dbm, uint32_t frequency_override_khz) {
     board_ = &board;
@@ -73,7 +77,28 @@ bool Radio::applyConfig(const LoraProfile& profile, const Region& region, int8_t
     // RadioLib 7 made the old SX126x::setDcDc() regulator switch protected; the radio defaults to
     // LDO mode, which is functional for first-article tests. DC-DC mode is a power follow-up.
 #else
-    // LR1110: the internal switch is configured by begin(); DIO3 supplies the TCXO voltage.
+    // LR1110: on the T1000-E the sub-GHz antenna switch is driven by the radio's own DIO5-DIO8
+    // pins. RadioLib's LR11x0 API has setRfSwitchTable()/setDioAsRfSwitch(), but begin() does not
+    // configure the switch, so without this call radio.begin() still succeeds while every TX/RX is
+    // routed into a disabled RF path. Verified on hardware 2026-11-27: the two-node RF test saw
+    // zero received frames in both directions until this table was added. Table source: Meshtastic
+    // T1000-E variant (variants/nrf52840/tracker-t1000-e/rfswitch.h), same wiring as the board
+    // pin map in boards/t1000e.cpp.
+    static const uint32_t rfswitch_pins[Module::RFSWITCH_MAX_PINS] = {
+        RADIOLIB_LR11X0_DIO5, RADIOLIB_LR11X0_DIO6, RADIOLIB_LR11X0_DIO7, RADIOLIB_LR11X0_DIO8,
+        RADIOLIB_NC};
+    static const Module::RfSwitchMode_t rfswitch_table[] = {
+        // mode                DIO5  DIO6  DIO7  DIO8
+        {LR11x0::MODE_STBY, {LOW, LOW, LOW, LOW}},
+        {LR11x0::MODE_RX, {HIGH, LOW, LOW, HIGH}},
+        {LR11x0::MODE_TX, {HIGH, HIGH, LOW, HIGH}},
+        {LR11x0::MODE_TX_HP, {LOW, HIGH, LOW, HIGH}},
+        {LR11x0::MODE_TX_HF, {LOW, LOW, LOW, LOW}},
+        {LR11x0::MODE_GNSS, {LOW, LOW, HIGH, LOW}},
+        {LR11x0::MODE_WIFI, {LOW, LOW, LOW, LOW}},
+        END_OF_MODE_TABLE,
+    };
+    radio->setRfSwitchTable(rfswitch_pins, rfswitch_table);
     (void)board_->radio.dio2_as_rf_switch;
 #endif
     radio->setOutputPower(power);
@@ -99,23 +124,47 @@ bool Radio::transmit(const uint8_t* data, size_t len) {
 int Radio::receive(uint8_t* buffer, size_t capacity, int16_t& rssi, int16_t& snr) {
     auto* radio = static_cast<RadioLibRadio*>(radio_);
     if (radio == nullptr) return -1;
-    const size_t available = radio->available();
-    if (available == 0) return 0;
-    if (available > capacity) {
-        // Oversized packet for the OMP MTU: read and discard.
-        uint8_t discard[256];
-        radio->readData(discard, sizeof(discard));
+    // RadioLib 7's PhysicalLayer::available() reports the direct-receive ring buffer and is always
+    // 0 in LoRa packet mode, so polling it meant no frame was ever read (this was the second,
+    // independent reason the first two-node RF test saw rx_frames stay at 0). Poll the radio IRQ
+    // flags instead; readData() validates CRC, copies the packet and clears the flags.
+#if defined(OM_RADIO_LR1110)
+    constexpr uint32_t kRxDone = RADIOLIB_LR11X0_IRQ_RX_DONE;
+    constexpr uint32_t kRxError =
+        RADIOLIB_LR11X0_IRQ_CRC_ERR | RADIOLIB_LR11X0_IRQ_TIMEOUT | RADIOLIB_LR11X0_IRQ_HEADER_ERR;
+    constexpr uint32_t kIrqAll = RADIOLIB_LR11X0_IRQ_ALL;
+#else
+    constexpr uint16_t kRxDone = RADIOLIB_SX126X_IRQ_RX_DONE;
+    constexpr uint16_t kRxError =
+        RADIOLIB_SX126X_IRQ_CRC_ERR | RADIOLIB_SX126X_IRQ_TIMEOUT | RADIOLIB_SX126X_IRQ_HEADER_ERR;
+    constexpr uint16_t kIrqAll = RADIOLIB_SX126X_IRQ_ALL;
+#endif
+    const uint32_t irq = radio->getIrqFlags();
+    if ((irq & kRxDone) == 0) {
+        if ((irq & kRxError) != 0) {
+            // Drop a corrupted/timed-out reception and re-arm so the receiver cannot wedge.
+            radio->clearIrqFlags(kIrqAll);
+            startReceive();
+            return -1;
+        }
+        return 0;
+    }
+    const size_t length = radio->getPacketLength();
+    if (length == 0 || length > capacity) {
+        // Oversized (or unexpected) packet for the OMP MTU: read and discard.
+        const size_t dropped = radio->readData(g_radio_discard, sizeof(g_radio_discard));
+        (void)dropped;
         startReceive();
         return -1;
     }
-    const int16_t state = radio->readData(buffer, available);
+    const int16_t state = radio->readData(buffer, capacity);
     last_rssi_ = (int16_t)radio->getRSSI();
     last_snr_ = (int16_t)radio->getSNR();
     rssi = last_rssi_;
     snr = last_snr_;
     startReceive();
     if (state != RADIOLIB_ERR_NONE) return -1;
-    return (int)available;
+    return (int)length;
 }
 
 void Radio::startReceive() {

@@ -51,10 +51,13 @@ void randomBytes(void* ctx, uint8_t* out, size_t len) {
 }
 
 void sleepMs(uint32_t ms) {
-    // First-article: free-running scheduler loop. Neither direct RTC1/WFE (conflicts with
-    // FreeRTOS/SoftDevice and breaks millis) nor delay() is safe on the current T1000-E/RAK core
-    // without deeper RTOS integration. USB/radio/companion remain responsive; power is a follow-up.
-    (void)ms;
+    // Yield the CPU to FreeRTOS for the scheduler idle window instead of busy-spinning. delay() is
+    // the Adafruit core's vTaskDelay wrapper (and flushes TinyUSB CDC first), so it is safe next to
+    // the SoftDevice and lets the nRF52 FreeRTOS port enter its tickless-idle low-power state
+    // (configUSE_TICKLESS_IDLE = 1). Direct RTC1/WFE register access is still wrong here: it fights
+    // the FreeRTOS/SoftDevice clock domain and stops millis(). Deep sleep (radio off between
+    // windows) remains a follow-up; this is the light-sleep path the power table assumes.
+    if (ms > 0) delay(ms);
 }
 
 void initUx(const board::Board& board) {

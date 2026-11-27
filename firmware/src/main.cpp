@@ -55,6 +55,20 @@ Identity g_identity;
 const board::Board* g_board = nullptr;
 
 uint8_t g_store_buffer[StoreQueue::kSerializedSize];
+
+// Stack budget: the Adafruit nRF52 core runs setup()/loop() on a FreeRTOS task created with
+// LOOP_STACK_SZ = 1024 words = 4 KiB (framework cores/nRF5/main.cpp; xTaskCreate sizes are words).
+// The old companion path put a 2048-byte chunk, a 4096-byte SLIP buffer and a 1608-byte
+// CompanionMsg (~7.7 KiB worst case) on that stack, so the first companion reply overflowed it and
+// hung the node (reproduced on T1000-E hardware 2026-11-27). The firmware main loop is
+// single-threaded; these file-scope scratch areas replace the on-stack copies.
+CompanionMsg g_rx_msg;     // decoded inbound companion message
+CompanionMsg g_tx_msg;     // outgoing reply, built while g_rx_msg is still being read
+CompanionMsg g_event_msg;  // outgoing event; may be built from inside a reply handler
+uint8_t g_companion_rx[512];
+uint8_t g_companion_chunk[2048];
+uint8_t g_companion_slip[4096];
+
 uint64_t g_last_usb_ms = 0;
 uint64_t g_last_ble_ms = 0;
 uint64_t g_last_battery_ms = 0;
@@ -177,22 +191,22 @@ void configureEngine() {
 }
 
 void companionSend(const CompanionMsg& msg) {
-    uint8_t chunk[2048];
-    const size_t chunk_len = encodeCompanionChunk(msg, chunk, sizeof(chunk));
+    const size_t chunk_len =
+        encodeCompanionChunk(msg, g_companion_chunk, sizeof(g_companion_chunk));
     if (chunk_len == 0) return;
-    uint8_t slip[4096];
-    const size_t slip_len = slipEncode(chunk, chunk_len, slip, sizeof(slip));
+    const size_t slip_len = slipEncode(g_companion_chunk, chunk_len, g_companion_slip,
+                                       sizeof(g_companion_slip));
     if (slip_len == 0) return;
     // Only write to links that recently carried a companion Hello; a USB CDC write with no
     // host attached can block.
-    if (millis() - g_last_usb_ms < kCompanionTimeoutMs) g_usb.write(slip, slip_len);
+    if (millis() - g_last_usb_ms < kCompanionTimeoutMs) g_usb.write(g_companion_slip, slip_len);
     if (g_ble.enabled() && g_ble.connected() && millis() - g_last_ble_ms < kCompanionTimeoutMs) {
-        g_ble.write(slip, slip_len);
+        g_ble.write(g_companion_slip, slip_len);
     }
 }
 
 void sendEvent(const char* kind, const char* detail) {
-    CompanionMsg msg;
+    CompanionMsg& msg = g_event_msg;
     msg.type = CompanionType::Event;
     std::snprintf(msg.kind, sizeof(msg.kind), "%s", kind);
     std::snprintf(msg.detail, sizeof(msg.detail), "%s", detail);
@@ -204,7 +218,7 @@ void drainEvents() {
         const EngineEvent& event = g_engine.events().at(0);
         switch (event.type) {
             case EventType::RxFrame: {
-                CompanionMsg msg;
+                CompanionMsg& msg = g_tx_msg;
                 msg.type = CompanionType::Rx;
                 const size_t len = event.frame_len;
                 std::memcpy(msg.frame, event.frame, len);
@@ -257,16 +271,14 @@ void drainOutbox() {
 void handleCompanionMessage(const CompanionMsg& msg) {
     switch (msg.type) {
         case CompanionType::Hello: {
-            CompanionMsg ack;
-            g_engine.fillHelloAck(ack);
-            companionSend(ack);
+            g_engine.fillHelloAck(g_tx_msg);
+            companionSend(g_tx_msg);
             sendEvent("boot", OM_FW_VERSION);
             break;
         }
         case CompanionType::ConfigGet: {
-            CompanionMsg config;
-            g_engine.fillConfig(config);
-            companionSend(config);
+            g_engine.fillConfig(g_tx_msg);
+            companionSend(g_tx_msg);
             break;
         }
         case CompanionType::ConfigSet: {
@@ -283,9 +295,8 @@ void handleCompanionMessage(const CompanionMsg& msg) {
                 }
                 sendEvent("error", detail);
             } else {
-                CompanionMsg config;
-                g_engine.fillConfig(config);
-                companionSend(config);
+                g_engine.fillConfig(g_tx_msg);
+                companionSend(g_tx_msg);
             }
             break;
         }
@@ -297,16 +308,14 @@ void handleCompanionMessage(const CompanionMsg& msg) {
             }
             break;
         case CompanionType::StatsGet: {
-            CompanionMsg stats;
-            g_engine.fillStats(stats);
-            companionSend(stats);
+            g_engine.fillStats(g_tx_msg);
+            companionSend(g_tx_msg);
             break;
         }
         case CompanionType::Ping: {
-            CompanionMsg pong;
-            pong.type = CompanionType::Pong;
-            pong.nonce = msg.nonce;
-            companionSend(pong);
+            g_tx_msg.type = CompanionType::Pong;
+            g_tx_msg.nonce = msg.nonce;
+            companionSend(g_tx_msg);
             break;
         }
         case CompanionType::Reset:
@@ -324,25 +333,22 @@ void handleCompanionMessage(const CompanionMsg& msg) {
 }
 
 void pollCompanion() {
-    uint8_t buffer[512];
-    int n = g_usb.read(buffer, sizeof(buffer));
+    int n = g_usb.read(g_companion_rx, sizeof(g_companion_rx));
     for (int i = 0; i < n; ++i) {
-        if (g_usb_slip.feed(buffer[i]) && g_usb_slip.frameValid()) {
-            CompanionMsg msg;
-            if (decodeCompanionChunk(g_usb_slip.chunk(), g_usb_slip.chunkLen(), msg)) {
+        if (g_usb_slip.feed(g_companion_rx[i]) && g_usb_slip.frameValid()) {
+            if (decodeCompanionChunk(g_usb_slip.chunk(), g_usb_slip.chunkLen(), g_rx_msg)) {
                 g_last_usb_ms = millis();
-                handleCompanionMessage(msg);
+                handleCompanionMessage(g_rx_msg);
             }
         }
     }
     if (g_ble.enabled()) {
-        n = g_ble.read(buffer, sizeof(buffer));
+        n = g_ble.read(g_companion_rx, sizeof(g_companion_rx));
         for (int i = 0; i < n; ++i) {
-            if (g_ble_slip.feed(buffer[i]) && g_ble_slip.frameValid()) {
-                CompanionMsg msg;
-                if (decodeCompanionChunk(g_ble_slip.chunk(), g_ble_slip.chunkLen(), msg)) {
+            if (g_ble_slip.feed(g_companion_rx[i]) && g_ble_slip.frameValid()) {
+                if (decodeCompanionChunk(g_ble_slip.chunk(), g_ble_slip.chunkLen(), g_rx_msg)) {
                     g_last_ble_ms = millis();
-                    handleCompanionMessage(msg);
+                    handleCompanionMessage(g_rx_msg);
                 }
             }
         }
@@ -481,6 +487,19 @@ void setup() {
 #endif
     g_board = &board::get();
     Serial.printf("[om] board=%s\n", g_board->id); Serial.flush(); delay(150);
+#if OM_ENABLE_BLE
+    // Bring the SoftDevice up before the rest of the peripherals. Two reasons: Adafruit's
+    // InternalFS writes go through SoftDevice flash SVCs and are only valid once the SoftDevice is
+    // enabled, and the TinyUSB/SoftDevice hand-off (usb_softdevice_pre_enable/post_enable) is best
+    // done before the companion link is used. This does not remove the one-time USB
+    // re-enumeration the hand-off causes; BLE-on USB stability is still under investigation.
+    {
+        char device_name[24];
+        std::snprintf(device_name, sizeof(device_name), "%s", g_board->display_name);
+        const bool ble_ok = g_ble.begin(device_name);
+        Serial.printf("[om] ble=%s\n", ble_ok ? "ok" : "ERROR"); Serial.flush(); delay(150);
+    }
+#endif
     hal::initUx(*g_board);
     hal::setLed(true);
     Serial.println("[om] ux"); Serial.flush(); delay(150);
@@ -505,12 +524,6 @@ void setup() {
     Serial.printf("[om] radio=%s\n", radio_ok ? "ok" : "ERROR"); Serial.flush(); delay(150);
     g_usb.begin();
     Serial.println("[om] usb"); Serial.flush(); delay(250);
-    if (OM_ENABLE_BLE) {
-        char device_name[24];
-        std::snprintf(device_name, sizeof(device_name), "%s", g_board->display_name);
-        const bool ble_ok = g_ble.begin(device_name);
-        Serial.printf("[om] ble=%s\n", ble_ok ? "ok" : "ERROR"); Serial.flush();
-    }
     hal::setLed(false);
     g_applied_radio.profile = g_engine.config().profile;
     g_applied_radio.region = g_engine.config().region;

@@ -17,12 +17,11 @@ namespace hal {
 // --- USB CDC -------------------------------------------------------------------------------
 #if defined(ARDUINO_ARCH_NRF52) || defined(NRF52_SERIES) || defined(ESP32)
 bool UsbTransport::begin() {
-    // USB CDC is initialised by the Arduino core; nRF52 TinyUSB and ESP32-S3 USB-OTG both
-    // expose it as Serial. The main setup already calls Serial.begin(115200) before the init
-    // log markers; calling it again re-enumerates USB (and fights the BLE SoftDevice init).
-    if (!begun_ && Serial) {
-        Serial.begin(115200);
-    }
+    // USB CDC is already initialised by the Arduino core: the loop task calls
+    // TinyUSB_Device_Init() before setup(), and setup() calls Serial.begin(115200) for the
+    // bring-up log markers. Adafruit_USBD_CDC::begin() returns early when it is already started, so
+    // the old second call here was a harmless no-op; drop it anyway so the transport state is
+    // explicit and does not depend on that implementation detail.
     begun_ = true;
     return true;
 }
