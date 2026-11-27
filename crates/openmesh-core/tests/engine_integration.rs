@@ -1851,3 +1851,41 @@ fn paced_two_chunk_resource_completes_after_ack() {
     );
     assert!(!mesh.has_error(a) && !mesh.has_error(b));
 }
+
+#[test]
+fn paced_34_chunk_transfer_reaches_the_final_tail_with_window_acks() {
+    // 34-chunk (6018 B image) transfer over a duty-aware paced link, with the receiver acking in
+    // 8-chunk / 5 s windows. The final chunk is lost on first transmission: the sender must pace
+    // its tail retries (one batch per interval) and still reach 34/34. Regression for the hardware
+    // 32/34 stall where un-paced retry bursts overflowed the companion radio FIFO.
+    //
+    // One frame every 6.11 s models a batch of 2 full-size frames per 12 220 ms duty interval.
+    let mut mesh = PacedMesh::new(6_110);
+    mesh.ack_latency_ms = 5_000;
+    mesh.drop_first_chunk(33);
+    let (a, b) = (0usize, 1usize);
+    mesh.engines[a].set_resource_pace_interval_ms(12_220);
+    let b_id = mesh.engines[b].node_id();
+    let image: Vec<u8> = (0..6_018u32).map(|i| ((i * 29 + 7) % 251) as u8).collect();
+    let sent = mesh.engines[a]
+        .send_resource(
+            Target::Direct(b_id),
+            0x5151_5151,
+            0x6161_6161,
+            ResourceKind::Attachment,
+            "image/webp",
+            &image,
+            0,
+        )
+        .unwrap();
+    mesh.enqueue(a, sent);
+    let done = mesh.advance_until(900_000, |mesh| {
+        mesh.events_for(b)
+            .any(|event| matches!(event, Event::ResourceReceived { .. }))
+    });
+    assert!(
+        done,
+        "paced 34-chunk transfer stalled at {} ms",
+        mesh.now_ms
+    );
+}

@@ -639,6 +639,12 @@ struct OutgoingSnapshot {
     include_identity: bool,
     started_ms: u64,
     deadline_ms: u64,
+    /// Wall time of the last paced emission (normal or retry), used to keep retries paced too.
+    paced_ms: u64,
+    /// Acknowledged chunks when the snapshot was taken (manifest repair policy).
+    acked_count: u16,
+    /// Retries since the last acknowledged progress (manifest repair cadence).
+    retries: u8,
 }
 
 #[derive(Debug)]
@@ -3065,27 +3071,47 @@ impl Engine {
             if now_ms < snapshot.deadline_ms {
                 continue;
             }
-            // RTO: resend the manifest (it may have been lost) and the pending window.
-            let manifest_frame = match &snapshot.key {
-                TransferKey::Peer(peer) => self.seal_frame(
-                    FrameType::Data,
-                    peer.node_id,
-                    Flags::ENCRYPTED,
-                    PAYLOAD_IS_MANIFEST,
-                    snapshot.msg_id,
-                    &snapshot.manifest_plaintext,
-                    peer,
-                    snapshot.include_identity,
-                ),
-                TransferKey::Channel { id, key } => self.seal_frame_channel(
-                    FrameType::Data,
-                    *id,
-                    Flags::ENCRYPTED,
-                    PAYLOAD_IS_MANIFEST,
-                    snapshot.msg_id,
-                    &snapshot.manifest_plaintext,
-                    key,
-                ),
+            // Duty-aware retries: a companion radio FIFO holds one paced batch, so an RTO that
+            // fires between paced boundaries must wait for the next boundary instead of emitting
+            // a burst (this is what dropped the final tail chunks on hardware and stalled 32/34).
+            if now_ms.saturating_sub(snapshot.paced_ms) < self.resource_pace_interval_ms {
+                if let Some(resource) = self.outgoing.get_mut(&res_id) {
+                    resource.sender.deadline_ms = snapshot
+                        .paced_ms
+                        .saturating_add(self.resource_pace_interval_ms);
+                }
+                continue;
+            }
+            // RTO: repair the manifest only when the receiver may not have the resource (no
+            // acknowledged progress yet) or periodically to recover a restarted receiver state.
+            // Once progress is being acknowledged, a retry is just one paced batch of missing
+            // chunks - adding the manifest would push the burst past the radio FIFO again.
+            let repair_manifest = snapshot.acked_count == 0 || snapshot.retries % 4 == 1;
+            let manifest_frame = if repair_manifest {
+                match &snapshot.key {
+                    TransferKey::Peer(peer) => self.seal_frame(
+                        FrameType::Data,
+                        peer.node_id,
+                        Flags::ENCRYPTED,
+                        PAYLOAD_IS_MANIFEST,
+                        snapshot.msg_id,
+                        &snapshot.manifest_plaintext,
+                        peer,
+                        snapshot.include_identity,
+                    ),
+                    TransferKey::Channel { id, key } => self.seal_frame_channel(
+                        FrameType::Data,
+                        *id,
+                        Flags::ENCRYPTED,
+                        PAYLOAD_IS_MANIFEST,
+                        snapshot.msg_id,
+                        &snapshot.manifest_plaintext,
+                        key,
+                    ),
+                }
+                .ok()
+            } else {
+                None
             };
             let retry_ok = match self.outgoing.get_mut(&res_id) {
                 Some(resource) => resource
@@ -3106,14 +3132,42 @@ impl Engine {
                 )));
                 continue;
             }
-            if let Ok(frame) = manifest_frame {
+            if let Some(frame) = manifest_frame {
                 self.emit_frame(out, frame, self.send_mode_for(snapshot.target));
             }
-            // A paced companion radio cannot absorb a whole 24-chunk retransmission burst; send at
-            // most two batches per RTO. Later RTOs (with backoff) retransmit the still-missing set.
-            let mut pending = snapshot.pending;
-            pending.truncate((RESOURCE_TX_BATCH as usize) * 2);
-            self.emit_resource_chunks(res_id, &pending, out);
+            // One paced batch per retry, never the whole pending window: the radio transmits this
+            // in one FIFO-sized burst and later paced retries repair the remaining chunks. Prefer
+            // never-sent chunks (the tail) over resending already-delivered duplicates, otherwise a
+            // small resource can wait for an ack round-trip before its final chunk is first sent.
+            let batch = usize::from(RESOURCE_TX_BATCH).max(1);
+            let mut pending = match self.outgoing.get_mut(&res_id) {
+                Some(resource) => resource.sender.take_unsent(batch),
+                None => Vec::new(),
+            };
+            if pending.len() < batch && !snapshot.pending.is_empty() {
+                // Rotate the repair window across retries (retry 0 starts at chunk 0, retry 1 at
+                // `batch`, ...). Always resending the first `batch` pending chunks can starve a
+                // later lost chunk forever when acks lag behind retries (the 32/34 tail case).
+                let window = snapshot.pending;
+                let start = (usize::from(snapshot.retries).wrapping_mul(batch)) % window.len();
+                for offset in 0..window.len() {
+                    if pending.len() >= batch {
+                        break;
+                    }
+                    let index = window[(start + offset) % window.len()];
+                    if !pending.contains(&index) {
+                        pending.push(index);
+                    }
+                }
+            }
+            if !pending.is_empty() {
+                self.emit_resource_chunks(res_id, &pending, out);
+                if let Some(resource) = self.outgoing.get_mut(&res_id) {
+                    resource.paced_ms = now_ms;
+                    resource.sender.deadline_ms =
+                        now_ms.saturating_add(self.resource_pace_interval_ms.max(RESOURCE_RTO_MS));
+                }
+            }
         }
     }
 
@@ -3132,6 +3186,9 @@ impl Engine {
             include_identity,
             started_ms: resource.started_ms,
             deadline_ms: resource.sender.deadline_ms,
+            paced_ms: resource.paced_ms,
+            acked_count: resource.sender.acked_count(),
+            retries: resource.sender.retries,
         })
     }
 
@@ -3446,6 +3503,240 @@ mod tests {
         assert_eq!(e.resource_pace_interval_ms(), 12_220);
         e.set_resource_pace_interval_ms(0);
         assert_eq!(e.resource_pace_interval_ms(), 1);
+    }
+
+    #[test]
+    fn tail_completes_with_two_chunk_acks_and_delayed_final_ack() {
+        // The Android app can ack a couple of chunks at a time, and the final ack may be delayed.
+        // This variant drives the sender with explicit 2-chunk window acks (instead of the default
+        // 8-chunk/5 s cadence), holds the final ack back by a minute, and limits the radio FIFO to
+        // one paced batch. The sender must keep releasing/retrying the tail at the paced rate and
+        // finish once the delayed ack arrives.
+        use crate::services::{Ack, AckKind};
+        let mut a = engine(71);
+        let mut b = engine(72);
+        let a_id = a.node_id();
+        let b_id = b.node_id();
+        a.add_contact(b.public_identity(), Some("b".into()));
+        b.add_contact(a.public_identity(), Some("a".into()));
+        a.set_resource_pace_interval_ms(12_220);
+        let data = vec![7u8; 6018];
+        let res_id = 0x7171_0001u32;
+        let msg_id = 0x7171_0002u32;
+        let start = a
+            .send_resource(
+                Target::Direct(b_id),
+                msg_id,
+                res_id,
+                ResourceKind::Attachment,
+                "image/webp",
+                &data,
+                0,
+            )
+            .expect("send");
+        let fifo_capacity = usize::from(RESOURCE_TX_BATCH) + 1;
+        let mut a_frames: Vec<Outbound> = start.outbound;
+        let mut now = 0u64;
+        let mut last_acked = 0u16;
+        let mut final_ack_due: Option<u64> = None;
+        let mut completed = false;
+        for _step in 0..2400u32 {
+            now += 1_000;
+            let mut next_a: Vec<Outbound> = Vec::new();
+            for out in a_frames.drain(..).take(fifo_capacity) {
+                let b_out = b.on_frame(out.frame, None, now);
+                for event in &b_out.events {
+                    if matches!(event, Event::ResourceReceived { .. }) {
+                        completed = true;
+                    }
+                }
+                for ack in b_out.outbound {
+                    let a_out = a.on_frame(ack.frame, None, now);
+                    next_a.extend(a_out.outbound);
+                }
+            }
+            // Explicit 2-chunk window acks, final ack delayed by 60 s after it is first due.
+            let received = b
+                .incoming
+                .values()
+                .map(|resource| resource.receiver.reassembler.received_chunks())
+                .max()
+                .unwrap_or(0);
+            if received >= last_acked.saturating_add(2) {
+                let (next_expected, bitmap) = b
+                    .incoming
+                    .values()
+                    .map(|resource| resource.receiver.ack_window())
+                    .next()
+                    .unwrap_or((received, 0));
+                let due = *final_ack_due.get_or_insert_with(|| {
+                    if next_expected >= 34 {
+                        now + 60_000
+                    } else {
+                        now
+                    }
+                });
+                if now >= due {
+                    let ack = Ack {
+                        kind: AckKind::ResourceWindow,
+                        msg_id,
+                        res_id: Some(res_id),
+                        next_expected: Some(next_expected),
+                        bitmap: Some(bitmap),
+                        timestamp_ms: now,
+                    };
+                    let ack_out = b.send_ack(a_id, ack, now).expect("ack");
+                    for frame in ack_out.outbound {
+                        let a_out = a.on_frame(frame.frame, None, now);
+                        next_a.extend(a_out.outbound);
+                    }
+                    last_acked = next_expected;
+                    if next_expected >= 34 {
+                        final_ack_due = None;
+                    }
+                }
+            }
+            let a_out = a.tick(now);
+            next_a.extend(a_out.outbound);
+            // Ignore the receiver's default periodic acks: this test controls the ack cadence.
+            let _ = b.tick(now);
+            a_frames = next_a;
+            if completed {
+                break;
+            }
+        }
+        assert!(completed, "tail did not complete after {now} ms");
+        assert!(!a.outgoing.contains_key(&res_id));
+    }
+
+    #[test]
+    fn dropped_tail_is_retried_until_complete() {
+        // Hardware-equivalent tail case: 34 chunks, batch 2, duty-aware pace, a radio FIFO that
+        // only absorbs one paced batch per engine emission (extra frames in the same tick are
+        // dropped). The final three chunks are lost on first transmission, so only the retry path
+        // can finish the transfer. Before the paced-retry fix, each RTO emitted manifest + up to
+        // four chunks at once, the FIFO dropped the tail of every burst, and the transfer froze at
+        // 32/34 - this test would time out.
+        let mut a = engine(61);
+        let mut b = engine(62);
+        a.add_contact(b.public_identity(), Some("b".into()));
+        b.add_contact(a.public_identity(), Some("a".into()));
+        a.set_resource_pace_interval_ms(12_220);
+        let b_id = b.node_id();
+        let data = vec![6u8; 6018];
+        let res_id = 0x6161_0001u32;
+        let start = a
+            .send_resource(
+                Target::Direct(b_id),
+                0x6161_0002,
+                res_id,
+                ResourceKind::Attachment,
+                "image/webp",
+                &data,
+                0,
+            )
+            .expect("send");
+        let fifo_capacity = usize::from(RESOURCE_TX_BATCH) + 1;
+        let mut a_frames: Vec<Outbound> = start.outbound;
+        let mut lost: std::collections::HashSet<u16> = [31u16, 32, 33].into_iter().collect();
+        let mut now = 0u64;
+        let mut b_received = 0u16;
+        let mut completed = false;
+        for _step in 0..1800u32 {
+            now += 1_000;
+            let mut next_a: Vec<Outbound> = Vec::new();
+            // Radio FIFO: only the first `fifo_capacity` frames of an engine emission survive.
+            for out in a_frames.drain(..).take(fifo_capacity) {
+                if out.frame.typ == FrameType::Resource && out.frame.body.len() >= 11 {
+                    let index = u16::from_be_bytes([out.frame.body[9], out.frame.body[10]]);
+                    if lost.remove(&index) {
+                        continue;
+                    }
+                }
+                let b_out = b.on_frame(out.frame, None, now);
+                for event in &b_out.events {
+                    if let Event::ResourceProgress { received, .. } = event {
+                        b_received = *received;
+                    }
+                    if matches!(event, Event::ResourceReceived { .. }) {
+                        completed = true;
+                    }
+                }
+                for ack in b_out.outbound {
+                    let a_out = a.on_frame(ack.frame, None, now);
+                    next_a.extend(a_out.outbound);
+                }
+            }
+            let a_out = a.tick(now);
+            next_a.extend(a_out.outbound);
+            let b_out = b.tick(now);
+            for ack in b_out.outbound {
+                let a_out = a.on_frame(ack.frame, None, now);
+                next_a.extend(a_out.outbound);
+            }
+            a_frames = next_a;
+            if completed {
+                break;
+            }
+        }
+        assert!(
+            completed,
+            "tail did not recover: receiver has {b_received}/34 chunks after {now} ms"
+        );
+        assert_eq!(b_received, 34);
+        assert!(
+            !a.outgoing.contains_key(&res_id),
+            "sender still has the resource"
+        );
+    }
+
+    #[test]
+    fn retry_bursts_stay_within_one_paced_batch() {
+        // Regression repro for the 32/34 tail stall: the RTO path used to emit a manifest plus up
+        // to `RESOURCE_TX_BATCH * 2` pending chunks in one tick, ignoring the duty-aware pace. The
+        // companion radio FIFO holds one paced batch, so every tail retransmission overflowed it
+        // and the final chunks were never delivered.
+        //
+        // No receiver here: we only assert the sender's per-tick emission shape. 34 chunks, batch
+        // 2, paced interval, no acks, so the window fills and every later emission is a retry.
+        let mut e = engine(51);
+        e.set_resource_pace_interval_ms(12_220);
+        let channel = e.add_channel("retry-burst", &[3u8; 32]);
+        let data = vec![5u8; 6018];
+        e.send_resource(
+            Target::Channel(channel),
+            0x7777_0001,
+            0x7777_0002,
+            ResourceKind::Attachment,
+            "image/webp",
+            &data,
+            0,
+        )
+        .expect("send");
+
+        let max_burst = usize::from(RESOURCE_TX_BATCH) + 1; // one paced batch plus its manifest
+        let mut max_seen = 0usize;
+        let mut retry_bursts = Vec::new();
+        for step in 0..600u32 {
+            let now = u64::from(step) * 1_000;
+            let processed = e.tick(now);
+            let frames = processed.outbound.len();
+            if frames > 0 {
+                if frames > max_burst {
+                    retry_bursts.push((now, frames));
+                }
+                max_seen = max_seen.max(frames);
+            }
+            assert!(
+                frames <= max_burst,
+                "tick at {now} emitted {frames} frames in one burst (max {max_burst});                  tail retries must stay within one paced batch"
+            );
+        }
+        assert!(max_seen > 0, "sender emitted nothing");
+        assert!(
+            retry_bursts.is_empty(),
+            "bursty retry emissions observed: {retry_bursts:?}"
+        );
     }
 
     #[test]
