@@ -392,7 +392,7 @@ future fields). Senders MUST ensure `chunk_count = ceil(total_len / chunk_bytes)
 ### 9.3 ARQ
 
 * Window: 8 chunks in flight by default.
-* Receiver sends `Ack{kind: resource_window}` every `RESOURCE_ACK_EVERY` (default 8) chunks or
+* Receiver sends `Ack{kind: resource_window}` every `RESOURCE_ACK_EVERY` (default 8) chunks or after `RESOURCE_ACK_DELAY_MS` (default 5000 ms) of
   immediately after detecting a hole / end of burst, with `next_expected` + 32-bit bitmap.
 * Sender retransmits missing chunks after `RESOURCE_RTO_MS` (default 3 s) with exponential
   backoff capped at `RESOURCE_MAX_RETRY_BACKOFF_MS` (60 s). Give-up is **time-based**: an outgoing
@@ -588,7 +588,7 @@ on receive frame F on link L:
 | `DEDUP_TTL_MS` | 1 800 000 | |
 | `ACK_TIMEOUT_MS` | 8 000 | retry data messages |
 | `MAX_MSG_RETRIES` | 3 | |
-| `RESOURCE_WINDOW` | 8 | chunks |
+| `RESOURCE_WINDOW` | 24 | chunks (<=32: one `u32` ack bitmap) |
 | `RESOURCE_RTO_MS` | 3 000 | ×2 backoff |
 | `MAX_RESOURCE_RETRIES` | 6 | |
 | `RESOURCE_KEEP_MS` | 600 000 | after completion |

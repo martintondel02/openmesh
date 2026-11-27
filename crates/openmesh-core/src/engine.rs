@@ -64,7 +64,12 @@ pub const ACK_TIMEOUT_MS: u64 = 8_000;
 /// Maximum number of retransmissions of an unacknowledged message.
 pub const MAX_MSG_RETRIES: u8 = 3;
 /// Resource selective-repeat window.
-pub const RESOURCE_WINDOW: u16 = 8;
+///
+/// Must stay <= 32: the receiver's window ack carries one `u32` bitmap. A small window (the
+/// original 8) makes progress gated by every ack round-trip; under duty-cycle pacing one
+/// round-trip can take tens of seconds, so the sender now streams up to this many chunks before
+/// it needs an ack.
+pub const RESOURCE_WINDOW: u16 = 24;
 /// Base resource retransmission timeout.
 pub const RESOURCE_RTO_MS: u64 = 3_000;
 /// Give up on an outgoing resource after this long without acknowledged chunk progress.
@@ -111,7 +116,7 @@ pub const STORE_PEER_REACHABLE_MS: u64 = 300_000;
 /// Minimum interval between duplicate delivery acks for the same message id.
 pub const RE_ACK_MIN_INTERVAL_MS: u64 = 2_000;
 /// A receiver acknowledges a partial window after this much quiet time ("end of burst").
-pub const RESOURCE_ACK_DELAY_MS: u64 = 1_000;
+pub const RESOURCE_ACK_DELAY_MS: u64 = 5_000;
 /// Receiver sends a window ack after this many new chunks.
 pub const RESOURCE_ACK_EVERY: u16 = 8;
 /// Maximum lifetime of an outgoing resource before it is abandoned.
@@ -2956,6 +2961,14 @@ impl Engine {
                 None => continue,
             };
             self.emit_resource_chunks(res_id, &unsent, out);
+            if !unsent.is_empty() {
+                // We are still streaming never-sent chunks: push the retransmission deadline out
+                // so the RTO does not fire while the paced link is still delivering this batch.
+                if let Some(resource) = self.outgoing.get_mut(&res_id) {
+                    resource.sender.deadline_ms = now_ms.saturating_add(RESOURCE_RTO_MS);
+                }
+                continue;
+            }
 
             if now_ms < snapshot.deadline_ms {
                 continue;
@@ -3004,7 +3017,11 @@ impl Engine {
             if let Ok(frame) = manifest_frame {
                 self.emit_frame(out, frame, self.send_mode_for(snapshot.target));
             }
-            self.emit_resource_chunks(res_id, &snapshot.pending, out);
+            // A paced companion radio cannot absorb a whole 24-chunk retransmission burst; send at
+            // most two batches per RTO. Later RTOs (with backoff) retransmit the still-missing set.
+            let mut pending = snapshot.pending;
+            pending.truncate((RESOURCE_TX_BATCH as usize) * 2);
+            self.emit_resource_chunks(res_id, &pending, out);
         }
     }
 
