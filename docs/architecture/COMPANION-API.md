@@ -90,6 +90,13 @@ accepts `Tx` frames. The radio MUST reject `Tx` frames larger than `max_frame` w
   (the bridge owns the identity when a phone is attached; the radio uses its own identity only
   for infrastructure frames).
 * `Tx` frames are transmitted on the radio with TTL unchanged; dedup applies as for any frame.
+* Relay copies are **best-effort while a companion app is attached and active**: app-forwarded
+  frames (and the radio's own control frames) jump ahead of relay copies in the TX queue, a full
+  queue evicts a relay copy to make room for an app frame, and relay transmissions are deferred
+  during resource (media) transfers or when the TX queue is backed up. This keeps the phone's
+  window-ACK frames flowing on a shared 10 % airtime budget; normal managed-flooding behaviour
+  resumes once the companion link has been idle for the activity window. There is no wire-format
+  change; gated firmware diagnostics expose `relay_deferred` / `relay_evicted` / `app_tx_*`.
 * `Rx` frames are emitted for every valid frame received (including ones addressed to others),
   so the app can do its own protocol processing. Radios MAY filter frames the app cannot need
   (e.g. announces already relayed) to save BLE bandwidth; when they do, they MUST signal the
