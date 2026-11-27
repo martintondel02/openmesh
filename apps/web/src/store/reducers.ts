@@ -86,6 +86,54 @@ export function applyMessageUpdate(messages: ChatMessage[], update: MessageUpdat
   return next;
 }
 
+/**
+ * Apply a `message_update` event to a channel message.
+ *
+ * The bridge sends the channel message first and the stored attachment (`id`, size, sha256,
+ * progress 1.0) in a later `message_update` — the update must reach `groupMessages[]` too or
+ * received channel images/voice notes never render.
+ */
+export function applyGroupMessageUpdate(messages: ChatGroupMessage[], update: MessageUpdateData): ChatGroupMessage[] {
+  const index = messages.findIndex((m) => m.msg_id === update.msg_id && m.msg_id !== 0);
+  if (index < 0) return messages;
+  const existing = messages[index]!;
+  const next = messages.slice();
+  next[index] = {
+    ...existing,
+    // Only merge fields the update actually carries; keep local-only fields (localUrl, waveform).
+    ...(update.attachment !== undefined ? { attachment: update.attachment } : {}),
+    ...(update.text !== undefined ? { text: update.text } : {}),
+    ...(update.kind !== undefined ? { kind: update.kind } : {}),
+  };
+  return next;
+}
+
+/** Clamp a resource-progress event into 0..1. */
+export function resourceProgressFraction(received: number, total: number): number {
+  if (!Number.isFinite(total) || total <= 0) return 0;
+  if (!Number.isFinite(received) || received <= 0) return 0;
+  return Math.min(1, received / total);
+}
+
+/**
+ * Bump an attachment's transfer progress for `msg_id` in a direct or channel message list.
+ * Returns the original array when nothing matched (keeps React re-renders cheap).
+ */
+export function applyResourceProgress<T extends { msg_id: number; attachment: { progress: number } | null }>(
+  items: T[],
+  msgId: number,
+  progress: number,
+): T[] {
+  const bounded = Math.min(1, Math.max(0, progress));
+  let changed = false;
+  const next = items.map((item) => {
+    if (item.msg_id !== msgId || !item.attachment) return item;
+    changed = true;
+    return { ...item, attachment: { ...item.attachment, progress: bounded } };
+  });
+  return changed ? next : items;
+}
+
 /** Apply an `ack` event. `read` implies delivered. */
 export function applyAck(messages: ChatMessage[], msgId: number, kind: 'delivered' | 'read' | 'resource_window' | 'resource_complete'): ChatMessage[] {
   if (kind !== 'delivered' && kind !== 'read') return messages;

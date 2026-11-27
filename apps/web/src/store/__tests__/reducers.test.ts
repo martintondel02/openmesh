@@ -2,7 +2,10 @@ import { describe, expect, it } from 'vitest';
 import {
   appendPositionHistory,
   applyAck,
+  applyGroupMessageUpdate,
   applyMessageUpdate,
+  applyResourceProgress,
+  resourceProgressFraction,
   buildConversations,
   deriveDelivery,
   markMessageFailed,
@@ -18,7 +21,7 @@ import {
   upsertMessage,
   upsertNode,
 } from '../reducers';
-import type { ChatMessage, ConfigData, NodeData, Position } from '../../types/api';
+import type { ChatGroupMessage, ChatMessage, ConfigData, NodeData, Position } from '../../types/api';
 
 function direct(partial: Partial<ChatMessage> & { msg_id: number; peer: string }): ChatMessage {
   return {
@@ -53,6 +56,35 @@ function node(id: string, overrides: Partial<NodeData> = {}): NodeData {
     battery_pct: 80,
     is_contact: false,
     public_key: null,
+    ...overrides,
+  };
+}
+
+function group(partial: Partial<ChatGroupMessage> & { msg_id: number }): ChatGroupMessage {
+  return {
+    channel_id: 'chan',
+    channel_name: 'e2e test',
+    from: 'me',
+    from_name: 'PC Bridge',
+    sender_key: '',
+    kind: 'text',
+    text: 'hi',
+    sent_at_ms: 1_000,
+    outgoing: true,
+    signature_valid: true,
+    attachment: null,
+    position: null,
+    ...partial,
+  };
+}
+
+function attachment(overrides: Partial<NonNullable<ChatGroupMessage['attachment']>> = {}) {
+  return {
+    id: 'att_1',
+    mime: 'image/webp',
+    size: 6018,
+    sha256: 'abc',
+    progress: 1,
     ...overrides,
   };
 }
@@ -315,5 +347,67 @@ describe('reducers: group messages', () => {
     const result = upsertGroupMessage([optimistic], echoed, 'local_1');
     expect(result).toHaveLength(1);
     expect(result[0]!.msg_id).toBe(55);
+  });
+
+  it('applies channel attachment updates from message_update', () => {
+    // The bridge emits the group message first (attachment null) and the stored attachment via a
+    // later message_update; the update must land in groupMessages or received media never shows.
+    const pending = group({ msg_id: 9, kind: 'attachment', text: 'fixture image' });
+    const stored = attachment({ progress: 1 });
+    const updated = applyGroupMessageUpdate([pending], { msg_id: 9, attachment: stored });
+    expect(updated).toHaveLength(1);
+    expect(updated[0]!.attachment).toEqual(stored);
+    expect(updated[0]!.text).toBe('fixture image');
+
+    const rows = [pending];
+    const same = applyGroupMessageUpdate(rows, { msg_id: 404, attachment: stored });
+    expect(same).toBe(rows);
+    expect(same[0]!.attachment).toBeNull();
+  });
+
+  it('keeps group-local fields (localUrl/waveform) when an update arrives', () => {
+    const optimistic = group({
+      msg_id: 0,
+      tempId: 'local_1',
+      localUrl: 'blob:preview',
+      waveform: [0.2, 0.5],
+      attachment: attachment({ id: 'att_local', progress: 1 }),
+    });
+    const echoed = group({ msg_id: 77, kind: 'attachment', text: null });
+    const merged = applyGroupMessageUpdate([{ ...optimistic, msg_id: 77 }], {
+      msg_id: 77,
+      attachment: attachment({ id: 'att_77' }),
+    });
+    expect(merged[0]!.attachment?.id).toBe('att_77');
+    expect(merged[0]!.waveform).toEqual([0.2, 0.5]);
+    expect(merged[0]!.localUrl).toBe('blob:preview');
+    // The optimistic row itself (msg_id 0) can still be reconciled by tempId via upsertGroupMessage.
+    expect(upsertGroupMessage([optimistic], echoed, 'local_1')).toHaveLength(1);
+  });
+});
+
+describe('reducers: resource progress', () => {
+  it('clamps progress into 0..1', () => {
+    expect(resourceProgressFraction(5, 10)).toBe(0.5);
+    expect(resourceProgressFraction(20, 10)).toBe(1);
+    expect(resourceProgressFraction(-1, 10)).toBe(0);
+    expect(resourceProgressFraction(5, 0)).toBe(0);
+    expect(resourceProgressFraction(Number.NaN, 10)).toBe(0);
+  });
+
+  it('updates direct and channel attachments by msg_id only', () => {
+    const dm = direct({ msg_id: 3, peer: 'peer', attachment: attachment({ id: 'att_dm', progress: 0 }) });
+    const gm = group({ msg_id: 4, kind: 'attachment', attachment: attachment({ id: 'att_gm', progress: 0 }) });
+    const messages = [dm];
+    const groups = [gm];
+
+    const nextMessages = applyResourceProgress(messages, 3, 0.5);
+    expect(nextMessages[0]!.attachment?.progress).toBe(0.5);
+    const nextGroups = applyResourceProgress(groups, 4, 2);
+    expect(nextGroups[0]!.attachment?.progress).toBe(1);
+    // Unknown ids and rows without an attachment keep the same array (no re-render churn).
+    expect(applyResourceProgress(messages, 999, 0.5)).toBe(messages);
+    const textOnly = [direct({ msg_id: 5, peer: 'peer' })];
+    expect(applyResourceProgress(textOnly, 5, 0.5)).toBe(textOnly);
   });
 });

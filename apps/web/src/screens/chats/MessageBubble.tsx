@@ -19,7 +19,7 @@ import { Avatar, IconButton } from '../../components/ui/primitives';
 import { DeliveryTicks, SignalBars } from '../../components/ui/signals';
 import { Modal } from '../../components/ui/overlay';
 import { HelpLink } from '../../components/ui/help';
-import { isCodec2Mime, voiceAttachmentLabel, voiceTierForMime } from '../../lib/media-tiers';
+import { codec2PayloadDurationMs, isCodec2Mime, voiceAttachmentLabel, voiceTierForMime } from '../../lib/media-tiers';
 import { playCodec2Payload } from '../../voice/pcm';
 
 export type AnyChatMessage = ChatMessage | ChatGroupMessage;
@@ -36,20 +36,36 @@ export function useAttachmentSrc(message: Pick<AnyChatMessage, 'localUrl' | 'att
   src: string | null;
   loading: boolean;
   error: string | null;
+  /** True while the bridge is still transferring the bytes (incoming attachment, progress < 1). */
+  transferring: boolean;
 } {
   const resolveAttachmentUrl = useAppStore((state) => state.resolveAttachmentUrl);
   const [src, setSrc] = useState<string | null>(message.localUrl ?? null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const attachmentId = message.attachment?.id;
+  const progress = message.attachment?.progress ?? 1;
+  const transferring = Boolean(attachmentId) && progress < 1;
 
   useEffect(() => {
     if (message.localUrl) {
       setSrc(message.localUrl);
+      setLoading(false);
+      setError(null);
       return;
     }
     if (!attachmentId) {
       setSrc(null);
+      setLoading(false);
+      setError(null);
+      return;
+    }
+    if (progress < 1) {
+      // The bridge has not stored the bytes yet (`message_update`/`resource_progress` will bump
+      // progress to 1.0). Fetching the not-yet-available id would latch an error, so wait.
+      setSrc(null);
+      setLoading(true);
+      setError(null);
       return;
     }
     let cancelled = false;
@@ -68,9 +84,9 @@ export function useAttachmentSrc(message: Pick<AnyChatMessage, 'localUrl' | 'att
     return () => {
       cancelled = true;
     };
-  }, [attachmentId, message.localUrl, message.attachment?.mime, resolveAttachmentUrl]);
+  }, [attachmentId, message.localUrl, message.attachment?.mime, progress, resolveAttachmentUrl]);
 
-  return { src, loading, error };
+  return { src, loading, error, transferring };
 }
 
 /* ------------------------------------------------------------------ */
@@ -103,7 +119,7 @@ function ImageAttachment({ message }: { message: AnyChatMessage }) {
           />
         ) : (
           <div className="grid h-40 w-full place-items-center bg-ink-900/70 text-2xs text-slate-500">
-            {error ? 'Image unavailable' : loading ? 'Loading image…' : 'No preview'}
+            {error ? 'Image unavailable' : loading || transferring ? 'Receiving image…' : 'No preview'}
           </div>
         )}
         {transferring ? (
@@ -192,18 +208,21 @@ export function VoiceWaveform({
 }
 
 function VoiceAttachment({ message, own }: { message: AnyChatMessage; own: boolean }) {
-  const { src, loading, error } = useAttachmentSrc(message);
+  const { src, loading, error, transferring } = useAttachmentSrc(message);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const playbackRef = useRef<{ stop: () => void } | null>(null);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const [playing, setPlaying] = useState(false);
   const [currentMs, setCurrentMs] = useState(0);
   const [decoderError, setDecoderError] = useState<string | null>(null);
+  const [decodedDurationMs, setDecodedDurationMs] = useState<number | null>(null);
   const attachment = message.attachment;
   const mime = attachment?.mime ?? null;
   const codec2 = isCodec2Mime(mime);
   const remoteCodec2 = codec2 && !message.localUrl;
-  const durationMs = attachment?.duration_ms ?? 0;
+  // Messages can omit `duration_ms` (channel/phone payloads); Codec2 is fixed-rate so the codec
+  // payload size gives an exact duration. The decoded duration wins once playback has loaded.
+  const durationMs = attachment?.duration_ms ?? decodedDurationMs ?? codec2PayloadDurationMs(attachment?.size, mime) ?? 0;
   const waveform = useMemo(
     () => (message.waveform?.length ? message.waveform : speechWaveform(durationMs || 4000, 32, 5)),
     [message.waveform, durationMs],
@@ -217,6 +236,13 @@ function VoiceAttachment({ message, own }: { message: AnyChatMessage; own: boole
     const audio = new Audio(src);
     audio.preload = 'metadata';
     audioRef.current = audio;
+    // Opus/AAC payloads often arrive without duration metadata; read the real clip length from
+    // the decoded media element so the bubble does not fall back to a generic 4 s placeholder.
+    const onMetadata = () => {
+      if (Number.isFinite(audio.duration) && audio.duration > 0) setDecodedDurationMs(audio.duration * 1000);
+    };
+    if (audio.readyState >= 1) onMetadata();
+    audio.addEventListener('loadedmetadata', onMetadata);
     const onTime = () => setCurrentMs(audio.currentTime * 1000);
     const onEnd = () => {
       setPlaying(false);
@@ -230,6 +256,7 @@ function VoiceAttachment({ message, own }: { message: AnyChatMessage; own: boole
     audio.addEventListener('play', onPlay);
     return () => {
       audio.pause();
+      audio.removeEventListener('loadedmetadata', onMetadata);
       audio.removeEventListener('timeupdate', onTime);
       audio.removeEventListener('ended', onEnd);
       audio.removeEventListener('pause', onPause);
@@ -268,6 +295,7 @@ function VoiceAttachment({ message, own }: { message: AnyChatMessage; own: boole
         if (!tier || tier === 'high') throw new Error('Not a Codec2 payload');
         const playback = await playCodec2Payload(payload, tier);
         playbackRef.current = playback;
+        setDecodedDurationMs(playback.durationMs);
         setPlaying(true);
         const started = performance.now();
         timerRef.current = setInterval(() => {
@@ -346,6 +374,7 @@ function VoiceAttachment({ message, own }: { message: AnyChatMessage; own: boole
       </div>
       <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-3xs text-slate-500">
         <span>{label}</span>
+        {transferring ? <span className="text-slate-400">Receiving…</span> : null}
         {decoderError ? (
           <span className="flex items-center gap-1 text-amber-300/90" title={decoderError}>
             <AlertTriangle className="h-2.5 w-2.5" aria-hidden="true" />

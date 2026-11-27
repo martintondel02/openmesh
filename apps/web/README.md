@@ -164,6 +164,7 @@ Screenshot flow (all demo, no backend):
 | **App shell** | Left nav rail (compact icon rail on md, labelled on xl), mobile bottom tab bar, context top bar with mesh stats, connection pill, node identity chip (click to copy), demo banner. |
 | **Chats** | Channels + direct conversations, unread badges, last message + delivery tick, search (⌘K), filters. Thread: day separators, grouped bubbles, reply quoting with jump-to, optimistic send, retry on failure, delivery ticks (pending/sent/delivered/read/failed), auto-scroll + jump-to-latest, sticky thread header, share-position action. |
 | **Composer** | Enter to send / Shift+Enter newline, grapheme-safe text handling, live airtime estimate (`~0.7 s airtime · 1 frame`), attachment + voice buttons, drag-and-drop and clipboard-paste images, image lightbox. |
+| **Received media** | Inline image thumbnails with full-size modal + Save, Codec2 voice notes decoded in-browser (Rust→WASM) with play/pause and duration from metadata or payload size, "Receiving…" progress for in-flight channel/direct attachments. |
 | **Groups** | Create channel (generated 256-bit PSK shown once with copy + `openmesh://channel` invite link + QR), join via pasted link or name+PSK, channel invite modal (QR + share sheet), per-message Ed25519 signature badge, leave channel with confirmation. |
 | **Images** | File picker / drag-drop / paste → canvas downscale + WebP (JPEG fallback) encode loop until the target size fits the profile cap; slider from 1 KiB to the profile cap with Fastest/Balanced/Max presets; chunks, airtime, transfer time and % of the region duty-cycle budget shown before sending; progress overlay for incoming resources. |
 | **Voice** | `MediaRecorder` with `audio/ogg;codecs=opus` preferred (WebM fallback), live timer + waveform from a WebAudio analyser, auto-stop at the profile voice cap, review with playback, then bubble with waveform bars, seek, playback progress and duration. |
@@ -289,7 +290,11 @@ Implemented exactly against the doc; these gaps are worth resolving in the spec:
 8. **Profile names beyond the §9.4 size table** (`SHORT_SLOW`, `MEDIUM_SLOW`, `LONG_TURBO`) lack
    attachment/voice caps; derived conservatively and labelled in code.
 9. **`message_update` with `attachment.progress`** is used as documented; the demo transport also
-   emits it during simulated uploads so the progress UI is exercised.
+   emits it during simulated uploads so the progress UI is exercised. A channel image/voice arrives
+   as `group_message` first and the stored attachment in a later `message_update`, so the client
+   merges updates into channel messages too and only fetches bytes once `progress` reaches 1.0.
+   Incoming media shows "Receiving…" until then; Codec2 voice duration is derived from the payload
+   size when the message carries no `duration_ms`.
 10. **`get_backbone` config reply is under-specified.** §4.5 says it returns `backbone_status` +
    `config` ("backbone section") but not how the section is carried. The client accepts a `config`
    event with an optional `backbone` object and, for the live panel, loads the full config from

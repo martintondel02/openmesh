@@ -271,6 +271,26 @@ export function isCodec2Mime(mime: string | null | undefined): boolean {
   return (mime ?? '').toLowerCase().startsWith('audio/c2-');
 }
 
+/**
+ * Duration of a raw Codec2 payload derived from its byte length (whole frames × frame duration).
+ *
+ * Incoming and fixture messages may omit `duration_ms`; Codec2 is fixed-rate (7 B/40 ms at 1300,
+ * 8 B/20 ms at 3200), so the stored size is enough to show an honest clip length and waveform.
+ * Returns `null` for non-Codec2 MIME types or an empty payload.
+ */
+export function codec2PayloadDurationMs(
+  byteLength: number | null | undefined,
+  mime: string | null | undefined,
+): number | null {
+  if (!byteLength || byteLength <= 0 || !isCodec2Mime(mime)) return null;
+  const tierId = voiceTierForMime(mime);
+  if (!tierId || tierId === 'high') return null;
+  const tier = voiceTier(tierId);
+  const frameBytes = codec2FrameBytes(tierId);
+  if (!frameBytes || !tier.frameMs) return null;
+  return Math.floor(byteLength / frameBytes) * tier.frameMs;
+}
+
 export function codec2TierIndex(tierInput: VoiceTierId): 0 | 1 | 2 {
   if (tierInput === 'high') return 2;
   return voiceTier(tierInput).mode === '1300' ? 0 : 1;
@@ -279,7 +299,16 @@ export function codec2TierIndex(tierInput: VoiceTierId): 0 | 1 | 2 {
 /** Human label for an incoming/outgoing voice attachment. */
 export function voiceAttachmentLabel(mime: string | null | undefined, durationMs?: number | null, bytes?: number | null): string {
   const tier = voiceTierForMime(mime);
-  const codec = tier === 'tiny' ? 'Codec2 1.3k' : tier === 'medium' ? 'Codec2 3.2k' : tier === 'high' ? 'Opus' : 'Audio';
+  const value = (mime ?? '').toLowerCase();
+  const highCodec =
+    value.includes('opus') || value.includes('ogg')
+      ? 'Opus'
+      : value.includes('aac') || value.includes('mp4')
+        ? 'AAC'
+        : value.includes('mpeg')
+          ? 'MP3'
+          : 'Audio';
+  const codec = tier === 'tiny' ? 'Codec2 1.3k' : tier === 'medium' ? 'Codec2 3.2k' : tier === 'high' ? highCodec : 'Audio';
   const duration = durationMs && durationMs > 0 ? ` · ${(durationMs / 1000).toFixed(durationMs >= 10_000 ? 0 : 1)} s` : '';
   const size = bytes && bytes > 0 ? ` · ${(bytes / 1024).toFixed(bytes >= 10 * 1024 ? 0 : 1)} KiB` : '';
   return `${codec}${duration}${size}`;

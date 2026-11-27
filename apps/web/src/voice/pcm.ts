@@ -164,6 +164,15 @@ export async function playCodec2Payload(payload: Uint8Array, tier: VoiceTierId):
     window.AudioContext ?? (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
   if (!AudioContextClass) throw new Error('Web Audio is not available in this browser.');
   const context = new AudioContextClass();
+  // Chrome may create the context suspended when playback starts after the async WASM decode
+  // (user activation can expire); resume explicitly so the decoded audio is actually heard.
+  if (context.state === 'suspended') {
+    try {
+      await context.resume();
+    } catch {
+      // Playback still starts the source; the browser will surface an audio-policy error.
+    }
+  }
   const buffer = context.createBuffer(1, Math.max(1, pcm.length), CODEC2_SAMPLE_RATE);
   buffer.copyToChannel(pcm16ToFloat(pcm) as Float32Array<ArrayBuffer>, 0);
   const source = context.createBufferSource();

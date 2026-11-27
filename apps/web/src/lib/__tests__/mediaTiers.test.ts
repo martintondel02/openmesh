@@ -11,6 +11,7 @@ import {
   VOICE_TIERS,
   VOICE_TIER_ORDER,
   codec2FrameBytes,
+  codec2PayloadDurationMs,
   codec2TierIndex,
   estimateImageTierBytes,
   estimateVoiceTierBytes,
@@ -163,6 +164,21 @@ describe('voice tier math', () => {
     expect(slow.capMs).toBe(Math.min(slow.tierCapMs, slow.byteCapMs));
   });
 
+  it('derives Codec2 clip duration from the payload size when duration_ms is missing', () => {
+    // 308 B at 1300 bps = 44 whole frames × 40 ms = 1.76 s (the live bridge fixture).
+    expect(codec2PayloadDurationMs(308, 'audio/c2-1300')).toBe(1760);
+    expect(codec2PayloadDurationMs(7, 'audio/c2-1300')).toBe(40);
+    expect(codec2PayloadDurationMs(309, 'audio/c2-1300')).toBe(1760);
+    expect(codec2PayloadDurationMs(400, 'audio/c2-3200')).toBe(1000);
+    expect(codec2PayloadDurationMs(308, 'audio/c2-3200')).toBe(760);
+    expect(codec2PayloadDurationMs(0, 'audio/c2-1300')).toBeNull();
+    expect(codec2PayloadDurationMs(null, 'audio/c2-1300')).toBeNull();
+    expect(codec2PayloadDurationMs(undefined, 'audio/c2-1300')).toBeNull();
+    expect(codec2PayloadDurationMs(1000, 'audio/ogg; codecs=opus')).toBeNull();
+    expect(codec2PayloadDurationMs(1000, 'image/webp')).toBeNull();
+    expect(codec2PayloadDurationMs(1000, null)).toBeNull();
+  });
+
   it('maps MIME types to tiers and formats incoming labels', () => {
     expect(voiceTierForMime('audio/c2-1300')).toBe('tiny');
     expect(voiceTierForMime('audio/c2-3200')).toBe('medium');
@@ -173,6 +189,10 @@ describe('voice tier math', () => {
     expect(isCodec2Mime('audio/ogg')).toBe(false);
     expect(voiceAttachmentLabel('audio/c2-1300', 7400, 1295)).toBe('Codec2 1.3k · 7.4 s · 1.3 KiB');
     expect(voiceAttachmentLabel('audio/ogg; codecs=opus', 5_000, 20_000)).toContain('Opus');
+    expect(voiceAttachmentLabel('audio/ogg', 1_000, 2_000)).toContain('Opus');
+    expect(voiceAttachmentLabel('audio/mp4', 3_000, 12_000)).toContain('AAC');
+    expect(voiceAttachmentLabel('audio/aac', 3_000, 12_000)).toContain('AAC');
+    expect(voiceAttachmentLabel('audio/mpeg', 3_000, 12_000)).toContain('MP3');
   });
 
   it('demo seeds a tiny Codec2 voice note plus the existing Opus note', () => {

@@ -66,7 +66,7 @@ import {
 } from '../lib/regulatory';
 import { ConfigApiError, patchBridgeConfig } from '../lib/config-api';
 import type { ConfigPatch } from './reducers';
-import { deriveDelivery, mergeConfig, removeContact as removeContactReducer, upsertChannel, upsertGroupMessage, upsertMessage, upsertNode, applyAck, applyMessageUpdate, appendPositionHistory } from './reducers';
+import { deriveDelivery, mergeConfig, removeContact as removeContactReducer, upsertChannel, upsertGroupMessage, upsertMessage, upsertNode, applyAck, applyMessageUpdate, applyGroupMessageUpdate, applyResourceProgress, resourceProgressFraction, appendPositionHistory } from './reducers';
 import type { MeshTransport, TransportStatus } from '../lib/transport';
 import { LiveTransport, buildHttpBaseUrl } from '../lib/ws';
 import { MockTransport } from '../lib/mock/transport';
@@ -2325,9 +2325,13 @@ export const useAppStore = create<AppState>()((set, get) => ({
         break;
       }
       case 'message_update': {
-        const data = event.data as { msg_id: number } & Record<string, unknown>;
-        const messages = applyMessageUpdate(state.messages, data as MessageUpdateData);
-        set({ messages });
+        const data = event.data as MessageUpdateData;
+        set({
+          messages: applyMessageUpdate(state.messages, data),
+          // Channel attachments arrive through `message_update` (the group_message event has no
+          // attachment yet), so merge into both message lists.
+          groupMessages: applyGroupMessageUpdate(state.groupMessages, data),
+        });
         break;
       }
       case 'group_message': {
@@ -2401,13 +2405,10 @@ export const useAppStore = create<AppState>()((set, get) => ({
       }
       case 'resource_progress': {
         const data = event.data as ResourceProgressData;
-        const progress = data.total > 0 ? Math.min(1, data.received / data.total) : 0;
+        const progress = resourceProgressFraction(data.received, data.total);
         set({
-          messages: state.messages.map((m) =>
-            m.msg_id === data.msg_id && m.attachment
-              ? { ...m, attachment: { ...m.attachment, progress } }
-              : m,
-          ),
+          messages: applyResourceProgress(state.messages, data.msg_id, progress),
+          groupMessages: applyResourceProgress(state.groupMessages, data.msg_id, progress),
         });
         break;
       }
