@@ -534,6 +534,14 @@ async fn core_task(
     };
     // Pace resource chunk offers to the radio's legal airtime (duty-aware hint from profile/region).
     runtime.apply_resource_pace();
+    // Persist the frame sequence counter across restarts. Peers deduplicate by `(src, seq)` for 30
+    // minutes, so a restarted bridge reusing small seq numbers would have all new frames dropped by
+    // a still-running phone app (clean firmware counters, silent media stall).
+    let seq_store = runtime.store.clone();
+    let mut persisted_seq = runtime.engine.last_seq();
+    if let Err(error) = seq_store.set_meta_json("last_seq", &persisted_seq) {
+        tracing::warn!(%error, "cannot persist frame sequence floor");
+    }
     // Introduce ourselves immediately so nearby nodes learn the identity.
     let now = util::now_ms();
     if let Ok(processed) = runtime.engine.announce(now) {
@@ -549,6 +557,12 @@ async fn core_task(
                 let now = util::now_ms();
                 match input {
                     EngineInput::Inbound(inbound) => {
+                        tracing::debug!(
+                            bytes = inbound.bytes.len(),
+                            radio = inbound.link.as_ref().map(|link| link.link),
+                            rssi = inbound.link.as_ref().and_then(|link| link.rssi),
+                            "radio frame received"
+                        );
                         let exclude = inbound.link.as_ref().and_then(|link| link.peer);
                         if let Some(link) = &inbound.link {
                             if link.rssi.is_some() {
@@ -571,8 +585,19 @@ async fn core_task(
                     }
                     EngineInput::Tick => runtime.tick(now).await,
                 }
+                // Cheap: only write when a frame was originated since the last persist.
+                let seq = runtime.engine.last_seq();
+                if seq != persisted_seq {
+                    match seq_store.set_meta_json("last_seq", &seq) {
+                        Ok(()) => persisted_seq = seq,
+                        Err(error) => tracing::warn!(%error, "cannot persist frame sequence floor"),
+                    }
+                }
             }
         }
+    }
+    if let Err(error) = seq_store.set_meta_json("last_seq", &runtime.engine.last_seq()) {
+        tracing::warn!(%error, "cannot persist frame sequence floor on shutdown");
     }
     tracing::debug!("engine task stopped");
 }

@@ -507,6 +507,10 @@ pub struct Stats {
     pub dropped_frames: u64,
     /// Duplicate frames suppressed by the dedup cache.
     pub dedup_hits: u64,
+    /// ACK frames decrypted and accepted for processing.
+    pub acks_rx: u64,
+    /// Accepted `resource_window` ACKs (the media flow-control acknowledgements).
+    pub window_acks_rx: u64,
     /// Logical envelopes currently held in the store queue.
     pub stored_envelopes: usize,
     /// Known nodes in the peer book.
@@ -871,9 +875,26 @@ impl Engine {
     pub fn ingest(&mut self, bytes: &[u8], link: Option<LinkInfo>, now_ms: u64) -> Processed {
         self.now_ms = now_ms;
         match Frame::decode(bytes) {
-            Ok(frame) => self.on_frame(frame, link, now_ms),
+            Ok(frame) => {
+                // Timestamped, per-frame debug line: correlates with firmware `txfail ... seq=` /
+                // `acktx` diag entries and with the bridge's pre-engine `radio frame received` line.
+                tracing::debug!(
+                    bytes = bytes.len(),
+                    kind = ?frame.typ,
+                    src = %frame.src,
+                    dst = %frame.dst,
+                    seq = frame.seq,
+                    ttl = frame.ttl,
+                    "radio frame decoded"
+                );
+                self.on_frame(frame, link, now_ms)
+            }
             Err(_) => {
                 self.stats.dropped_frames += 1;
+                tracing::debug!(
+                    bytes = bytes.len(),
+                    "dropped malformed radio frame (framing/MTU decode failed)"
+                );
                 Processed::default()
             }
         }
@@ -919,6 +940,13 @@ impl Engine {
         // Duplicate suppression by (src, seq).
         if !self.dedup.check_and_insert(frame.src, frame.seq, now_ms) {
             self.stats.dedup_hits += 1;
+            tracing::debug!(
+                src = %frame.src,
+                seq = frame.seq,
+                kind = ?frame.typ,
+                dst = %frame.dst,
+                "duplicate frame suppressed"
+            );
             self.maybe_reack_duplicate(&frame, now_ms, &mut out);
             return out;
         }
@@ -1833,6 +1861,23 @@ impl Engine {
         }
     }
 
+    /// Sequence number of the most recently originated frame.
+    ///
+    /// Senders MUST keep this monotonic across restarts: receivers deduplicate by `(src, seq)` for
+    /// [`DEDUP_TTL_MS`], so reusing small sequence numbers after a restart makes a running peer drop
+    /// the new frames as duplicates (observed as a bridge-restart media stall).
+    pub fn last_seq(&self) -> u32 {
+        self.seq
+    }
+
+    /// Raise the sequence floor so the next originated frame has `seq > floor`.
+    ///
+    /// Embedders that restart must restore the persisted [`Engine::last_seq`] through this method
+    /// before emitting frames; the engine's own sequence counter is not part of [`EngineConfig`].
+    pub fn set_sequence_floor(&mut self, floor: u32) {
+        self.seq = self.seq.max(floor);
+    }
+
     /// Whether a message id is still pending (direct ack) or carried by an in-flight resource.
     fn msg_id_in_use(&self, id: u32) -> bool {
         self.pending_msgs.contains_key(&id)
@@ -2402,6 +2447,11 @@ impl Engine {
         };
         if payload_flags & PAYLOAD_IS_ACK == 0 {
             self.stats.dropped_frames += 1;
+            tracing::debug!(
+                from = %frame.src,
+                dst = %frame.dst,
+                "dropped ACK frame: payload lacks the IS_ACK flag"
+            );
             out.events
                 .push(Event::Error("ack frame without IS_ACK".into()));
             return;
@@ -2413,21 +2463,39 @@ impl Engine {
         }
         let Some(peer) = self.peer_identity(frame.src) else {
             self.stats.dropped_frames += 1;
+            tracing::debug!(
+                from = %frame.src,
+                "dropped ACK frame: unknown peer identity (no announce/contact yet)"
+            );
             return;
         };
         let aad = frame.aad();
         let Ok(plaintext) = self.identity.open(&peer, &aad, sealed) else {
             self.stats.dropped_frames += 1;
+            tracing::debug!(from = %frame.src, "dropped ACK frame: decryption failed");
             return;
         };
         match cbor_from_bytes::<Ack>(&plaintext) {
             Ok(ack) => {
+                self.stats.acks_rx += 1;
+                tracing::debug!(
+                    from = %frame.src,
+                    kind = ?ack.kind,
+                    msg_id = ack.msg_id,
+                    msg_ref = format!("{:#010x}", ack.msg_id),
+                    res_id = ?ack.res_id,
+                    next_expected = ?ack.next_expected,
+                    bitmap = ?ack.bitmap,
+                    "ack accepted"
+                );
                 self.peer_knows_us.insert(frame.src);
                 self.handle_ack(frame.src, ack, now_ms, out);
             }
-            Err(err) => out
-                .events
-                .push(Event::Error(format!("bad ack body: {err}"))),
+            Err(err) => {
+                tracing::debug!(from = %frame.src, error = %err, "dropped ACK frame: bad body");
+                out.events
+                    .push(Event::Error(format!("bad ack body: {err}")));
+            }
         }
     }
 
@@ -2449,6 +2517,16 @@ impl Engine {
                 let (Some(next_expected), Some(bitmap)) = (ack.next_expected, ack.bitmap) else {
                     return;
                 };
+                self.stats.window_acks_rx += 1;
+                tracing::debug!(
+                    from = %from,
+                    res_id,
+                    msg_id = ack.msg_id,
+                    msg_ref = format!("{:#010x}", ack.msg_id),
+                    next_expected,
+                    bitmap = format!("{bitmap:#010x}"),
+                    "resource window ack received"
+                );
                 let pace_interval = self.resource_pace_interval_ms;
                 let (completed, unsent, progress) = {
                     let Some(resource) = self.outgoing.get_mut(&res_id) else {
@@ -2492,6 +2570,18 @@ impl Engine {
                             if !release.is_empty() {
                                 resource.paced_ms = now_ms;
                             }
+                            tracing::debug!(
+                                res_id,
+                                acked = resource.sender.acked_count(),
+                                total = resource.sender.total_chunks,
+                                next_unsent = resource.sender.next_unsent,
+                                pending = resource.sender.pending_window().len(),
+                                released = release.len(),
+                                paced,
+                                retries = resource.sender.retries,
+                                deadline_ms = resource.sender.deadline_ms,
+                                "resource window ack applied"
+                            );
                             (
                                 false,
                                 release,
@@ -2531,6 +2621,7 @@ impl Engine {
 
     fn finish_outgoing_resource(&mut self, res_id: u32, from: NodeId, out: &mut Processed) {
         if self.outgoing.remove(&res_id).is_some() {
+            tracing::debug!(res_id, peer = %from, "outgoing resource complete");
             out.events.push(Event::ResourceSent { peer: from, res_id });
         }
     }
@@ -2714,6 +2805,12 @@ impl Engine {
         // Duplicate manifest: answer with the current window / completion ack so a lost ack
         // does not stall the sender.
         if self.incoming.contains_key(&id) {
+            tracing::debug!(
+                peer = %peer,
+                res_id = manifest.res_id,
+                msg_id = manifest.msg_id,
+                "duplicate resource manifest; re-queuing window ack"
+            );
             self.send_window_ack(id, now_ms, out);
             return;
         }
@@ -2865,6 +2962,17 @@ impl Engine {
                 total,
             });
         }
+        tracing::debug!(
+            peer = %snapshot.peer,
+            res_id = snapshot.res_id,
+            next_expected = snapshot.ack.next_expected,
+            bitmap = snapshot
+                .ack
+                .bitmap
+                .map(|bitmap| format!("{bitmap:#010x}"))
+                .unwrap_or_default(),
+            "window ack queued"
+        );
         let _ = snapshot.msg_id;
         self.queue_ack(snapshot.peer, snapshot.ack, out);
     }
@@ -3064,6 +3172,13 @@ impl Engine {
                 if let Some(resource) = self.outgoing.get_mut(&res_id) {
                     resource.paced_ms = now_ms;
                     resource.sender.deadline_ms = now_ms.saturating_add(RESOURCE_RTO_MS);
+                    tracing::debug!(
+                        res_id,
+                        released = unsent.len(),
+                        next_unsent = resource.sender.next_unsent,
+                        total = resource.sender.total_chunks,
+                        "paced resource batch released"
+                    );
                 }
                 continue;
             }
@@ -3079,6 +3194,15 @@ impl Engine {
                     resource.sender.deadline_ms = snapshot
                         .paced_ms
                         .saturating_add(self.resource_pace_interval_ms);
+                    tracing::debug!(
+                        res_id,
+                        acked = resource.sender.acked_count(),
+                        total = resource.sender.total_chunks,
+                        pending = snapshot.pending.len(),
+                        paced_ms = snapshot.paced_ms,
+                        deferred_deadline_ms = resource.sender.deadline_ms,
+                        "resource retry deferred to the paced boundary"
+                    );
                 }
                 continue;
             }
@@ -3166,6 +3290,16 @@ impl Engine {
                     resource.paced_ms = now_ms;
                     resource.sender.deadline_ms =
                         now_ms.saturating_add(self.resource_pace_interval_ms.max(RESOURCE_RTO_MS));
+                    tracing::debug!(
+                        res_id,
+                        retried = pending.len(),
+                        acked = resource.sender.acked_count(),
+                        total = resource.sender.total_chunks,
+                        retries = resource.sender.retries,
+                        manifest = repair_manifest,
+                        next_deadline_ms = resource.sender.deadline_ms,
+                        "paced resource retry released"
+                    );
                 }
             }
         }
@@ -3737,6 +3871,197 @@ mod tests {
             retry_bursts.is_empty(),
             "bursty retry emissions observed: {retry_bursts:?}"
         );
+    }
+
+    #[test]
+    fn restart_without_sequence_floor_is_dropped_as_duplicate() {
+        // Bridge-restart media stall: a continuously running peer deduplicates frames by
+        // `(src, seq)` for DEDUP_TTL_MS. If the restarted sender starts at seq 0 again, every new
+        // frame looks like a duplicate and is dropped before it can be acknowledged. Restoring the
+        // persisted sequence floor fixes it.
+        let mut sender = engine_from_seed(&[9u8; 32], EngineConfig::client("bridge"));
+        let mut phone = engine_from_seed(&[10u8; 32], EngineConfig::client("phone"));
+        sender.add_contact(phone.public_identity(), Some("phone".into()));
+        phone.add_contact(sender.public_identity(), Some("bridge".into()));
+
+        let first = sender
+            .send_text(Target::Direct(phone.node_id()), "before restart", 1_000)
+            .expect("first message");
+        let mut first_message = 0;
+        for out in first.outbound {
+            let processed = phone.on_frame(out.frame, None, 1_000);
+            first_message += processed
+                .events
+                .iter()
+                .filter(|event| matches!(event, Event::Message(_)))
+                .count();
+        }
+        assert_eq!(first_message, 1, "pre-restart message must arrive");
+        let old_seq = sender.last_seq();
+        assert!(old_seq > 0);
+
+        // Unfixed restart: same identity and a freshly zeroed sequence counter.
+        let mut restarted = engine_from_seed(&[9u8; 32], EngineConfig::client("bridge"));
+        restarted.add_contact(phone.public_identity(), Some("phone".into()));
+        let collided = restarted
+            .send_text(Target::Direct(phone.node_id()), "after restart", 2_000)
+            .expect("collided message");
+        let dedup_before = phone.stats().dedup_hits;
+        for out in collided.outbound {
+            let processed = phone.on_frame(out.frame, None, 2_000);
+            assert!(
+                !processed
+                    .events
+                    .iter()
+                    .any(|event| matches!(event, Event::Message(_))),
+                "colliding seq frame must not surface as a new message"
+            );
+        }
+        assert!(
+            phone.stats().dedup_hits > dedup_before,
+            "the restarted sender's reused sequence numbers must be deduplicated"
+        );
+
+        // Restoring the persisted floor makes the next frame acceptable again.
+        restarted.set_sequence_floor(old_seq);
+        let fixed = restarted
+            .send_text(
+                Target::Direct(phone.node_id()),
+                "after sequence floor",
+                3_000,
+            )
+            .expect("post-floor message");
+        let mut delivered = false;
+        for out in fixed.outbound {
+            let processed = phone.on_frame(out.frame, None, 3_000);
+            delivered |= processed
+                .events
+                .iter()
+                .any(|event| matches!(event, Event::Message(_)));
+        }
+        assert!(
+            delivered,
+            "a restored sequence floor must let frames through"
+        );
+    }
+
+    #[test]
+    fn asymmetric_ack_loss_does_not_deadlock_sender() {
+        // Hardware symptom: phone→bridge ACK direction is lossy while bridge→phone data is clean.
+        // The sender must keep retrying and the receiver must re-ack duplicate chunks; dropping an
+        // entire minute of window ACKs must not deadlock the transfer.
+        let mut sender = engine(81);
+        let mut phone = engine(82);
+        sender.add_contact(phone.public_identity(), Some("phone".into()));
+        phone.add_contact(sender.public_identity(), Some("bridge".into()));
+        sender.set_resource_pace_interval_ms(2_000);
+        let phone_id = phone.node_id();
+        let data = vec![11u8; 1_200];
+        let res_id = 0x8181_0001u32;
+        let start = sender
+            .send_resource(
+                Target::Direct(phone_id),
+                0x8181_0002,
+                res_id,
+                ResourceKind::Attachment,
+                "image/webp",
+                &data,
+                0,
+            )
+            .expect("send");
+        let drop_acks_until = 60_000u64;
+        let mut frames: Vec<Outbound> = start.outbound;
+        let mut now = 0u64;
+        let mut completed = false;
+        let mut phone_received = false;
+        for _step in 0..300u32 {
+            now += 1_000;
+            let mut next: Vec<Outbound> = Vec::new();
+            for out in frames.drain(..) {
+                let received = phone.on_frame(out.frame, None, now);
+                phone_received |= received
+                    .events
+                    .iter()
+                    .any(|event| matches!(event, Event::ResourceReceived { .. }));
+                for ack in received.outbound {
+                    if now >= drop_acks_until {
+                        let applied = sender.on_frame(ack.frame, None, now);
+                        next.extend(applied.outbound);
+                    }
+                }
+            }
+            next.extend(sender.tick(now).outbound);
+            // Do not let the phone's quiet-timer acks through during the lossy window either.
+            let phone_tick = phone.tick(now);
+            phone_received |= phone_tick
+                .events
+                .iter()
+                .any(|event| matches!(event, Event::ResourceReceived { .. }));
+            for ack in phone_tick.outbound {
+                if now >= drop_acks_until {
+                    let applied = sender.on_frame(ack.frame, None, now);
+                    next.extend(applied.outbound);
+                }
+            }
+            frames = next;
+            if !sender.outgoing.contains_key(&res_id) {
+                completed = true;
+                break;
+            }
+        }
+        assert!(
+            completed,
+            "sender deadlocked after asymmetric ACK loss (resource still outgoing)"
+        );
+        assert!(
+            phone_received,
+            "phone must have received the whole resource"
+        );
+        assert!(
+            sender.stats().acks_rx > 0,
+            "accepted ACK counter must advance once the ACK direction recovers"
+        );
+    }
+
+    #[test]
+    fn window_ack_counter_reports_accepted_acks() {
+        // Dedicated counter for the controlled `--log debug` ACK-uplink diagnosis: a window ACK
+        // that is received, decrypted and applied must increment `window_acks_rx` (while
+        // `rx_frames` remains the all-frame counter).
+        let mut sender = engine(91);
+        let mut phone = engine(92);
+        sender.add_contact(phone.public_identity(), Some("phone".into()));
+        phone.add_contact(sender.public_identity(), Some("bridge".into()));
+        let phone_id = phone.node_id();
+        let data = vec![13u8; 600];
+        let start = sender
+            .send_resource(
+                Target::Direct(phone_id),
+                0x9191_0001,
+                0x9191_0002,
+                ResourceKind::Attachment,
+                "image/webp",
+                &data,
+                0,
+            )
+            .expect("send");
+        for out in start.outbound {
+            let _ = phone.on_frame(out.frame, None, 0);
+        }
+        // The receiver's quiet-timer tick emits a window ACK for the two chunks it has.
+        let ack_out = phone.tick(6_000);
+        let mut delivered_ack = false;
+        for out in ack_out.outbound {
+            let processed = sender.on_frame(out.frame, None, 6_000);
+            delivered_ack |= processed
+                .events
+                .iter()
+                .any(|event| matches!(event, Event::ResourceProgress { .. }));
+        }
+        assert!(delivered_ack);
+        assert_eq!(sender.stats().window_acks_rx, 1);
+        assert!(sender.stats().acks_rx >= 1);
+        assert!(sender.stats().rx_frames >= 1);
     }
 
     #[test]

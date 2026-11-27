@@ -2010,6 +2010,17 @@ impl CoreRuntime {
     pub async fn tick(&mut self, now: u64) {
         let processed = self.engine.tick(now);
         self.process(processed, now).await;
+        // Low-rate frame/ACK counters for the controlled `--log debug` ACK-uplink diagnosis.
+        let stats = self.engine.stats();
+        tracing::debug!(
+            tx_frames = stats.tx_frames,
+            rx_frames = stats.rx_frames,
+            acks_rx = stats.acks_rx,
+            window_acks_rx = stats.window_acks_rx,
+            dedup_hits = stats.dedup_hits,
+            dropped_frames = stats.dropped_frames,
+            "mesh frame counters"
+        );
         if self.config.auto_announce && now.saturating_sub(self.last_announce_ms) >= 1_800_000 {
             let _ = self.cmd_announce(now).await;
         }
@@ -2325,6 +2336,14 @@ pub fn restore_engine_state(engine: &mut Engine, store: &Store) -> Result<()> {
                 );
             }
         }
+    }
+    // Peers deduplicate frames by `(src, seq)` for 30 minutes. A bridge restart that reuses seq 0
+    // while the phone app keeps running would have every new frame dropped as a duplicate on the
+    // phone (frames arrive at the radio cleanly, so firmware counters look healthy), stalling any
+    // in-flight transfer. Restore the persisted sequence floor before originating any frames.
+    if let Some(last_seq) = store.get_meta_json::<u32>("last_seq")? {
+        engine.set_sequence_floor(last_seq);
+        tracing::debug!(last_seq, "restored frame sequence floor");
     }
     Ok(())
 }
@@ -2838,5 +2857,45 @@ mod contact_url_format_tests {
         let legacy = url.replace("node_id=", "node=");
         let parsed = parse_contact_url(&legacy).expect("legacy url parses");
         assert_eq!(parsed.0, ident.node_id);
+    }
+}
+
+#[cfg(test)]
+mod restart_continuity_tests {
+    use super::*;
+    use openmesh_core::EngineConfig;
+    use tempfile::TempDir;
+
+    /// A restarted bridge must restore its frame sequence floor: peers deduplicate by
+    /// `(src, seq)` for 30 minutes, so reusing seq numbers after a restart makes a still-running
+    /// phone drop every new frame as a duplicate (the bridge-restart media stall).
+    #[test]
+    fn restore_engine_state_restores_the_sequence_floor() {
+        let dir = TempDir::new().expect("tempdir");
+        let path = dir.path().join("restart.redb");
+        let seed = [12u8; 32];
+        let seq = {
+            let store = Store::open(&path).expect("store");
+            let mut first = openmesh_core::engine_from_seed(&seed, EngineConfig::client("bridge"));
+            let announced = first.announce(0).expect("announce");
+            assert!(!announced.outbound.is_empty());
+            let seq = first.last_seq();
+            assert!(seq > 0);
+            store.set_meta_json("last_seq", &seq).expect("persist seq");
+            seq
+        };
+
+        // Reopen the database: simulates a full bridge process restart.
+        let store = Store::open(&path).expect("reopen store");
+        let mut restored = openmesh_core::engine_from_seed(&seed, EngineConfig::client("bridge"));
+        restore_engine_state(&mut restored, &store).expect("restore");
+        assert_eq!(restored.last_seq(), seq);
+
+        let next = restored.announce(120_000).expect("announce");
+        assert!(!next.outbound.is_empty());
+        assert!(
+            next.outbound.iter().all(|out| out.frame.seq > seq),
+            "restarted frames must use sequence numbers above the restored floor"
+        );
     }
 }
