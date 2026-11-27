@@ -180,6 +180,13 @@ leave the user guessing:
   clamped to 45–180 s**, the bubble flips to "Upload stalled — no progress for N s." with a
   **Retry upload** button (also available from the message-status dialog). `SENT` remains "handed to
   the radio", `DELIVERED` remains "peer/bridge ACK"; a channel still has no per-recipient receipt.
+- **Bounded automatic retry** — a stalled upload gets one automatic retry at a time with
+  exponential backoff (30 s, 60 s, 120 s, … capped at 15 min, at most 3 automatic attempts). The
+  bubble shows "Retrying in N s" with a Retry-now action, and after the budget is used it shows
+  "Stalled — tap Retry" and waits for the user. Automatic attempts only start on a READY link and
+  never while another resource transfer is in flight; only one auto-retry may run at a time. This
+  prevents a batch of stale uploads (e.g. seeded on app restart) from flooding the companion TX
+  path and starving window ACKs for concurrent inbound transfers.
 - **Retry without duplicates** — retry re-sends the stored bytes through the normal attachment path
   as a fresh attempt and replaces the local row in place (delete old id + insert the new engine id),
   so there is always exactly one bubble. The core's `retry_message` only retransmits a still-pending

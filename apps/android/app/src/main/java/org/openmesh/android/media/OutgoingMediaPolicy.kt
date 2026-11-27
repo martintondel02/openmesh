@@ -27,9 +27,13 @@ data class OutgoingMediaSnapshot(
     /** 0..1 when the core reports progress; null means indeterminate (no chunk events yet). */
     val progress: Float?,
     val attempts: Int = 1,
+    /** Number of automatic retries already used for this attempt chain (manual retries reset it). */
+    val autoRetries: Int = 0,
+    /** When the next automatic retry is due; null while no backoff is scheduled. */
+    val nextAutoRetryAtMs: Long? = null,
 )
 
-enum class OutgoingMediaUiState { SENDING, RETRYING, STALLED }
+enum class OutgoingMediaUiState { SENDING, RETRYING, STALLED, AUTO_RETRY_WAIT }
 
 data class OutgoingMediaUi(
     val state: OutgoingMediaUiState,
@@ -37,6 +41,9 @@ data class OutgoingMediaUi(
     val elapsedMs: Long,
     val stalledForMs: Long,
     val attempts: Int,
+    val autoRetries: Int = 0,
+    /** Milliseconds until the next automatic attempt while [state] is AUTO_RETRY_WAIT. */
+    val retryInMs: Long = 0L,
 )
 
 object OutgoingMediaPolicy {
@@ -54,6 +61,18 @@ object OutgoingMediaPolicy {
 
     /** After this long with no completion show the "radio uploads can take minutes" hint. */
     const val SLOW_HINT_AFTER_MS: Long = 8_000L
+
+    /** Automatic retry backoff: 30 s, 60 s, 120 s, … capped at 15 min. */
+    const val AUTO_RETRY_BASE_MS: Long = 30_000L
+
+    /** Never wait longer than this between automatic attempts. */
+    const val AUTO_RETRY_MAX_MS: Long = 15 * 60_000L
+
+    /** After this many automatic attempts the upload needs the user's manual Retry. */
+    const val MAX_AUTO_RETRIES: Int = 3
+
+    /** A transfer is considered in flight if any resource activity happened this recently. */
+    const val TRANSFER_IN_FLIGHT_WINDOW_MS: Long = 15_000L
 
     fun stallThresholdMs(expectedWindowMs: Long): Long =
         min(MAX_STALL_MS, max(MIN_STALL_MS, expectedWindowMs.coerceAtLeast(0L) * STALL_WINDOW_FACTOR))
@@ -93,8 +112,15 @@ object OutgoingMediaPolicy {
         val elapsed = (nowMs - snapshot.sentAtMs).coerceAtLeast(0L)
         val idle = (nowMs - snapshot.lastActivityMs).coerceAtLeast(0L)
         val threshold = stallThresholdMs(snapshot.expectedWindowMs)
+        val stalled = idle > threshold
+        val retryAt = snapshot.nextAutoRetryAtMs
+        val waitingForAutoRetry = stalled &&
+            snapshot.autoRetries < MAX_AUTO_RETRIES &&
+            retryAt != null &&
+            retryAt > nowMs
         val state = when {
-            idle > threshold -> OutgoingMediaUiState.STALLED
+            waitingForAutoRetry -> OutgoingMediaUiState.AUTO_RETRY_WAIT
+            stalled -> OutgoingMediaUiState.STALLED
             snapshot.attempts > 1 && elapsed <= RETRYING_WINDOW_MS -> OutgoingMediaUiState.RETRYING
             else -> OutgoingMediaUiState.SENDING
         }
@@ -102,8 +128,10 @@ object OutgoingMediaPolicy {
             state = state,
             progress = snapshot.progress,
             elapsedMs = elapsed,
-            stalledForMs = if (state == OutgoingMediaUiState.STALLED) idle else 0L,
+            stalledForMs = if (stalled) idle else 0L,
             attempts = snapshot.attempts,
+            autoRetries = snapshot.autoRetries,
+            retryInMs = if (waitingForAutoRetry) retryAt!! - nowMs else 0L,
         )
     }
 
@@ -120,11 +148,65 @@ object OutgoingMediaPolicy {
 
     /** Short status shown beside the tick while an attachment is still uploading. */
     fun statusText(ui: OutgoingMediaUi): String = when (ui.state) {
-        OutgoingMediaUiState.STALLED -> "Upload stalled — retry"
+        OutgoingMediaUiState.STALLED -> "Stalled — tap Retry"
+        OutgoingMediaUiState.AUTO_RETRY_WAIT -> "Retrying in ${retryInSeconds(ui)} s"
         OutgoingMediaUiState.RETRYING -> "Retrying…"
         OutgoingMediaUiState.SENDING ->
             progressPercent(ui.progress)?.let { "Uploading… $it%" } ?: "Uploading…"
     }
+
+    fun retryInSeconds(ui: OutgoingMediaUi): Long = ((ui.retryInMs + 999L) / 1000L).coerceAtLeast(1L)
+
+    /** Delay before the next automatic attempt, given how many automatic attempts were used. */
+    fun autoRetryDelayMs(autoRetries: Int): Long {
+        val exponent = autoRetries.coerceIn(0, 20)
+        var delay = AUTO_RETRY_BASE_MS
+        repeat(exponent) {
+            delay = if (delay >= AUTO_RETRY_MAX_MS / 2) AUTO_RETRY_MAX_MS else delay * 2
+        }
+        return delay.coerceAtMost(AUTO_RETRY_MAX_MS)
+    }
+
+    /** Schedule the next automatic attempt after the current stall. */
+    fun scheduleAutoRetry(snapshot: OutgoingMediaSnapshot, nowMs: Long): OutgoingMediaSnapshot =
+        snapshot.copy(nextAutoRetryAtMs = nowMs + autoRetryDelayMs(snapshot.autoRetries))
+
+    fun autoRetryAllowed(snapshot: OutgoingMediaSnapshot): Boolean =
+        snapshot.autoRetries < MAX_AUTO_RETRIES
+
+    fun isAutoRetryDue(snapshot: OutgoingMediaSnapshot, nowMs: Long): Boolean =
+        autoRetryAllowed(snapshot) && snapshot.nextAutoRetryAtMs != null && nowMs >= snapshot.nextAutoRetryAtMs
+
+    /**
+     * Only one automatic retry may run at a time, the link must be READY and no other transfer may
+     * be in flight (resource activity within [TRANSFER_IN_FLIGHT_WINDOW_MS]) so an automatic retry
+     * can never flood the companion TX path.
+     */
+    fun canStartAutoRetry(
+        radioReady: Boolean,
+        transferInFlight: Boolean,
+        anotherAutoRetryRunning: Boolean,
+    ): Boolean = radioReady && !transferInFlight && !anotherAutoRetryRunning
+
+    /** Pick the single due upload to auto-retry this tick (oldest activity first). */
+    fun pickAutoRetryCandidate(
+        snapshots: Map<Long, OutgoingMediaSnapshot>,
+        nowMs: Long,
+    ): Long? = snapshots.entries
+        .filter { isAutoRetryDue(it.value, nowMs) }
+        .minByOrNull { it.value.lastActivityMs }
+        ?.key
+
+    /** Mark an automatic attempt as started (increments counters + retry timestamps). */
+    fun markAutoRetryStarted(snapshot: OutgoingMediaSnapshot, nowMs: Long): OutgoingMediaSnapshot =
+        retried(snapshot, nowMs).copy(
+            autoRetries = snapshot.autoRetries + 1,
+            nextAutoRetryAtMs = null,
+        )
+
+    /** Manual retry resets the automatic budget so the user can always start a fresh cycle. */
+    fun markManualRetry(snapshot: OutgoingMediaSnapshot, nowMs: Long): OutgoingMediaSnapshot =
+        retried(snapshot.copy(autoRetries = 0, nextAutoRetryAtMs = null), nowMs)
 
     fun isActive(delivery: DeliveryState): Boolean = delivery == DeliveryState.QUEUED ||
         delivery == DeliveryState.SENT
@@ -142,11 +224,17 @@ object OutgoingMediaPolicy {
     }
 
     /** Full explanation for the message-status dialog when the upload itself is stalled. */
-    fun stalledExplanation(isChannel: Boolean): String = if (isChannel) {
-        "This upload has made no progress for a while. Retry starts a fresh attempt with the same " +
-            "file; the message stays in place and is not duplicated."
-    } else {
-        "This upload has made no progress for a while. Retry starts a fresh attempt with the same " +
-            "file; the message stays in place and is not duplicated."
+    fun stalledExplanation(isChannel: Boolean): String {
+        val channelNote = if (isChannel) " Channel messages have no per-person receipt. " else " "
+        return "This upload has made no progress for a while. Retry starts a fresh attempt with the " +
+            "same file; the message stays in place and is not duplicated." + channelNote +
+            "After $MAX_AUTO_RETRIES automatic attempts it waits for you to tap Retry."
     }
+
+    fun autoRetryExplanation(ui: OutgoingMediaUi): String =
+        "No progress yet. A background retry will start in ${retryInSeconds(ui)} s " +
+            "(attempt ${ui.autoRetries + 1} of $MAX_AUTO_RETRIES); you can retry now instead."
+
+    fun autoRetryExhaustedExplanation(): String =
+        "Automatic retries are used up. Tap Retry to start a fresh attempt with the same file."
 }

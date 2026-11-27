@@ -372,7 +372,9 @@ fun ChatThreadScreen(
     statusMessage?.let { message ->
         val upload = outgoingMedia[message.id]
         val stalledUpload = upload?.takeIf {
-            it.state == OutgoingMediaUiState.STALLED && message.delivery == DeliveryState.SENT
+            (it.state == OutgoingMediaUiState.STALLED ||
+                it.state == OutgoingMediaUiState.AUTO_RETRY_WAIT) &&
+                message.delivery == DeliveryState.SENT
         }
         MessageStatusDialog(
             message = message,
@@ -407,6 +409,8 @@ private fun MessageStatusDialog(
 ) {
     val uploadStalled = uploadUi?.state == OutgoingMediaUiState.STALLED &&
         message.delivery == DeliveryState.SENT
+    val uploadWaitingRetry = uploadUi?.state == OutgoingMediaUiState.AUTO_RETRY_WAIT &&
+        message.delivery == DeliveryState.SENT
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("Message status · ${DeliveryPresentation.label(message.delivery)}") },
@@ -419,6 +423,12 @@ private fun MessageStatusDialog(
                         style = MaterialTheme.typography.bodyMedium,
                         color = MeshError,
                     )
+                } else if (uploadWaitingRetry && uploadUi != null) {
+                    Text(
+                        OutgoingMediaPolicy.autoRetryExplanation(uploadUi),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MeshTertiary,
+                    )
                 }
                 Text(
                     "Sent ${relativeTime(message.sentAtMs)}" +
@@ -430,7 +440,7 @@ private fun MessageStatusDialog(
         },
         confirmButton = {
             Row {
-                if (message.delivery == DeliveryState.FAILED || uploadStalled) {
+                if (message.delivery == DeliveryState.FAILED || uploadStalled || uploadWaitingRetry) {
                     TextButton(onClick = onRetry) { Text("Retry") }
                 }
                 TextButton(onClick = onDismiss) { Text("Close") }
@@ -683,13 +693,30 @@ private fun AttachmentBubble(
             uploadUi != null && uploadUi.state == OutgoingMediaUiState.STALLED -> {
                 Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
                     Text(
-                        "Upload stalled — no progress for " +
-                            "${(uploadUi.stalledForMs / 1000).coerceAtLeast(1)} s.",
+                        if (uploadUi.autoRetries >= OutgoingMediaPolicy.MAX_AUTO_RETRIES) {
+                            OutgoingMediaPolicy.autoRetryExhaustedExplanation()
+                        } else {
+                            "Upload stalled — no progress for " +
+                                "${(uploadUi.stalledForMs / 1000).coerceAtLeast(1)} s."
+                        },
                         style = MaterialTheme.typography.labelMedium,
                         color = MeshError,
                     )
                     TextButton(onClick = { repository.retryUpload(message.id) }) {
                         Text("Retry upload", color = MeshPrimary)
+                    }
+                }
+            }
+            uploadUi != null && uploadUi.state == OutgoingMediaUiState.AUTO_RETRY_WAIT -> {
+                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    Text(
+                        "No progress yet — retrying in ${OutgoingMediaPolicy.retryInSeconds(uploadUi)} s " +
+                            "(attempt ${uploadUi.autoRetries + 1} of ${OutgoingMediaPolicy.MAX_AUTO_RETRIES}).",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MeshTertiary,
+                    )
+                    TextButton(onClick = { repository.retryUpload(message.id) }) {
+                        Text("Retry now", color = MeshPrimary)
                     }
                 }
             }

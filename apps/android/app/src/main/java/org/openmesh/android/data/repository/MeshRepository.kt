@@ -213,6 +213,12 @@ class MeshRepository(
     @Volatile private var userDisconnect = false
     @Volatile private var latestPrefs = org.openmesh.android.data.prefs.LocalPrefs()
 
+    /** Wall-clock of the last resource frame/ACK activity (inbound or outbound), for TX safety. */
+    @Volatile private var lastResourceActivityMs: Long = 0L
+
+    /** True while an automatic upload retry is being started, so only one runs at a time. */
+    @Volatile private var autoRetryInFlight = false
+
     // ---- Queued outbound messages (radio not READY): held locally, sent on the next READY link. ----
     private val MAX_QUEUED_MESSAGES = 50
     private val HANDSHAKE_TIMEOUT_MS = 20_000L
@@ -246,11 +252,13 @@ class MeshRepository(
                 if (health != current.health) _radio.value = current.copy(health = health)
             }
         }
-        // Re-evaluate upload health once a second so stalled uploads flip to "Upload stalled — retry".
+        // Re-evaluate upload health once a second so stalled uploads flip to "Stalled — tap Retry"
+        // and get one bounded automatic retry at a time with exponential backoff.
         scope.launch {
             while (isActive) {
                 delay(1_000)
                 refreshOutgoingMediaUi()
+                maybeAutoRetryStalledUploads()
             }
         }
         // Flush locally queued messages whenever a link becomes READY (connect or reconnect).
@@ -593,6 +601,7 @@ class MeshRepository(
         appendMessage(peerId, message, channel)
         scope.launch { dao.upsertMessage(MessageEntity.fromModel(message)) }
         trackOutgoingMedia(message, channel)
+        lastResourceActivityMs = System.currentTimeMillis()
         if (engine.isDemo()) simulateAck(peerId, id, channel)
         // Keep the local file reference for playback/retry.
         local.absolutePath
@@ -1058,10 +1067,57 @@ class MeshRepository(
 
     private fun refreshOutgoingMediaUi() {
         val now = System.currentTimeMillis()
-        val next = _outgoingMedia.value.mapValues { (_, snapshot) ->
+        // One-time backoff scheduling per stall: show "Retrying in N s" before the automatic attempt.
+        var snapshotsChanged = false
+        val withSchedules = _outgoingMedia.value.mapValues { (_, snapshot) ->
+            val ui = OutgoingMediaPolicy.uiState(snapshot, now)
+            val shouldSchedule = ui.state == OutgoingMediaUiState.STALLED &&
+                OutgoingMediaPolicy.autoRetryAllowed(snapshot) &&
+                snapshot.nextAutoRetryAtMs == null
+            if (shouldSchedule) {
+                snapshotsChanged = true
+                OutgoingMediaPolicy.scheduleAutoRetry(snapshot, now)
+            } else {
+                snapshot
+            }
+        }
+        if (snapshotsChanged) _outgoingMedia.value = withSchedules
+        val next = withSchedules.mapValues { (_, snapshot) ->
             OutgoingMediaPolicy.uiState(snapshot, now)
         }
         if (next != _outgoingMediaUi.value) _outgoingMediaUi.value = next
+    }
+
+    /**
+     * Start at most one automatic retry per tick, only on a READY link and only when no other
+     * resource transfer is in flight. Without these guards a batch of stale uploads retried on
+     * app restart can flood the companion TX path and starve window ACKs for concurrent inbound
+     * transfers (observed on device).
+     */
+    private fun maybeAutoRetryStalledUploads() {
+        if (autoRetryInFlight) return
+        if (_radio.value.phase != RadioPhase.READY) return
+        val now = System.currentTimeMillis()
+        val transferInFlight = now - lastResourceActivityMs < OutgoingMediaPolicy.TRANSFER_IN_FLIGHT_WINDOW_MS
+        if (!OutgoingMediaPolicy.canStartAutoRetry(
+                radioReady = true,
+                transferInFlight = transferInFlight,
+                anotherAutoRetryRunning = autoRetryInFlight,
+            )
+        ) {
+            return
+        }
+        val candidateId = OutgoingMediaPolicy.pickAutoRetryCandidate(_outgoingMedia.value, now) ?: return
+        val snapshot = _outgoingMedia.value[candidateId] ?: return
+        val marked = OutgoingMediaPolicy.markAutoRetryStarted(snapshot, now)
+        _outgoingMedia.value = _outgoingMedia.value + (candidateId to marked)
+        refreshOutgoingMediaUi()
+        autoRetryInFlight = true
+        MeshLog.i(
+            "auto-retry upload id=$candidateId attempt=${marked.autoRetries}/" +
+                "${OutgoingMediaPolicy.MAX_AUTO_RETRIES} (manual retry required afterwards)",
+        )
+        retryUpload(candidateId, auto = true)
     }
 
     /**
@@ -1073,7 +1129,7 @@ class MeshRepository(
      * insert the new engine id) so the user still sees exactly one bubble. Message-id semantics on
      * the wire are unchanged; only this local row's technical id moves to the new attempt.
      */
-    fun retryUpload(messageId: Long) {
+    fun retryUpload(messageId: Long, auto: Boolean = false) {
         val found = findMessageWithThread(messageId) ?: return
         val (peerId, channel, message) = found
         if (!message.outgoing || message.kind != MessageKind.ATTACHMENT) return
@@ -1097,13 +1153,20 @@ class MeshRepository(
                 sentAtMs = message.sentAtMs,
                 expectedWindowMs = expectedMediaWindowMs(attachment.sizeBytes),
             )
-        _outgoingMedia.value = _outgoingMedia.value + (
-            messageId to OutgoingMediaPolicy.retried(previous, now)
-            )
+        val marked = if (auto) {
+            OutgoingMediaPolicy.markAutoRetryStarted(previous, now)
+        } else {
+            OutgoingMediaPolicy.markManualRetry(previous, now)
+        }
+        _outgoingMedia.value = _outgoingMedia.value + (messageId to marked)
         refreshOutgoingMediaUi()
         updateDeliveryAnywhere(messageId, DeliveryState.SENT, channel)
-        _uiEvents.tryEmit(UiEvent.Snackbar("Retrying upload — starting a fresh attempt."))
+        lastResourceActivityMs = now
+        if (!auto) {
+            _uiEvents.tryEmit(UiEvent.Snackbar("Retrying upload — starting a fresh attempt."))
+        }
         scope.launch {
+            try {
             val bytes = runCatching { file.readBytes() }.getOrNull()
             if (bytes == null) {
                 _uiEvents.tryEmit(UiEvent.Snackbar("Could not read the attachment file; retry failed."))
@@ -1124,6 +1187,9 @@ class MeshRepository(
                 updateDeliveryAnywhere(messageId, DeliveryState.FAILED, channel)
                 clearOutgoingMedia(messageId)
                 _uiEvents.tryEmit(UiEvent.Error("Retry failed: ${error.message ?: "radio busy"}"))
+            }
+            } finally {
+                if (auto) autoRetryInFlight = false
             }
         }
     }
@@ -1151,7 +1217,9 @@ class MeshRepository(
             delivery = DeliveryState.SENT,
             attachment = attachment,
         )
-        val priorAttempts = _outgoingMedia.value[old.id]?.attempts ?: 1
+        val priorSnapshot = _outgoingMedia.value[old.id]
+        val priorAttempts = priorSnapshot?.attempts ?: 1
+        val priorAutoRetries = priorSnapshot?.autoRetries ?: 0
         removeMessageEverywhere(old.id)
         if (oldAttachmentId != null) runCatching { File(attachmentsDir(), oldAttachmentId).delete() }
         appendMessage(peerId, replacement, channel)
@@ -1163,7 +1231,7 @@ class MeshRepository(
                     sizeBytes = attachment.sizeBytes,
                     sentAtMs = now,
                     expectedWindowMs = expectedMediaWindowMs(attachment.sizeBytes),
-                ).copy(attempts = priorAttempts + 1)
+                ).copy(attempts = priorAttempts + 1, autoRetries = priorAutoRetries)
                 )
             refreshOutgoingMediaUi()
         }
@@ -1249,6 +1317,7 @@ class MeshRepository(
             }
 
             is CoreEvent.ResourceProgress -> {
+                lastResourceActivityMs = System.currentTimeMillis()
                 MeshLog.i(
                     "resource progress id=${event.messageId} chunk=${event.received}/${event.total} " +
                         "outgoing=${_outgoingMedia.value.containsKey(event.messageId)}",
@@ -1268,6 +1337,7 @@ class MeshRepository(
             }
 
             is CoreEvent.ResourceReceived -> {
+                lastResourceActivityMs = System.currentTimeMillis()
                 val channel = event.channelId != null && event.channelId in _channels.value.map { it.id }
                 val peerId = event.channelId ?: event.peerId
                 MeshLog.i(

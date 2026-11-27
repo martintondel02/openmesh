@@ -27,6 +27,8 @@ class OutgoingMediaPolicyTest {
         isChannel: Boolean = false,
         mime: String = "image/webp",
         sizeBytes: Int = 5_000,
+        autoRetries: Int = 0,
+        nextAutoRetryAtMs: Long? = null,
     ) = OutgoingMediaSnapshot(
         isChannel = isChannel,
         mime = mime,
@@ -36,6 +38,8 @@ class OutgoingMediaPolicyTest {
         expectedWindowMs = expectedWindowMs,
         progress = progress,
         attempts = attempts,
+        autoRetries = autoRetries,
+        nextAutoRetryAtMs = nextAutoRetryAtMs,
     )
 
     @Test
@@ -80,7 +84,7 @@ class OutgoingMediaPolicyTest {
         val ui = OutgoingMediaPolicy.uiState(stalled, now)
         assertEquals(OutgoingMediaUiState.STALLED, ui.state)
         assertEquals(46_000, ui.stalledForMs)
-        assertEquals("Upload stalled — retry", OutgoingMediaPolicy.statusText(ui))
+        assertEquals("Stalled — tap Retry", OutgoingMediaPolicy.statusText(ui))
         assertFalse(OutgoingMediaPolicy.slowHintVisible(ui))
     }
 
@@ -179,6 +183,124 @@ class OutgoingMediaPolicyTest {
         assertNull(OutgoingMediaPolicy.fromMessage(message(DeliveryState.DELIVERED, true, MessageKind.ATTACHMENT), 1))
         assertNull(OutgoingMediaPolicy.fromMessage(message(DeliveryState.SENT, false, MessageKind.ATTACHMENT), 1))
         assertNull(OutgoingMediaPolicy.fromMessage(message(DeliveryState.SENT, true, MessageKind.TEXT), 1))
+    }
+
+    @Test
+    fun `automatic retry backoff starts at 30s doubles and caps at 15min`() {
+        assertEquals(30_000, OutgoingMediaPolicy.autoRetryDelayMs(0))
+        assertEquals(60_000, OutgoingMediaPolicy.autoRetryDelayMs(1))
+        assertEquals(120_000, OutgoingMediaPolicy.autoRetryDelayMs(2))
+        assertEquals(240_000, OutgoingMediaPolicy.autoRetryDelayMs(3))
+        assertEquals(480_000, OutgoingMediaPolicy.autoRetryDelayMs(4))
+        assertEquals(OutgoingMediaPolicy.AUTO_RETRY_MAX_MS, OutgoingMediaPolicy.autoRetryDelayMs(5))
+        assertEquals(OutgoingMediaPolicy.AUTO_RETRY_MAX_MS, OutgoingMediaPolicy.autoRetryDelayMs(99))
+    }
+
+    @Test
+    fun `a stalled upload waits for its auto retry with a visible countdown`() {
+        val stalled = snapshot(
+            sentAtMs = now - 120_000,
+            lastActivityMs = now - 60_000,
+            expectedWindowMs = 5_000,
+        )
+        val scheduled = OutgoingMediaPolicy.scheduleAutoRetry(stalled, now)
+        assertEquals(now + 30_000, scheduled.nextAutoRetryAtMs)
+
+        val ui = OutgoingMediaPolicy.uiState(scheduled, now)
+        assertEquals(OutgoingMediaUiState.AUTO_RETRY_WAIT, ui.state)
+        assertEquals(30_000, ui.retryInMs)
+        assertEquals("Retrying in 30 s", OutgoingMediaPolicy.statusText(ui))
+        assertTrue(OutgoingMediaPolicy.autoRetryExplanation(ui).contains("attempt 1 of 3"))
+
+        val later = OutgoingMediaPolicy.uiState(scheduled, now + 10_000)
+        assertEquals(20_000, later.retryInMs)
+        assertEquals("Retrying in 20 s", OutgoingMediaPolicy.statusText(later))
+    }
+
+    @Test
+    fun `after three automatic attempts the upload waits for the manual retry`() {
+        val exhausted = snapshot(
+            sentAtMs = now - 600_000,
+            lastActivityMs = now - 240_000,
+            expectedWindowMs = 5_000,
+            autoRetries = OutgoingMediaPolicy.MAX_AUTO_RETRIES,
+            nextAutoRetryAtMs = null,
+        )
+        val ui = OutgoingMediaPolicy.uiState(exhausted, now)
+        assertEquals(OutgoingMediaUiState.STALLED, ui.state)
+        assertEquals("Stalled — tap Retry", OutgoingMediaPolicy.statusText(ui))
+        assertFalse(OutgoingMediaPolicy.autoRetryAllowed(exhausted))
+        assertTrue(OutgoingMediaPolicy.autoRetryExhaustedExplanation().contains("Tap Retry"))
+    }
+
+    @Test
+    fun `auto retry is due only after the backoff and only while budget remains`() {
+        val scheduled = snapshot(
+            sentAtMs = now - 120_000,
+            lastActivityMs = now - 60_000,
+            expectedWindowMs = 5_000,
+        ).let { OutgoingMediaPolicy.scheduleAutoRetry(it, now) }
+
+        assertFalse(OutgoingMediaPolicy.isAutoRetryDue(scheduled, now))
+        assertTrue(OutgoingMediaPolicy.isAutoRetryDue(scheduled, now + 30_000))
+        assertFalse(
+            OutgoingMediaPolicy.isAutoRetryDue(
+                scheduled.copy(autoRetries = OutgoingMediaPolicy.MAX_AUTO_RETRIES),
+                now + 1_000_000,
+            ),
+        )
+        assertFalse(OutgoingMediaPolicy.isAutoRetryDue(scheduled.copy(nextAutoRetryAtMs = null), now + 1_000_000))
+    }
+
+    @Test
+    fun `one automatic retry is picked at a time and only when the link is safe`() {
+        val older = snapshot(sentAtMs = now - 200_000, lastActivityMs = now - 100_000, expectedWindowMs = 4_000)
+            .let { OutgoingMediaPolicy.scheduleAutoRetry(it, now - 40_000) }
+        val newer = snapshot(sentAtMs = now - 150_000, lastActivityMs = now - 90_000, expectedWindowMs = 4_000)
+            .let { OutgoingMediaPolicy.scheduleAutoRetry(it, now - 10_000) }
+        val map = mapOf(1L to older, 2L to newer)
+        assertEquals(1L, OutgoingMediaPolicy.pickAutoRetryCandidate(map, now))
+        assertNull(OutgoingMediaPolicy.pickAutoRetryCandidate(map, now - 15_000))
+
+        assertTrue(OutgoingMediaPolicy.canStartAutoRetry(radioReady = true, transferInFlight = false, anotherAutoRetryRunning = false))
+        assertFalse(OutgoingMediaPolicy.canStartAutoRetry(radioReady = false, transferInFlight = false, anotherAutoRetryRunning = false))
+        assertFalse(OutgoingMediaPolicy.canStartAutoRetry(radioReady = true, transferInFlight = true, anotherAutoRetryRunning = false))
+        assertFalse(OutgoingMediaPolicy.canStartAutoRetry(radioReady = true, transferInFlight = false, anotherAutoRetryRunning = true))
+    }
+
+    @Test
+    fun `starting an auto retry increments counters and resets the attempt timers`() {
+        val scheduled = snapshot(
+            sentAtMs = now - 120_000,
+            lastActivityMs = now - 60_000,
+            expectedWindowMs = 5_000,
+            attempts = 2,
+        ).let { OutgoingMediaPolicy.scheduleAutoRetry(it, now) }
+
+        val started = OutgoingMediaPolicy.markAutoRetryStarted(scheduled, now + 30_000)
+        assertEquals(1, started.autoRetries)
+        assertEquals(3, started.attempts)
+        assertNull(started.nextAutoRetryAtMs)
+        assertEquals(now + 30_000, started.sentAtMs)
+        assertEquals(now + 30_000, started.lastActivityMs)
+        assertEquals(OutgoingMediaUiState.RETRYING, OutgoingMediaPolicy.uiState(started, now + 31_000).state)
+
+        val manual = OutgoingMediaPolicy.markManualRetry(started, now + 40_000)
+        assertEquals(0, manual.autoRetries)
+        assertNull(manual.nextAutoRetryAtMs)
+        assertEquals(4, manual.attempts)
+    }
+
+    @Test
+    fun `auto retry wait expires into the stalled state when the attempt is not started`() {
+        val scheduled = snapshot(
+            sentAtMs = now - 120_000,
+            lastActivityMs = now - 60_000,
+            expectedWindowMs = 5_000,
+        ).let { OutgoingMediaPolicy.scheduleAutoRetry(it, now) }
+        val ui = OutgoingMediaPolicy.uiState(scheduled, now + 31_000)
+        assertEquals(OutgoingMediaUiState.STALLED, ui.state)
+        assertEquals("Stalled — tap Retry", OutgoingMediaPolicy.statusText(ui))
     }
 
     private fun message(delivery: DeliveryState, outgoing: Boolean, kind: MessageKind) = Message(
