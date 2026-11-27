@@ -16,6 +16,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import org.openmesh.android.util.Hex
+import org.openmesh.android.util.MeshLog
 
 /**
  * Companion API client: SLIP de-framing, CRC check, CBOR payloads, HELLO handshake and
@@ -173,7 +174,13 @@ class FramedCompanionClient(
 
     private suspend fun write(type: Int, payload: ByteArray) {
         val frame = SlipFraming.encode(SlipFraming.buildFrame(type, payload))
-        writeMutex.withLock { transport.write(frame) }
+        MeshLog.i("companion write type=$type frame=${frame.size}")
+        try {
+            writeMutex.withLock { transport.write(frame) }
+        } catch (e: Exception) {
+            MeshLog.w("companion write failed type=$type frame=${frame.size}: ${e.message}", e)
+            throw e
+        }
     }
 
     // -------------------------------------------------------------- receive path

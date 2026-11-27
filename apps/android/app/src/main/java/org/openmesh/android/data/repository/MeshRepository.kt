@@ -290,11 +290,34 @@ class MeshRepository(
         engine.start(seed, config)
         val state = prefs.engineState()
         if (state != null && state.isNotEmpty()) runCatching { engine.importState(state) }
+        // Heal channel keys after a process restart. Engine state is exported on stop(); if the
+        // process was killed (or the app updated) channels joined earlier can be missing from the
+        // engine even though they are persisted in the DB, which made sending fail with UnknownNode.
+        runCatching {
+            val known = engine.channels().map { it.channelIdHex }.toSet()
+            for (row in dao.channels()) {
+                if (row.id in known) continue
+                val invite = row.inviteUrl?.let { runCatching { QrInvite.parse(it) }.getOrNull() } ?: continue
+                if (invite.kind != QrInvite.Kind.CHANNEL || invite.pskBase64.isEmpty()) continue
+                engine.joinChannel(invite.name, invite.pskBase64)
+            }
+        }.onFailure { MeshLog.w("channel restore failed: ${it.message}") }
         _selfNodeId.value = engine.nodeIdHex()
         _selfIdentity.value = engine.publicIdentityB64()
         _engineStatus.value = engine.status.value
         engineJobs += scope.launch { engine.events.collect { handleCoreEvent(it) } }
-        engineJobs += scope.launch { engine.outbound.collect { out -> companion?.let { c -> runCatching { c.sendFrame(out.frame) } } } }
+        engineJobs += scope.launch {
+            engine.outbound.collect { out ->
+                val c = companion
+                if (c == null) {
+                    MeshLog.w("radio tx dropped (no companion) frame=${out.frame.size}")
+                    return@collect
+                }
+                MeshLog.i("radio tx frame size=${out.frame.size} peer=${out.directPeerHex ?: "broadcast"}")
+                runCatching { c.sendFrame(out.frame) }
+                    .onFailure { MeshLog.w("radio tx failed: ${it.message}", it) }
+            }
+        }
         engineJobs += scope.launch { engine.status.collect { _engineStatus.value = it } }
         tickJob?.cancel()
         tickJob = scope.launch {
@@ -472,12 +495,17 @@ class MeshRepository(
     }
 
     private fun appendMessage(peerId: String, message: Message, channel: Boolean) {
+        // Upsert by message id: an own frame can be echoed back through the mesh (relay/loopback)
+        // and re-delivered as an inbound event, and the UI keys messages by id. Appending blindly
+        // produced duplicate ids which crashed the Compose LazyColumn ("Key ... was already used").
+        fun upsert(list: List<Message>): List<Message> =
+            list.filterNot { it.id == message.id } + message
         if (channel) {
             val thread = _channelMessages.value[peerId].orEmpty()
-            _channelMessages.value = _channelMessages.value + (peerId to (thread + message))
+            _channelMessages.value = _channelMessages.value + (peerId to upsert(thread))
         } else {
             val thread = _messages.value[peerId].orEmpty()
-            _messages.value = _messages.value + (peerId to (thread + message))
+            _messages.value = _messages.value + (peerId to upsert(thread))
             rebuildConversations()
         }
     }
@@ -608,6 +636,11 @@ class MeshRepository(
 
     fun connectCompanion(kind: CompanionKind) {
         if (kind == CompanionKind.NONE) {
+            // ACTION_START from the foreground service must not tear down a link that the engine
+            // auto-reconnect or the user just started (that race cancelled the connect coroutine).
+            if (companionKind != CompanionKind.NONE && (_radio.value.connected || companionJob?.isActive == true)) {
+                return
+            }
             disconnectCompanion()
             return
         }
@@ -647,6 +680,15 @@ class MeshRepository(
                             profile = event.hello.profile,
                         )
                         _uiEvents.tryEmit(UiEvent.Snackbar("Radio ready: ${event.hello.firmwareVersion}"))
+                        // Announce once the companion session is up. The engine's startup announce
+                        // fires before a radio is linked (and is dropped), so without this peers and
+                        // the bridge never learn our identity/public key and drop our signed group
+                        // messages as "group message from unknown signer".
+                        scope.launch {
+                            delay(1_000)
+                            runCatching { engine.announce(System.currentTimeMillis()) }
+                                .onFailure { MeshLog.w("announce after radio ready failed: ${it.message}") }
+                        }
                     }
 
                     is FramedCompanionClient.CompanionEvent.Rx -> {
@@ -705,6 +747,18 @@ class MeshRepository(
 
     // ---------------------------------------------------------------- contacts / invites / channels
 
+    /** Persist engine state after mutations (channels/contacts) so a later process death cannot
+     * lose keys that only exist in memory. */
+    private fun persistEngineState() {
+        scope.launch {
+            runCatching { engine.exportState() }
+                .getOrNull()
+                ?.takeIf { it.isNotEmpty() }
+                ?.let { prefs.setEngineState(it) }
+        }
+    }
+
+
     fun importInvite(uri: String): Result<QrInvite> = runCatching {
         val invite = QrInvite.parse(uri)
         when (invite.kind) {
@@ -745,6 +799,7 @@ class MeshRepository(
                 }
             }
         }
+        persistEngineState()
         _uiEvents.tryEmit(UiEvent.InviteImported(invite.name, invite.kind == QrInvite.Kind.CHANNEL))
         invite
     }
@@ -758,6 +813,7 @@ class MeshRepository(
             val channel = Channel(invite.channelIdHex, invite.name)
             _channels.value = _channels.value.filterNot { it.id == channel.id } + channel
             scope.launch { dao.upsertChannel(ChannelEntity(channel.id, channel.name, true, invite.inviteUrl)) }
+            persistEngineState()
         }
         return result
     }
@@ -769,6 +825,7 @@ class MeshRepository(
             val channel = Channel(invite.channelIdHex, invite.name)
             _channels.value = _channels.value.filterNot { it.id == channel.id } + channel
             scope.launch { dao.upsertChannel(ChannelEntity(channel.id, channel.name, true, invite.inviteUrl)) }
+            persistEngineState()
         }
         return result
     }

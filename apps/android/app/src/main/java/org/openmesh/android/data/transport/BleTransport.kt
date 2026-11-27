@@ -1,6 +1,7 @@
 package org.openmesh.android.data.transport
 
 import android.annotation.SuppressLint
+import android.util.Log
 
 import android.Manifest
 import android.bluetooth.BluetoothAdapter
@@ -17,6 +18,7 @@ import android.content.pm.PackageManager
 import android.os.Build
 import android.os.ParcelUuid
 import androidx.core.content.ContextCompat
+import org.openmesh.android.util.MeshLog
 import java.util.UUID
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -130,24 +132,31 @@ class BleTransport(
                 val callback = object : ScanCallback() {
                     override fun onScanResult(callbackType: Int, result: ScanResult) {
                         if (finished) return
-                        val name = result.device.name ?: result.scanRecord?.deviceName ?: ""
-                        if (result.device.name?.startsWith(deviceNamePrefix) == true ||
-                            name.startsWith(deviceNamePrefix) ||
-                            name.isEmpty()
-                        ) {
-                            finished = true
-                            runCatching { scanner.stopScan(this) }
-                            continuation.resume(result.device)
-                        }
+                        Log.i(
+                            "OpenMeshBle",
+                            "scan result addr=${result.device.address} cached=${result.device.name} " +
+                                "record=${result.scanRecord?.deviceName} rssi=${result.rssi} uuids=${result.scanRecord?.serviceUuids}",
+                        )
+                        // The platform filter above already matched the NUS service UUID, so this
+                        // result is one of our radios. Do not gate on the advertised name: Android
+                        // can return a stale cached BluetoothDevice.name (e.g. a product name from
+                        // before a firmware rename) and filtered scan records do not always carry
+                        // the scan-response name, which made the app report "No OpenMesh radio
+                        // found" even though the radio was right there. First match wins.
+                        finished = true
+                        runCatching { scanner.stopScan(this) }
+                        continuation.resume(result.device)
                     }
 
                     override fun onScanFailed(errorCode: Int) {
+                        Log.w("OpenMeshBle", "scan failed errorCode=$errorCode")
                         if (!finished) {
                             finished = true
                             continuation.resume(null)
                         }
                     }
                 }
+                Log.i("OpenMeshBle", "scan start prefix='$deviceNamePrefix' filter=${OpenMeshBleManager.SERVICE_UUID}")
                 scanner.startScan(listOf(filter), settings, callback)
                 continuation.invokeOnCancellation { runCatching { scanner.stopScan(callback) } }
             }
@@ -163,7 +172,13 @@ class BleTransport(
 
     override suspend fun write(bytes: ByteArray) {
         val bleManager = manager ?: error("BLE transport is not connected")
-        bleManager.write(bytes)
+        MeshLog.i("ble write bytes=${bytes.size}")
+        try {
+            bleManager.write(bytes)
+        } catch (e: Exception) {
+            MeshLog.w("ble write failed bytes=${bytes.size}: ${e.message}", e)
+            throw e
+        }
     }
 
     /** GATT client for the companion NUS service. */
