@@ -82,6 +82,11 @@ pub const RESOURCE_MAX_RETRY_BACKOFF_MS: u64 = 60_000;
 /// Chunks released per engine tick / ack. A duty-cycle-paced companion TX path drops a whole
 /// window emitted in one burst, so chunks leave the engine a couple at a time instead.
 pub const RESOURCE_TX_BATCH: u16 = 2;
+/// Minimum wall time between paced chunk releases. Engine tick rates differ per embedder (the
+/// bridge ticks at 1 Hz, the Android companion at 4 Hz); pacing by time keeps the offered frame
+/// rate at ~2 chunks/s everywhere so a duty-cycle-paced radio's outbox/companion FIFO is not
+/// overrun by a fast-ticking sender.
+pub const RESOURCE_PACE_INTERVAL_MS: u64 = 1_000;
 /// Maximum resource retransmissions between progress (hard safety ceiling; the time budget is the
 /// primary give-up condition).
 pub const RESOURCE_MAX_RETRIES: u8 = MAX_RESOURCE_RETRIES;
@@ -596,6 +601,8 @@ struct OutgoingResource {
     blob: Vec<u8>,
     sender: ResourceSender,
     started_ms: u64,
+    /// Wall time of the last paced chunk release (rate-limits `RESOURCE_TX_BATCH` per interval).
+    paced_ms: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -1528,6 +1535,7 @@ impl Engine {
                 blob,
                 sender,
                 started_ms: now_ms,
+                paced_ms: now_ms,
             };
             // Release only the first paced batch: the rest of the window follows on later ticks
             // instead of hitting the transport as one burst.
@@ -2392,6 +2400,9 @@ impl Engine {
                             // signal to release it again on a paced link.
                             let batch = usize::from(RESOURCE_TX_BATCH).max(1);
                             let mut release = resource.sender.take_unsent(batch);
+                            if !release.is_empty() {
+                                resource.paced_ms = now_ms;
+                            }
                             if release.len() < batch {
                                 let pending = resource.sender.pending_window();
                                 release.extend(
@@ -2957,7 +2968,13 @@ impl Engine {
             // bridge ticks at 1 Hz, so a duty-cycle-paced companion TX path is not flooded by the
             // whole window in one burst (the live photo failure).
             let unsent = match self.outgoing.get_mut(&res_id) {
-                Some(resource) => resource.sender.take_unsent(RESOURCE_TX_BATCH as usize),
+                Some(resource) => {
+                    if now_ms.saturating_sub(resource.paced_ms) < RESOURCE_PACE_INTERVAL_MS {
+                        Vec::new()
+                    } else {
+                        resource.sender.take_unsent(RESOURCE_TX_BATCH as usize)
+                    }
+                }
                 None => continue,
             };
             self.emit_resource_chunks(res_id, &unsent, out);
@@ -2965,6 +2982,7 @@ impl Engine {
                 // We are still streaming never-sent chunks: push the retransmission deadline out
                 // so the RTO does not fire while the paced link is still delivering this batch.
                 if let Some(resource) = self.outgoing.get_mut(&res_id) {
+                    resource.paced_ms = now_ms;
                     resource.sender.deadline_ms = now_ms.saturating_add(RESOURCE_RTO_MS);
                 }
                 continue;
