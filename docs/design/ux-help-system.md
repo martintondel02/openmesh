@@ -147,6 +147,26 @@ KR → `KR920`; SG/MY/TH/ID/PH/VN → `AS923`; otherwise `EU868` with a visible 
 * Beginner copy never mentions: SF, bandwidth, PSK bytes, TTL, MTU, OBB, HMAC. Advanced copy always
   shows the exact values.
 
+### 6.1 Radio link states (normative)
+
+Every surface that talks about the radio link (Android radio screen, chat banner, settings row,
+nodes header, foreground-service notification; web settings card, connection panel, banners,
+composer) uses the same five states and never hides the difference:
+
+| state | meaning | required treatment |
+| --- | --- | --- |
+| `connected` | radio attached and the companion handshake finished | positive status, no warning |
+| `virtual` | no hardware radio: simulator, LAN or backbone transport | neutral "virtual radio", not an error |
+| `connecting` | link is being established | progress copy, spinner **plus** text, cancellable |
+| `reconnecting` | link was lost and is retried automatically | "the bridge/app keeps retrying", queue copy, show attempt count when known |
+| `disconnected` | no link and no retry in progress | actionable cable/power guidance |
+
+Rules: describe retrying as retrying (never "broken"); state failures persist until the next
+attempt instead of disappearing as a snackbar; every state has visible text (spinner or colour is
+never the only indicator); a ready link that stops answering keep-alives shows "not answering" and a
+reconnect action rather than staying silently green; messages sent while not connected are shown as
+**queued** (sent when the link is ready), never as sent.
+
 ---
 
 ## 7. Acceptance criteria (v0.3.0)
