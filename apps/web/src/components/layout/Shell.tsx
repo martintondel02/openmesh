@@ -23,6 +23,7 @@ import { useAppStore } from '../../store/app';
 import { selectMeshSummary, selectTotalUnread } from '../../store/selectors';
 import { selectBackboneAvailable } from '../../store/backbone-selectors';
 import { cn, formatNodeId, shortenNodeId } from '../../lib/utils';
+import { describeRadioLink, radioLinkText, radioLinkTone } from '../../lib/radio-link';
 import { Avatar, Badge, Button } from '../ui/primitives';
 import { copyText } from '../ui/signals';
 import { ModeToggle } from './ModeToggle';
@@ -119,6 +120,14 @@ export function ConnectionPill({ compact: _compact = false }: { compact?: boolea
 
   const meta = CONNECTION_META[connection] ?? CONNECTION_META.idle;
   const pulsing = connection === 'connecting' || connection === 'reconnecting';
+  const radioLink = describeRadioLink(hello, bridgeStatus);
+  const radioText = radioLinkText(radioLink, { beginner: true });
+  const radioStateText = {
+    emerald: 'text-emerald-300',
+    amber: 'text-amber-300',
+    rose: 'text-rose-300',
+    slate: 'text-slate-400',
+  }[radioLinkTone(radioLink)];
 
   useEffect(() => {
     if (!open) return;
@@ -201,12 +210,27 @@ export function ConnectionPill({ compact: _compact = false }: { compact?: boolea
                 <dd className="max-w-[65%] text-right text-3xs font-medium text-rose-300">⚠ override active</dd>
               </div>
             ) : null}
-            <div className="flex items-center justify-between gap-3">
+            <div className="flex items-start justify-between gap-3">
               <dt className="text-slate-500">Radio</dt>
-              <dd className="text-right text-3xs text-slate-300">
-                {hello?.radios?.[0]
-                  ? `${hello.radios[0].profile.replace(/_/g, ' ')} · ${hello.radios[0].region}`
-                  : '—'}
+              <dd className="max-w-[68%] text-right text-3xs text-slate-300">
+                {radioLink.state === 'unknown' ? (
+                  '—'
+                ) : (
+                  <>
+                    <span className={cn('inline-flex items-center gap-1.5 font-medium', radioStateText)}>
+                      <StatusDot tone={radioLinkTone(radioLink)} />
+                      {radioText.statusLabel}
+                    </span>
+                    {radioText.settingsLabel ? (
+                      <span className="mt-0.5 block truncate text-3xs text-slate-500">{radioText.settingsLabel}</span>
+                    ) : null}
+                    {radioText.deviceLabel ? (
+                      <span className="mt-0.5 block truncate font-mono text-3xs text-slate-600" title={radioText.deviceLabel}>
+                        {radioText.deviceLabel}
+                      </span>
+                    ) : null}
+                  </>
+                )}
               </dd>
             </div>
             <div className="flex items-center justify-between gap-3">
@@ -444,6 +468,7 @@ function TopBar() {
   const screen = useAppStore((state) => state.screen);
   const activeThread = useAppStore((state) => state.activeThread);
   const bridgeStatus = useAppStore((state) => state.bridgeStatus);
+  const hello = useAppStore((state) => state.hello);
   const config = useAppStore((state) => state.config);
   const summary = useAppStore(useShallow((state) => selectMeshSummary(state)));
   const backboneConfig = useAppStore((state) => state.backboneConfig);
@@ -452,6 +477,13 @@ function TopBar() {
   const openHelp = useAppStore((state) => state.openHelp);
   const meta = SCREEN_TITLES[screen] ?? SCREEN_TITLES.chats!;
   const threadOpen = screen === 'chats' && Boolean(activeThread);
+  const radioLink = describeRadioLink(hello, bridgeStatus);
+  const radioTitle =
+    radioLink.state === 'unknown'
+      ? 'Radio preset'
+      : `${radioLinkText(radioLink, { beginner: true }).statusLabel} — ${
+          config?.radio.profile.replace(/_/g, ' ') ?? 'preset'
+        } · ${config?.radio.region ?? 'region'}`;
 
   return (
     <header
@@ -478,8 +510,8 @@ function TopBar() {
             <Wifi className="h-3 w-3 text-slate-600" aria-hidden="true" />
             <span className="tabular-nums text-slate-400">{bridgeStatus ? bridgeStatus.mesh.duty_cycle_pct.toFixed(1) : '—'}%</span> duty
           </span>
-          <span className="hidden items-center gap-1.5 text-3xs text-slate-500 2xl:flex" title="Radio preset">
-            <span className="h-1 w-1 rounded-full bg-emerald-400/70" />
+          <span className="hidden items-center gap-1.5 text-3xs text-slate-500 2xl:flex" title={radioTitle}>
+            <StatusDot tone={radioLinkTone(radioLink)} />
             {config?.radio.profile.replace(/_/g, ' ') ?? '—'} · {config?.radio.region ?? '—'}
           </span>
           {backboneConfig?.enabled ? (

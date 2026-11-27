@@ -37,6 +37,7 @@ import {
   voiceCapMs,
 } from '../lib/airtime';
 import { buildHttpBaseUrl } from '../lib/ws';
+import { radioStateTone, transportState, transportStateLabel } from '../lib/radio-link';
 import { cn, formatBytes, formatSeconds, formatUptime, formatNodeId } from '../lib/utils';
 import { Badge, Button, SectionTitle, SegmentedControl, Toggle } from '../components/ui/primitives';
 import { CopyButton } from '../components/ui/signals';
@@ -44,6 +45,7 @@ import { Callout, Field, Slider, TextInput, InlineCode } from '../components/ui/
 import { Modal } from '../components/ui/overlay';
 import { HelpTip } from '../components/ui/help';
 import { BeginnerSettings } from './settings/BeginnerSettings';
+import { RadioLinkCard } from './settings/RadioLinkCard';
 import { LegalMaximaCard, RegulatoryOverrideCard } from '../components/regulatory/Regulatory';
 
 const NODE_CLASSES = [
@@ -319,6 +321,7 @@ export function SettingsScreen() {
 
         {/* Radio */}
         <SectionCard icon={Radio} title="Radio & airtime" description="LoRa modem preset and regulatory region. Media budgets follow from these.">
+          <RadioLinkCard variant="advanced" />
           <div className="grid gap-4 sm:grid-cols-2">
             <Field label="Modem preset" hint={profile.description} labelAccessory={<HelpTip helpKey="settings.radio.profile" label="Modem preset" />}>
               {({ id }) => (
@@ -540,15 +543,38 @@ export function SettingsScreen() {
                 {(hello?.radios ?? []).length === 0 ? (
                   <p className="text-2xs text-slate-500">No radios reported.</p>
                 ) : (
-                  hello!.radios.map((radio) => (
-                    <div key={radio.id} className="flex items-center gap-2 text-2xs">
-                      <span className={cn('h-1.5 w-1.5 shrink-0 rounded-full', radio.connected ? 'bg-emerald-400' : 'bg-slate-600')} />
-                      <span className="min-w-0 flex-1 truncate text-slate-300">{radio.label}</span>
-                      <span className="shrink-0 font-mono text-3xs text-slate-500">
-                        {radio.kind} · {radio.profile.replace(/_/g, ' ')}
-                      </span>
-                    </div>
-                  ))
+                  hello!.radios.map((radio) => {
+                    const radioTone = radioStateTone(transportState(radio));
+                    return (
+                      <div key={radio.id} className="flex items-center gap-2 text-2xs">
+                        <span
+                          className={cn(
+                            'h-1.5 w-1.5 shrink-0 rounded-full',
+                            radioTone === 'emerald' && 'bg-emerald-400',
+                            radioTone === 'amber' && 'bg-amber-400',
+                            radioTone === 'rose' && 'bg-rose-400',
+                            radioTone === 'slate' && 'bg-slate-500',
+                          )}
+                          aria-hidden="true"
+                        />
+                        <span className="min-w-0 flex-1 truncate text-slate-300">{radio.label}</span>
+                        <span
+                          className={cn(
+                            'shrink-0 text-3xs font-medium',
+                            radioTone === 'emerald' && 'text-emerald-300/80',
+                            radioTone === 'amber' && 'text-amber-300/80',
+                            radioTone === 'rose' && 'text-rose-300/80',
+                            radioTone === 'slate' && 'text-slate-500',
+                          )}
+                        >
+                          {transportStateLabel(radio)}
+                        </span>
+                        <span className="shrink-0 font-mono text-3xs text-slate-500">
+                          {radio.kind} · {radio.profile.replace(/_/g, ' ')}
+                        </span>
+                      </div>
+                    );
+                  })
                 )}
               </div>
             </div>

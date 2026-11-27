@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { ClipboardEvent, DragEvent } from 'react';
-import { ArrowUp, ImagePlus, Mic, Paperclip, Reply, TriangleAlert, X } from 'lucide-react';
+import { ArrowUp, ImagePlus, Mic, Paperclip, Reply, TriangleAlert, WifiOff, X } from 'lucide-react';
 import { useAppStore } from '../../store/app';
 import type { ActiveThread } from '../../store/app';
 import { estimateText, getProfile } from '../../lib/airtime';
 import { formatBytes, formatSeconds, graphemeLength, messagePreview, cn } from '../../lib/utils';
+import { composerRadioNotice } from '../../lib/radio-link';
 import { IconButton, Kbd } from '../../components/ui/primitives';
 import { SignalBars } from '../../components/ui/signals';
 import { ImageComposerModal } from './ImageComposer';
@@ -19,6 +20,10 @@ import { VoiceRecorder, type RecordedVoice } from './VoiceRecorder';
 export function Composer({ thread }: { thread: ActiveThread }) {
   const config = useAppStore((state) => state.config);
   const appMode = useAppStore((state) => state.mode);
+  const connection = useAppStore((state) => state.connection);
+  const hello = useAppStore((state) => state.hello);
+  const bridgeStatus = useAppStore((state) => state.bridgeStatus);
+  const radioWarning = composerRadioNotice({ mode: appMode, connection, hello, bridgeStatus });
   const messages = useAppStore((state) => state.messages);
   const groupMessages = useAppStore((state) => state.groupMessages);
   const replyTo = useAppStore((state) => state.replyTo);
@@ -213,6 +218,16 @@ export function Composer({ thread }: { thread: ActiveThread }) {
           </div>
           <IconButton icon={X} label="Cancel reply" size="sm" onClick={() => setReplyTo(null)} />
         </div>
+      ) : null}
+
+      {radioWarning ? (
+        <p
+          role="status"
+          className="mb-2 flex items-start gap-1.5 rounded-lg border border-amber-400/20 bg-amber-400/[0.05] px-2.5 py-1.5 text-2xs leading-relaxed text-amber-100/85"
+        >
+          <WifiOff className="mt-0.5 h-3 w-3 shrink-0" aria-hidden="true" />
+          <span>{radioWarning}</span>
+        </p>
       ) : null}
 
       {recorderOpen ? (

@@ -17,6 +17,7 @@ import { HelpLink, HelpTip, Term } from '../../components/ui/help';
 import { BEGINNER_COPY } from '../../lib/beginner-copy';
 import { checklistForMode, checklistProgress, isSetupStateComplete } from '../../lib/setup';
 import { LegalLimitLine } from '../../components/regulatory/Regulatory';
+import { RadioLinkCard } from './RadioLinkCard';
 import { deriveRegulatoryState } from '../../lib/regulatory';
 import { REGION_IDS, REGIONS } from '../../lib/airtime';
 import { cn } from '../../lib/utils';
@@ -164,6 +165,9 @@ export function BeginnerSettings({ setMode }: { setMode: (mode: 'beginner' | 'ad
 
             <section className="rounded-2xl border border-white/[0.07] bg-white/[0.02] p-4">
               <CardTitle icon={Radio} title="Radio coverage" helpKey="settings.radio.profile" />
+              <div className="mt-3">
+                <RadioLinkCard variant="beginner" />
+              </div>
               <div className="mt-3 grid gap-3 sm:grid-cols-2">
                 <Field label="Radio coverage" hint={BEGINNER_COPY.radioHelp} labelAccessory={<HelpTip helpKey="settings.radio.profile" label="Radio coverage" />}>
                   {({ id }) => (

@@ -52,11 +52,21 @@ export interface HelloNode {
   caps: number | string[];
 }
 
+/** Radio link state reported by the bridge (radio-link-state contract). */
+export type RadioLinkStateValue = 'connected' | 'connecting' | 'reconnecting' | 'disconnected' | 'virtual';
+
 export interface HelloRadio {
   id: string;
   kind: string;
   label: string;
+  /** Derived by the bridge: true for `connected` and `virtual` transports only. */
   connected: boolean;
+  /**
+   * Link state for this transport: `connected`, `connecting`, `reconnecting`,
+   * `disconnected` or `virtual` (no local serial radio: sim/UDP/TCP/backbone).
+   * Optional so a web build still renders an older bridge that predates it.
+   */
+  state?: RadioLinkStateValue;
   profile: string;
   region: string;
 }
@@ -70,17 +80,29 @@ export interface HelloData {
   store: { messages: number; contacts: number; channels: number };
 }
 
+export interface RadioStatusData {
+  /** Derived by the bridge: true for `connected` and `virtual` only. */
+  connected: boolean;
+  /**
+   * Link state: `connected`, `connecting`, `reconnecting`, `disconnected` or
+   * `virtual`. Optional so a web build still renders an older bridge.
+   */
+  state?: RadioLinkStateValue;
+  /** Epoch ms of the last frame heard from the radio; `null` until the first one. */
+  last_rx_ms?: number | null;
+  /** Reconnect attempts since the last successful serial attach (grows while reconnecting). */
+  reconnect_attempts?: number;
+  tx_queue: number;
+  airtime_used_pct: number;
+  rssi: number | null;
+  snr: number | null;
+  frequency_mhz: number | null;
+  tx_power_dbm: number | null;
+}
+
 export interface StatusData {
   uptime_s: number;
-  radio: {
-    connected: boolean;
-    tx_queue: number;
-    airtime_used_pct: number;
-    rssi: number | null;
-    snr: number | null;
-    frequency_mhz: number | null;
-    tx_power_dbm: number | null;
-  };
+  radio: RadioStatusData;
   mesh: {
     tx_frames: number;
     rx_frames: number;

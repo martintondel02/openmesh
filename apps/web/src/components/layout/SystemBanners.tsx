@@ -3,6 +3,7 @@ import { AlertTriangle, BookOpen, KeyRound, ShieldAlert, WifiOff, X } from 'luci
 import type { LucideIcon } from 'lucide-react';
 import { useAppStore } from '../../store/app';
 import { cn } from '../../lib/utils';
+import { describeRadioLink, radioOfflineBanner, shouldShowRadioOfflineBanner } from '../../lib/radio-link';
 
 interface Banner {
   id: string;
@@ -77,22 +78,20 @@ export function SystemBanners() {
     });
   }
 
-  const radioMissing = (() => {
-    if (mode !== 'live' || connection !== 'connected') return false;
-    if (bridgeStatus) return !bridgeStatus.radio.connected;
-    if (hello?.radios?.length) return hello.radios.every((radio) => !radio.connected);
-    return false;
-  })();
-  if (radioMissing) {
+  const radioLink = describeRadioLink(hello, bridgeStatus);
+  const radioBanner = shouldShowRadioOfflineBanner({ mode, connection, hello, bridgeStatus })
+    ? radioOfflineBanner(radioLink)
+    : null;
+  if (radioBanner) {
     banners.push({
       id: 'no-radio',
-      tone: 'amber',
+      tone: radioLink.state === 'disconnected' ? 'rose' : 'amber',
       icon: WifiOff,
-      title: 'The radio is not answering',
-      body: 'Messages queue until a radio is connected. Check the USB device, antenna and power, then retry the connection.',
-      helpTopic: 'troubleshooting',
-      actionLabel: 'Radio help',
-      onAction: () => openHelp('troubleshooting'),
+      title: radioBanner.title,
+      body: radioBanner.body,
+      helpTopic: radioBanner.helpTopic,
+      actionLabel: 'Open radio settings',
+      onAction: () => setScreen('settings'),
     });
   }
 

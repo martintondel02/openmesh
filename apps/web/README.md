@@ -389,6 +389,23 @@ firefox --headless --window-size=1440,900 \
 
 ---
 
+## Radio link state (v0.7.1+)
+
+The settings radio card, the shell connection panel, the system banner and the chat composer all
+describe the bridge radio link with the same five states, derived from `hello.radios[].state` and
+`bridgeStatus.radio.{state,last_rx_ms,reconnect_attempts}`:
+
+* `connected` — serial radio attached and handshaken; shows RSSI/SNR and "last frame heard … ago".
+* `virtual` — simulator/LAN/backbone transport; neutral, never an error.
+* `connecting` / `reconnecting` — progress copy with spinner **and** text; reconnecting says the
+  bridge retries automatically and shows the attempt count when reported.
+* `disconnected` — actionable cable/power guidance; messages queue until the radio is back.
+
+Wording decisions live in `src/lib/radio-link.ts` (unit-tested) so every surface stays consistent.
+The copy rules are in `docs/design/ux-help-system.md` §6.1.
+
+---
+
 ## Known gaps
 
 - No PWA service worker yet (manifest + install icons are in place); the app works offline only
