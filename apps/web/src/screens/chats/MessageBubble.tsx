@@ -4,6 +4,7 @@ import {
   AlertTriangle,
   CornerUpLeft,
   Download,
+  Info,
   MapPin,
   Pause,
   Play,
@@ -14,9 +15,10 @@ import {
 import type { ChatGroupMessage, ChatMessage, DeliveryState, Position } from '../../types/api';
 import { useAppStore } from '../../store/app';
 import { formatClockTime, cn, formatDuration, truncateGraphemes } from '../../lib/utils';
+import { deliveryPresentation, displayName } from '../../lib/display';
 import { speechWaveform } from '../../lib/audio';
 import { Avatar, IconButton } from '../../components/ui/primitives';
-import { DeliveryTicks, SignalBars } from '../../components/ui/signals';
+import { DeliveryStatus, SignalBars } from '../../components/ui/signals';
 import { Modal } from '../../components/ui/overlay';
 import { HelpLink } from '../../components/ui/help';
 import { codec2PayloadDurationMs, isCodec2Mime, voiceAttachmentLabel, voiceTierForMime } from '../../lib/media-tiers';
@@ -450,13 +452,53 @@ export interface MessageBubbleProps {
 export function MessageBubble({ message, peerName, showAvatar, showSender, resolveReply, onReply, onRetry, onJumpTo, nowMs = Date.now() }: MessageBubbleProps) {
   const own = message.outgoing;
   const group = isGroupMessage(message);
+  const nodes = useAppStore((state) => state.nodes);
+  const contacts = useAppStore((state) => state.contacts);
   const delivery: DeliveryState = !group && 'delivery' in message ? (message.delivery as DeliveryState) : own ? 'sent' : 'sent';
-  const senderName = group ? message.from_name : own ? 'You' : peerName ?? 'Peer';
+  const senderName = own
+    ? 'You'
+    : group
+      ? displayName({
+          announcedName: message.from_name,
+          contactName: contacts[message.from]?.name,
+          nodeId: message.from,
+        })
+      : peerName?.trim() || displayName({
+          announcedName: nodes[message.peer]?.name,
+          contactName: contacts[message.peer]?.name,
+          nodeId: message.peer,
+        });
   const replyToId = 'reply_to' in message ? message.reply_to : null;
   const reply = replyToId !== null ? resolveReply(replyToId) : null;
   const isRecent = nowMs - message.sent_at_ms < 90_000;
   const failed = delivery === 'failed' || Boolean(message.error);
   const pending = delivery === 'pending';
+  const [detailsOpen, setDetailsOpen] = useState(false);
+  const deliveryInfo = deliveryPresentation({
+    state: delivery,
+    group,
+    peerName: peerName ?? senderName,
+    error: message.error,
+  });
+  const detailsRows: Array<{ label: string; value: string }> = [
+    { label: 'Direction', value: own ? `You → ${group ? `#${message.channel_name}` : peerName ?? 'peer'}` : `${senderName} → You` },
+    { label: 'Sent', value: `${formatClockTime(message.sent_at_ms)} · ${new Date(message.sent_at_ms).toLocaleString()}` },
+    { label: 'Kind', value: message.kind },
+    { label: 'Receipts', value: deliveryInfo.hasReceipt ? 'Per-recipient receipt (direct message)' : 'Broadcast — no per-recipient receipt' },
+    { label: 'Status', value: `${deliveryInfo.label} — ${deliveryInfo.explanation}` },
+    { label: 'Message id', value: message.msg_id ? `#${message.msg_id}` : message.tempId ?? 'optimistic' },
+  ];
+  if (group) {
+    detailsRows.push({ label: 'Channel', value: `#${message.channel_name} · ${message.channel_id.slice(0, 8)}` });
+    detailsRows.push({ label: 'Signature', value: message.signature_valid ? 'Verified sender signature' : 'Not verified' });
+  }
+  if (message.attachment) {
+    detailsRows.push({
+      label: 'Attachment',
+      value: `${message.attachment.mime} · ${Math.max(1, Math.round(message.attachment.size / 1024))} KiB · ${Math.round((message.attachment.progress ?? 1) * 100)}%`,
+    });
+  }
+  if (replyToId !== null) detailsRows.push({ label: 'Reply to', value: `#${replyToId}` });
 
   return (
     <li
@@ -545,7 +587,19 @@ export function MessageBubble({ message, peerName, showAvatar, showSender, resol
               >
                 {formatClockTime(message.sent_at_ms)}
               </time>
-              {own && !group ? <DeliveryTicks state={delivery} /> : null}
+              {own && !group ? (
+                <DeliveryStatus state={delivery} peerName={peerName} error={message.error} />
+              ) : null}
+              {own && group ? <DeliveryStatus state="sent" group /> : null}
+              <button
+                type="button"
+                onClick={() => setDetailsOpen(true)}
+                aria-label="Message details"
+                title="Message details — direction, receipts and timestamps"
+                className="focus-ring grid h-4 w-4 place-items-center rounded text-slate-500 hover:text-slate-300"
+              >
+                <Info className="h-3 w-3" aria-hidden="true" />
+              </button>
             </div>
           </div>
 
@@ -576,6 +630,41 @@ export function MessageBubble({ message, peerName, showAvatar, showSender, resol
         {pending && isRecent ? (
           <span className="mt-1 pr-1 text-3xs text-slate-500">Sending over LoRa…</span>
         ) : null}
+
+        <Modal
+          open={detailsOpen}
+          onClose={() => setDetailsOpen(false)}
+          title="Message details"
+          description={group ? `${senderName} in #${message.channel_name}` : `${senderName} · direct message`}
+          size="sm"
+        >
+          <dl className="space-y-2.5">
+            {detailsRows.map((row) => (
+              <div key={row.label} className="grid grid-cols-[7rem_1fr] items-baseline gap-2 text-xs">
+                <dt className="text-slate-500">{row.label}</dt>
+                <dd className="min-w-0 break-words text-slate-200">{row.value}</dd>
+              </div>
+            ))}
+          </dl>
+          {failed ? (
+            <div className="mt-3 rounded-lg border border-rose-400/25 bg-rose-500/[0.06] px-2.5 py-2 text-2xs text-rose-200">
+              {deliveryInfo.explanation}
+              {message.msg_id ? (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setDetailsOpen(false);
+                    onRetry(message.msg_id);
+                  }}
+                  className="focus-ring ml-2 inline-flex items-center gap-1 rounded px-1 py-0.5 font-medium text-rose-100 hover:bg-rose-400/10"
+                >
+                  <RefreshCw className="h-2.5 w-2.5" aria-hidden="true" />
+                  Retry
+                </button>
+              ) : null}
+            </div>
+          ) : null}
+        </Modal>
       </div>
     </li>
   );

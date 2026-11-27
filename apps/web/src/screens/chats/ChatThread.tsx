@@ -13,12 +13,13 @@ import {
 import { useAppStore } from '../../store/app';
 import { selectThreadHeader, selectThreadMessages } from '../../store/selectors';
 import { Avatar, Badge, EmptyState, IconButton } from '../../components/ui/primitives';
-import { RoleBadge, SignalBars } from '../../components/ui/signals';
-import { ConfirmDialog } from '../../components/ui/overlay';
+import { RoleBadge } from '../../components/ui/signals';
+import { ConfirmDialog, Modal } from '../../components/ui/overlay';
 import { groupMessagesByDay, replyPreviewText, shortChannelId } from './chat-utils';
 import { DaySeparator, EmptyThreadState, MessageBubble, isGroupMessage, type AnyChatMessage } from './MessageBubble';
 import { Composer } from './Composer';
 import { ChannelInviteModal } from './ChannelModals';
+import { PeerLinkChip, PeerLinkPanel } from './PeerLinkCard';
 
 export function ChatThread() {
   const activeThread = useAppStore((state) => state.activeThread);
@@ -54,6 +55,7 @@ export function ChatThread() {
     [activeThread, messages, groupMessages],
   );
   const [inviteOpen, setInviteOpen] = useState(false);
+  const [peerOpen, setPeerOpen] = useState(false);
   const [leaveOpen, setLeaveOpen] = useState(false);
   const [atBottom, setAtBottom] = useState(true);
   const [newCount, setNewCount] = useState(0);
@@ -193,10 +195,13 @@ export function ChatThread() {
         <div className="flex shrink-0 items-center gap-0.5">
           {!isGroup && header.node ? (
             <>
-              <span className="mr-1.5 hidden items-center gap-2 text-3xs text-slate-500 lg:flex">
-                <SignalBars rssi={header.node.rssi} />
-                <span>{header.node.hops} {header.node.hops === 1 ? 'hop' : 'hops'}</span>
-              </span>
+              <PeerLinkChip
+                node={header.node}
+                contactName={contacts[activeThread.id]?.name}
+                isContact={Boolean(contacts[activeThread.id])}
+                onClick={() => setPeerOpen(true)}
+                className="mr-1.5"
+              />
               <IconButton
                 icon={MapPin}
                 label="Share my position here"
@@ -303,6 +308,22 @@ export function ChatThread() {
       </div>
 
       <Composer thread={activeThread} />
+
+      <Modal
+        open={peerOpen}
+        onClose={() => setPeerOpen(false)}
+        title={`${header.name} · peer & link`}
+        description="Who this peer is and how stable the path to them looks right now."
+        size="md"
+      >
+        {header.node ? (
+          <PeerLinkPanel
+            node={header.node}
+            contactName={contacts[activeThread.id]?.name}
+            isContact={Boolean(contacts[activeThread.id])}
+          />
+        ) : null}
+      </Modal>
 
       <ChannelInviteModal open={inviteOpen} channel={header.channel} onClose={() => setInviteOpen(false)} />
       <ConfirmDialog

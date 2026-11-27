@@ -25,6 +25,7 @@ import {
   X,
 } from 'lucide-react';
 import { useAppStore } from '../store/app';
+import { displayName } from '../lib/display';
 import { selectNodesSorted } from '../store/selectors';
 import type { NodeData, RoleClass } from '../types/api';
 import { MAP_PLACE_LABELS, createOfflineMapStyle } from '../lib/map-style';
@@ -201,8 +202,13 @@ export function MapScreen() {
       const element = document.createElement('button');
       element.type = 'button';
       element.className = 'map-node-marker';
-      element.setAttribute('aria-label', `${node.name}, ${formatRole(node.class)}, ${node.hops} hops`);
-      element.title = `${node.name} · ${formatRole(node.class)} · ${node.rssi ?? '—'} dBm · ${formatLastSeen(node.last_seen_ms)}`;
+      const nodeLabel = displayName({
+        announcedName: node.name,
+        contactName: contacts[node.node_id]?.name,
+        nodeId: node.node_id,
+      });
+      element.setAttribute('aria-label', `${nodeLabel}, ${formatRole(node.class)}, ${node.hops} hops`);
+      element.title = `${nodeLabel} · ${formatRole(node.class)} · ${node.rssi ?? '—'} dBm · ${formatLastSeen(node.last_seen_ms)}`;
       const color = roleColor(node.class);
       const dot = document.createElement('span');
       dot.className = 'map-node-marker__dot';
@@ -210,7 +216,7 @@ export function MapScreen() {
       dot.style.boxShadow = `0 0 0 3px ${color}22, 0 0 14px ${color}66`;
       const label = document.createElement('span');
       label.className = 'map-node-marker__label';
-      label.textContent = node.name;
+      label.textContent = nodeLabel;
       element.append(dot, label);
       element.dataset.alwaysLabel = 'true';
       if (node.node_id === selectedId) element.dataset.selected = 'true';
@@ -239,7 +245,7 @@ export function MapScreen() {
         .addTo(map);
       markersRef.current.push(marker);
     }
-  }, [mapCreated, visibleNodes, selectedId, ownPosition, ownNodeId, toLngLat]);
+  }, [mapCreated, visibleNodes, selectedId, ownPosition, ownNodeId, toLngLat, contacts]);
 
   /* ------------------------------ vector overlays ------------------------------ */
 
@@ -682,13 +688,14 @@ function NodeCard({
   onMessage: () => void;
   onDetails: () => void;
 }) {
+  const contacts = useAppStore((state) => state.contacts);
   return (
     <div className="glass overflow-hidden rounded-xl border border-white/[0.1] shadow-pop animate-slide-up">
       <div className="flex items-start gap-2.5 border-b border-white/[0.06] p-3">
-        <Avatar name={node.name} seed={node.node_id} size="md" online={Date.now() - node.last_seen_ms < 10 * 60_000} />
+        <Avatar name={displayName({ announcedName: node.name, contactName: contacts[node.node_id]?.name, nodeId: node.node_id })} seed={node.node_id} size="md" online={Date.now() - node.last_seen_ms < 10 * 60_000} />
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-1.5">
-            <p className="truncate text-[13px] font-semibold text-white">{node.name || 'unnamed node'}</p>
+            <p className="truncate text-[13px] font-semibold text-white">{displayName({ announcedName: node.name, contactName: contacts[node.node_id]?.name, nodeId: node.node_id })}</p>
             {isContact ? <Badge tone="accent">contact</Badge> : null}
           </div>
           <p className="mt-0.5 font-mono text-3xs text-slate-500">{shortenNodeId(node.node_id, 6, 4)}</p>

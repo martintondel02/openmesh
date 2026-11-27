@@ -18,6 +18,7 @@ import type {
   NodeData,
   Position,
 } from '../types/api';
+import { displayName } from '../lib/display';
 
 /* ------------------------------------------------------------------ */
 /* Messages                                                            */
@@ -314,7 +315,7 @@ export function buildConversations(source: ConversationSource): ConversationSumm
     const last = peerMessages[peerMessages.length - 1];
     const node = nodes[peer];
     const contact = contacts[peer];
-    const name = contact?.name || node?.name || `Node ${peer.slice(0, 4)}`;
+    const name = displayName({ announcedName: node?.name, contactName: contact?.name, nodeId: peer });
     rows.push({
       id: peer,
       kind: 'direct',

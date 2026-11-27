@@ -7,6 +7,7 @@ import type { Channel, ChatGroupMessage, ChatMessage, Conversation, NodeData, Ro
 import type { AppState } from './app';
 import { buildConversations } from './reducers';
 import { formatLastSeen, formatRole } from '../lib/utils';
+import { displayName } from '../lib/display';
 
 type StateSlice = Pick<
   AppState,
@@ -90,7 +91,8 @@ export function selectThreadHeader(state: StateSlice, nowMs = Date.now()): Threa
   if (thread.kind === 'direct') {
     const node = state.nodes[thread.id] ?? null;
     const contact = state.contacts[thread.id];
-    const name = contact?.name || node?.name || thread.id.slice(0, 8);
+    // Announced name first, then the pinned contact alias, then `node <first8>` (task-13).
+    const name = displayName({ announcedName: node?.name, contactName: contact?.name, nodeId: thread.id });
     const online = node ? nowMs - node.last_seen_ms < 10 * 60_000 : false;
     return {
       name,

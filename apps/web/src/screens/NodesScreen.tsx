@@ -16,10 +16,12 @@ import { selectNodesSorted } from '../store/selectors';
 import type { NodeData, RoleClass } from '../types/api';
 import { buildContactLink } from '../lib/links';
 import { formatLastSeen, formatNodeId, formatRole, cn, shortenNodeId } from '../lib/utils';
+import { displayName } from '../lib/display';
 import { Avatar, Badge, Button, EmptyState, IconButton, Stat } from '../components/ui/primitives';
 import { BatteryIndicator, CapsIcons, CopyButton, RoleBadge, SignalBars } from '../components/ui/signals';
 import { ConfirmDialog, Drawer } from '../components/ui/overlay';
 import { QRCode } from '../components/common/QRCode';
+import { PeerLinkQualityStrip } from './chats/PeerLinkCard';
 
 const ROLE_FILTERS: Array<{ id: RoleClass | 'all'; label: string }> = [
   { id: 'all', label: 'All' },
@@ -28,6 +30,10 @@ const ROLE_FILTERS: Array<{ id: RoleClass | 'all'; label: string }> = [
   { id: 'client', label: 'Clients' },
   { id: 'tracker', label: 'Trackers' },
 ];
+
+function nodeLabel(node: NodeData, contacts: Record<string, { name: string }>): string {
+  return displayName({ announcedName: node.name, contactName: contacts[node.node_id]?.name, nodeId: node.node_id });
+}
 
 export function NodesScreen() {
   const nodes = useAppStore((state) => state.nodes);
@@ -117,7 +123,7 @@ export function NodesScreen() {
             <Button variant="ghost" size="sm" icon={RefreshCw} onClick={refreshNodes}>
               Refresh
             </Button>
-            <Button variant="secondary" size="sm" icon={Radio} onClick={announceNow}>
+            <Button variant="secondary" size="sm" icon={Radio} onClick={() => announceNow()}>
               Announce
             </Button>
           </div>
@@ -166,7 +172,7 @@ export function NodesScreen() {
                           <Avatar name={node.name} seed={node.node_id} size="sm" online={Date.now() - node.last_seen_ms < 10 * 60_000} />
                           <div className="min-w-0">
                             <div className="flex items-center gap-1.5">
-                              <span className="truncate text-xs font-medium text-slate-200">{node.name || 'unnamed node'}</span>
+                              <span className="truncate text-xs font-medium text-slate-200">{nodeLabel(node, contacts)}</span>
                               {node.is_contact ? <ShieldCheck className="h-3 w-3 text-emerald-400/80" aria-label="Contact" /> : null}
                             </div>
                             <span className="font-mono text-3xs text-slate-500">{shortenNodeId(node.node_id, 6, 4)}</span>
@@ -188,7 +194,7 @@ export function NodesScreen() {
                         <div className="flex items-center justify-end gap-0.5 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100">
                           <IconButton
                             icon={MessageSquare}
-                            label={`Message ${node.name}`}
+                            label={`Message ${nodeLabel(node, contacts)}`}
                             size="sm"
                             onClick={(event) => {
                               event.stopPropagation();
@@ -214,10 +220,10 @@ export function NodesScreen() {
                   onClick={() => inspectNode(node.node_id)}
                   className="focus-ring flex w-full items-start gap-2.5 rounded-xl border border-white/[0.06] bg-white/[0.02] p-3 text-left"
                 >
-                  <Avatar name={node.name} seed={node.node_id} size="md" online={Date.now() - node.last_seen_ms < 10 * 60_000} />
+                  <Avatar name={nodeLabel(node, contacts)} seed={node.node_id} size="md" online={Date.now() - node.last_seen_ms < 10 * 60_000} />
                   <div className="min-w-0 flex-1">
                     <div className="flex items-center gap-1.5">
-                      <span className="truncate text-[13px] font-medium text-slate-200">{node.name || 'unnamed node'}</span>
+                      <span className="truncate text-[13px] font-medium text-slate-200">{nodeLabel(node, contacts)}</span>
                       {node.is_contact ? <ShieldCheck className="h-3 w-3 text-emerald-400/80" aria-label="Contact" /> : null}
                       <span className="ml-auto"><RoleBadge role={node.class} /></span>
                     </div>
@@ -238,6 +244,7 @@ export function NodesScreen() {
 
       <NodeDrawer
         node={selectedNode}
+        contactName={selectedNode ? contacts[selectedNode.node_id]?.name ?? null : null}
         isContact={selectedNode ? Boolean(contacts[selectedNode.node_id]) || selectedNode.is_contact : false}
         onClose={() => inspectNode(null)}
         onMessage={(node) => {
@@ -256,17 +263,22 @@ export function NodesScreen() {
 
 function NodeDrawer({
   node,
+  contactName,
   isContact,
   onClose,
   onMessage,
   onShowOnMap,
 }: {
   node: NodeData | null;
+  contactName?: string | null;
   isContact: boolean;
   onClose: () => void;
   onMessage: (node: NodeData) => void;
   onShowOnMap: () => void;
 }) {
+  const name = node
+    ? displayName({ announcedName: node.name, contactName, nodeId: node.node_id })
+    : 'unnamed node';
   const requestContactQr = useAppStore((state) => state.requestContactQr);
   const addContact = useAppStore((state) => state.addContact);
   const removeContact = useAppStore((state) => state.removeContact);
@@ -282,7 +294,7 @@ function NodeDrawer({
     setQrUrl(null);
     const fallback =
       node.public_key && node.public_key.length > 0
-        ? buildContactLink({ nodeId: node.node_id, name: node.name, identity: node.public_key })
+        ? buildContactLink({ nodeId: node.node_id, name: name, identity: node.public_key })
         : null;
     setQrLoading(true);
     requestContactQr(node.node_id)
@@ -307,7 +319,7 @@ function NodeDrawer({
       <Drawer
         open={Boolean(node)}
         onClose={onClose}
-        title={node.name || 'unnamed node'}
+        title={name}
         description={`${formatRole(node.class)} · ${node.hops} ${node.hops === 1 ? 'hop' : 'hops'} · ${node.is_contact || isContact ? 'contact' : 'not a contact'}`}
         footer={
           <div className="flex items-center gap-2">
@@ -326,7 +338,7 @@ function NodeDrawer({
                 onClick={async () => {
                   setBusy(true);
                   try {
-                    await addContact({ nodeId: node.node_id, name: node.name, identity: node.public_key });
+                    await addContact({ nodeId: node.node_id, name: name, identity: node.public_key });
                   } finally {
                     setBusy(false);
                   }
@@ -340,7 +352,7 @@ function NodeDrawer({
       >
         <div className="space-y-5 px-5 py-4">
           <div className="flex items-center gap-3">
-            <Avatar name={node.name} seed={node.node_id} size="xl" online={Date.now() - node.last_seen_ms < 10 * 60_000} />
+            <Avatar name={name} seed={node.node_id} size="xl" online={Date.now() - node.last_seen_ms < 10 * 60_000} />
             <div className="min-w-0">
               <div className="flex items-center gap-1.5">
                 <RoleBadge role={node.class} />
@@ -364,6 +376,8 @@ function NodeDrawer({
               </div>
             </div>
           </div>
+
+          <PeerLinkQualityStrip node={node} contactName={contactName} isContact={isContact} />
 
           <div className="grid grid-cols-2 gap-2">
             <DrawerMetric label="Signal" hint={`${node.rssi ?? '—'} dBm`}>
@@ -424,7 +438,7 @@ function NodeDrawer({
                 <div className="grid h-[180px] w-[180px] place-items-center text-2xs text-slate-500">Building invite…</div>
               ) : qrUrl ? (
                 <>
-                  <QRCode value={qrUrl} size={180} label={`Contact QR for ${node.name}`} />
+                  <QRCode value={qrUrl} size={180} label={`Contact QR for ${name}`} />
                   <code className="w-full break-all rounded-md bg-ink-950/60 px-2 py-1.5 font-mono text-3xs text-slate-500">
                     {qrUrl}
                   </code>
@@ -460,9 +474,9 @@ function NodeDrawer({
         onConfirm={async () => {
           await removeContact(node.node_id);
           setRemoveOpen(false);
-          pushToast({ kind: 'info', title: `${node.name} removed from contacts` });
+          pushToast({ kind: 'info', title: `${name} removed from contacts` });
         }}
-        title={`Remove ${node.name}?`}
+        title={`Remove ${name}?`}
         description="You will stop verifying this identity. The node stays in the mesh view until it expires."
         confirmLabel="Remove contact"
         icon={UserMinus}

@@ -23,6 +23,7 @@ import {
 import type { LucideIcon } from 'lucide-react';
 import type { Cap, DeliveryState, RoleClass } from '../../types/api';
 import { batteryTone, cn, formatRole, roleColor, signalBars, signalLabel } from '../../lib/utils';
+import { deliveryPresentation } from '../../lib/display';
 
 /* ------------------------------------------------------------------ */
 /* Signal bars                                                        */
@@ -169,6 +170,46 @@ export function DeliveryTicks({ state, className }: { state: DeliveryState; clas
     default:
       return null;
   }
+}
+
+/**
+ * Delivery status with an explicit label + explanation (not icon-only).
+ *
+ * Direct messages explain the per-recipient receipt; channel messages explain that they are
+ * broadcast with no delivered/read receipt. The full sentence is also the tooltip/aria text so
+ * the meaning is available without relying on icon shape or colour.
+ */
+export function DeliveryStatus({
+  state,
+  group = false,
+  peerName,
+  error,
+  className,
+}: {
+  state: DeliveryState;
+  group?: boolean;
+  peerName?: string | null;
+  error?: string | null;
+  className?: string;
+}) {
+  const presentation = deliveryPresentation({ state, group, peerName, error });
+  const toneClass = {
+    slate: 'text-slate-400',
+    sky: 'text-sky-300',
+    emerald: 'text-emerald-300',
+    amber: 'text-amber-300',
+    rose: 'text-rose-300',
+  }[presentation.tone];
+  return (
+    <span
+      className={cn('inline-flex items-center gap-1 text-3xs', toneClass, className)}
+      title={presentation.explanation}
+      aria-label={`${presentation.label}. ${presentation.explanation}`}
+    >
+      <DeliveryTicks state={presentation.state} className="h-3 w-3" />
+      <span>{presentation.label}</span>
+    </span>
+  );
 }
 
 /* ------------------------------------------------------------------ */

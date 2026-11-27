@@ -21,6 +21,7 @@ import { RadioLinkCard } from './RadioLinkCard';
 import { deriveRegulatoryState } from '../../lib/regulatory';
 import { REGION_IDS, REGIONS } from '../../lib/airtime';
 import { cn } from '../../lib/utils';
+import { shortNodeId } from '../../lib/display';
 
 const SIMPLE_PROFILES = [
   { id: 'MEDIUM_FAST', label: 'Balanced', hint: 'Good range and speed for most homes. Start here.' },
@@ -34,6 +35,8 @@ export function BeginnerSettings({ setMode }: { setMode: (mode: 'beginner' | 'ad
   const setupState = useAppStore((state) => state.setupState);
   const ownNodeId = useAppStore((state) => state.ownNodeId);
   const updateConfig = useAppStore((state) => state.updateConfig);
+  const announceNow = useAppStore((state) => state.announceNow);
+  const ownName = useAppStore((state) => state.ownName);
   const saveSettings = useAppStore((state) => state.saveSettings);
   const resetIdentity = useAppStore((state) => state.resetIdentity);
   const openOnboarding = useAppStore((state) => state.openOnboarding);
@@ -67,16 +70,34 @@ export function BeginnerSettings({ setMode }: { setMode: (mode: 'beginner' | 'ad
   const progress = checklistProgress(checks);
   const complete = isSetupStateComplete(setupState) || progress.done === progress.total;
 
+  const trimmedName = nodeName.trim();
+  const nameBytes = new TextEncoder().encode(trimmedName).length;
+  const nameError = trimmedName ? (nameBytes > 32 ? `Name is ${nameBytes}/32 bytes — shorten it.` : null) : 'Enter a name (1–32 bytes).';
+  const nameDirty = trimmedName !== (config?.node.name ?? '');
+
   const saveNode = () => {
+    if (nameError) return;
     updateConfig({
       node: {
         ...(config?.node ?? { announce_interval_s: 1800 }),
-        name: nodeName.trim() || config?.node.name || 'my-node',
+        name: trimmedName,
         class: role,
       },
     });
-    pushToast({ kind: 'success', title: 'Node name saved', message: 'Other nodes will hear the new name on the next announce.', helpTopic: 'contacts-identity' });
+    if (nameDirty) {
+      // Apply + announce immediately so peers do not wait for the periodic announce.
+      announceNow({ silent: true });
+    }
+    pushToast({
+      kind: 'success',
+      title: 'Name saved',
+      message: nameDirty
+        ? `“${trimmedName}” is in your next signed announce — nearby nodes will update shortly.`
+        : 'Device role saved. Your name is unchanged.',
+      helpTopic: 'contacts-identity',
+    });
   };
+
 
   const saveRadio = () => {
     updateConfig({
@@ -139,9 +160,23 @@ export function BeginnerSettings({ setMode }: { setMode: (mode: 'beginner' | 'ad
             <section className="rounded-2xl border border-white/[0.07] bg-white/[0.02] p-4">
               <CardTitle icon={Laptop} title="This device" helpKey="settings.node.name" />
               <div className="mt-3 grid gap-3 sm:grid-cols-2">
-                <Field label={BEGINNER_COPY.nodeNameLabel} hint={BEGINNER_COPY.nodeNameHelp} labelAccessory={<HelpTip helpKey="settings.node.name" label="Node name" />}>
-                  {({ id }) => (
-                    <TextInput id={id} value={nodeName} maxLength={32} onChange={(event) => setNodeName(event.target.value)} placeholder="my-phone" />
+                <Field
+                  label={BEGINNER_COPY.nodeNameLabel}
+                  hint={`${nameBytes}/32 bytes · ${BEGINNER_COPY.nodeNameHelp}`}
+                  error={nameError}
+                  success={!nameError && nameDirty ? 'Unsaved — press Save name to apply and announce.' : null}
+                  labelAccessory={<HelpTip helpKey="settings.node.name" label="Node name" />}
+                >
+                  {({ id, describedBy }) => (
+                    <TextInput
+                      id={id}
+                      value={nodeName}
+                      maxLength={32}
+                      aria-describedby={describedBy}
+                      aria-invalid={nameError ? true : undefined}
+                      onChange={(event) => setNodeName(event.target.value)}
+                      placeholder="my-phone"
+                    />
                   )}
                 </Field>
                 <Field label={BEGINNER_COPY.roleLabel} hint={BEGINNER_COPY.roleHelp} labelAccessory={<HelpTip helpKey="settings.node.class" label="Device role" />}>
@@ -156,10 +191,16 @@ export function BeginnerSettings({ setMode }: { setMode: (mode: 'beginner' | 'ad
                 </Field>
               </div>
               <div className="mt-3 flex items-center justify-between gap-2">
-                <p className="text-3xs text-slate-600">
-                  {ownNodeId ? `Public id ${ownNodeId.slice(0, 8)}… — share it only when you want to be found.` : 'No identity yet.'}
-                </p>
-                <Button variant="primary" size="sm" icon={Check} onClick={saveNode}>Save name</Button>
+                <div className="min-w-0">
+                  <p className="truncate text-2xs text-slate-300">
+                    You are <span className="font-semibold text-white">{trimmedName || ownName || 'Unnamed node'}</span>{' '}
+                    <span className="font-mono text-slate-500">· {shortNodeId(ownNodeId)}</span>
+                  </p>
+                  <p className="text-3xs text-slate-600">
+                    Announced to nearby nodes and contacts; the node id stays unique even if two nodes share a name.
+                  </p>
+                </div>
+                <Button variant="primary" size="sm" icon={Check} onClick={saveNode} disabled={Boolean(nameError) || !nameDirty}>Save name</Button>
               </div>
             </section>
 

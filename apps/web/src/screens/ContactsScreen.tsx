@@ -11,6 +11,7 @@ import {
   Users,
 } from 'lucide-react';
 import { useAppStore } from '../store/app';
+import { displayName } from '../lib/display';
 import type { Contact } from '../types/api';
 import { buildContactLink, describeLink, isValidIdentity, nodeIdFromIdentity, parseOpenMeshLink } from '../lib/links';
 import { formatLastSeen, formatNodeId, shortenNodeId, cn } from '../lib/utils';
@@ -47,7 +48,7 @@ export function ContactsScreen() {
     if (!normalized) return sorted;
     return sorted.filter(
       (contact) =>
-        contact.name.toLowerCase().includes(normalized) ||
+        displayName({ announcedName: nodes[contact.node_id]?.name, contactName: contact.name, nodeId: contact.node_id }).toLowerCase().includes(normalized) ||
         contact.node_id.toLowerCase().includes(normalized),
     );
   }, [sorted, query]);
@@ -107,10 +108,10 @@ export function ContactsScreen() {
                   className="group flex flex-col rounded-xl border border-white/[0.06] bg-white/[0.02] p-3 transition-colors hover:border-white/[0.11] hover:bg-white/[0.03]"
                 >
                   <div className="flex items-start gap-2.5">
-                    <Avatar name={contact.name} seed={contact.node_id} size="md" online={online} />
+                    <Avatar name={displayName({ announcedName: node?.name, contactName: contact.name, nodeId: contact.node_id })} seed={contact.node_id} size="md" online={online} />
                     <div className="min-w-0 flex-1">
                       <div className="flex items-center gap-1.5">
-                        <p className="truncate text-[13px] font-semibold text-slate-100">{contact.name}</p>
+                        <p className="truncate text-[13px] font-semibold text-slate-100">{displayName({ announcedName: node?.name, contactName: contact.name, nodeId: contact.node_id })}</p>
                         <Badge tone="accent">verified</Badge>
                       </div>
                       <p className="mt-0.5 font-mono text-3xs text-slate-500">{shortenNodeId(contact.node_id, 6, 4)}</p>
@@ -135,13 +136,13 @@ export function ContactsScreen() {
                     </Button>
                     <IconButton
                       icon={QrCode}
-                      label={`Show QR for ${contact.name}`}
+                      label={`Show QR for ${displayName({ announcedName: node?.name, contactName: contact.name, nodeId: contact.node_id })}`}
                       size="sm"
                       onClick={() => setQrContact(contact)}
                     />
                     <IconButton
                       icon={Trash2}
-                      label={`Delete ${contact.name}`}
+                      label={`Delete ${displayName({ announcedName: node?.name, contactName: contact.name, nodeId: contact.node_id })}`}
                       size="sm"
                       className="hover:text-rose-300"
                       onClick={() => setDeleteTarget(contact)}

@@ -412,7 +412,7 @@ export interface AppState {
   markActiveThreadRead: () => void;
   sharePosition: (target: { channelId?: string; peer?: string }) => Promise<void>;
   updateConfig: (patch: ConfigPatch) => void;
-  announceNow: () => void;
+  announceNow: (options?: { silent?: boolean }) => void;
   refreshNodes: () => void;
   addContact: (contact: { nodeId: string; name: string; identity?: string | null }) => Promise<void>;
   removeContact: (nodeId: string) => Promise<void>;
@@ -1281,8 +1281,9 @@ export const useAppStore = create<AppState>()((set, get) => ({
     transport?.send('get_nodes', {});
   },
 
-  announceNow: () => {
+  announceNow: (options) => {
     transport?.send('announce', {});
+    if (options?.silent) return;
     get().pushToast({
       kind: 'info',
       title: 'Announcement queued',

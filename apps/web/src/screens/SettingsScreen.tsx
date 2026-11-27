@@ -13,6 +13,7 @@ import {
   RotateCcw,
   Save,
   ShieldCheck,
+  QrCode,
   SlidersHorizontal,
   TriangleAlert,
   UserRound,
@@ -39,8 +40,10 @@ import {
 import { buildHttpBaseUrl } from '../lib/ws';
 import { radioStateTone, transportState, transportStateLabel } from '../lib/radio-link';
 import { cn, formatBytes, formatSeconds, formatUptime, formatNodeId } from '../lib/utils';
-import { Badge, Button, SectionTitle, SegmentedControl, Toggle } from '../components/ui/primitives';
+import { shortNodeId } from '../lib/display';
+import { Avatar, Badge, Button, SectionTitle, SegmentedControl, Toggle } from '../components/ui/primitives';
 import { CopyButton } from '../components/ui/signals';
+import { QRCode } from '../components/common/QRCode';
 import { Callout, Field, Slider, TextInput, InlineCode } from '../components/ui/forms';
 import { Modal } from '../components/ui/overlay';
 import { HelpTip } from '../components/ui/help';
@@ -68,6 +71,7 @@ export function SettingsScreen() {
   const bridgeVersion = useAppStore((state) => state.bridgeVersion);
   const updateConfig = useAppStore((state) => state.updateConfig);
   const announceNow = useAppStore((state) => state.announceNow);
+  const ownName = useAppStore((state) => state.ownName);
   const saveSettings = useAppStore((state) => state.saveSettings);
   const setDemoMode = useAppStore((state) => state.setDemoMode);
   const retryConnection = useAppStore((state) => state.retryConnection);
@@ -96,6 +100,7 @@ export function SettingsScreen() {
   const [showToken, setShowToken] = useState(false);
   const [testState, setTestState] = useState<TestState>('idle');
   const [testDetail, setTestDetail] = useState<string | null>(null);
+  const [qrOpen, setQrOpen] = useState(false);
   const [resetOpen, setResetOpen] = useState(false);
   const [resetText, setResetText] = useState('');
   const [resetting, setResetting] = useState(false);
@@ -145,6 +150,35 @@ export function SettingsScreen() {
     debounceRef.current = setTimeout(action, delay);
   };
 
+  const trimmedName = nameDraft.trim();
+  const nameBytes = new TextEncoder().encode(trimmedName).length;
+  const nameError = trimmedName
+    ? nameBytes > 32
+      ? `Name is ${nameBytes}/32 bytes — shorten it.`
+      : null
+    : 'Enter a name (1–32 bytes).';
+  const nameDirty = trimmedName !== (config?.node.name ?? '');
+  const savedName = (config?.node.name ?? '').trim() || ownName || 'Unnamed node';
+
+  const saveName = () => {
+    if (nameError) return;
+    setNameDraft(trimmedName);
+    if (!nameDirty) return;
+    updateConfig({
+      node: { ...(config?.node ?? { name: '', class: 'client', announce_interval_s: 1800 }), name: trimmedName },
+    });
+    // Announce immediately so peers see the new name without waiting for the periodic announce.
+    if (mode !== 'demo') announceNow({ silent: true });
+    pushToast({
+      kind: 'success',
+      title: 'Display name saved',
+      message:
+        mode === 'demo'
+          ? `Demo mesh now shows “${trimmedName}” locally.`
+          : `“${trimmedName}” is in your next signed announce — nearby nodes will update shortly.`,
+    });
+  };
+
   const testConnection = async () => {
     setTestState('busy');
     setTestDetail(null);
@@ -192,7 +226,7 @@ export function SettingsScreen() {
           <p className="flex-1 text-2xs text-slate-500">
             Changes are sent to the bridge as <InlineCode>set_config</InlineCode> and apply to the next radio slot.
           </p>
-          <Button variant="secondary" size="sm" icon={Megaphone} onClick={announceNow}>
+          <Button variant="secondary" size="sm" icon={Megaphone} onClick={() => announceNow()}>
             Announce now
           </Button>
         </div>
@@ -227,23 +261,64 @@ export function SettingsScreen() {
 
         {/* Identity */}
         <SectionCard icon={UserRound} title="Identity" description="Who this node is on the mesh. Announces are signed with this identity.">
+          <div className="flex flex-wrap items-center gap-3 rounded-xl border border-emerald-400/15 bg-gradient-to-br from-emerald-400/[0.08] to-sky-500/[0.04] p-3">
+            <Avatar name={savedName} seed={ownNodeId ?? 'you'} size="md" online />
+            <div className="min-w-0 flex-1">
+              <p className="text-3xs font-semibold uppercase tracking-[0.12em] text-emerald-300/80">You are</p>
+              <p className="truncate text-sm font-semibold text-white">
+                {savedName} <span className="font-mono text-2xs font-normal text-slate-400">· {shortNodeId(ownNodeId)}</span>
+              </p>
+              <p className="mt-0.5 text-2xs leading-relaxed text-slate-400">
+                This name travels in your signed announces so contacts recognise you. Your node id stays unique even
+                if two nodes pick the same name.
+              </p>
+            </div>
+            <div className="flex shrink-0 items-center gap-1.5">
+              {ownNodeId ? <CopyButton value={ownNodeId} label="Copy id" size="md" variant="surface" /> : null}
+              <Button variant="secondary" size="sm" icon={QrCode} onClick={() => setQrOpen(true)} disabled={!ownNodeId}>
+                My QR
+              </Button>
+            </div>
+          </div>
+
           <div className="grid gap-4 sm:grid-cols-2">
-            <Field label="Node name" hint="Shown in announces and to other clients. 0–32 bytes." labelAccessory={<HelpTip helpKey="settings.node.name" label="Node name" />}>
-              {({ id }) => (
-                <TextInput
-                  id={id}
-                  value={nameDraft}
-                  maxLength={32}
-                  onChange={(event) => setNameDraft(event.target.value)}
-                  onBlur={() => {
-                    const trimmed = nameDraft.trim();
-                    if (trimmed && trimmed !== config?.node.name) void commitNode({ name: trimmed });
-                    else setNameDraft(config?.node.name ?? '');
-                  }}
-                  onKeyDown={(event) => {
-                    if (event.key === 'Enter') (event.target as HTMLInputElement).blur();
-                  }}
-                />
+            <Field
+              label="Node name"
+              hint={`${nameBytes}/32 bytes · shown to peers in announces; announced immediately after saving.`}
+              error={nameError}
+              success={!nameError && nameDirty ? 'Unsaved — press Save to apply and announce.' : null}
+              labelAccessory={<HelpTip helpKey="settings.node.name" label="Node name" />}
+            >
+              {({ id, describedBy }) => (
+                <div className="flex items-center gap-1.5">
+                  <TextInput
+                    id={id}
+                    value={nameDraft}
+                    maxLength={32}
+                    aria-describedby={describedBy}
+                    aria-invalid={nameError ? true : undefined}
+                    onChange={(event) => setNameDraft(event.target.value)}
+                    onBlur={() => {
+                      if (nameError) setNameDraft(config?.node.name ?? '');
+                    }}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter') {
+                        event.preventDefault();
+                        saveName();
+                      }
+                    }}
+                    className="flex-1"
+                  />
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    icon={Save}
+                    onClick={saveName}
+                    disabled={Boolean(nameError) || !nameDirty}
+                  >
+                    Save
+                  </Button>
+                </div>
               )}
             </Field>
 
@@ -615,6 +690,13 @@ export function SettingsScreen() {
         </div>
       </div>
 
+      <IdentityQrModal
+        open={qrOpen}
+        onClose={() => setQrOpen(false)}
+        ownNodeId={ownNodeId}
+        ownName={savedName}
+      />
+
       <Modal
         open={resetOpen}
         onClose={() => {
@@ -705,5 +787,78 @@ function SectionCard({
       </div>
       <div className="space-y-4">{children}</div>
     </section>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* Own contact QR                                                     */
+/* ------------------------------------------------------------------ */
+
+function IdentityQrModal({
+  open,
+  onClose,
+  ownNodeId,
+  ownName,
+}: {
+  open: boolean;
+  onClose: () => void;
+  ownNodeId: string | null;
+  ownName: string;
+}) {
+  const requestContactQr = useAppStore((state) => state.requestContactQr);
+  const [url, setUrl] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    if (!open || !ownNodeId) return;
+    let cancelled = false;
+    setUrl(null);
+    setError(null);
+    setLoading(true);
+    requestContactQr(ownNodeId)
+      .then((invite) => {
+        if (!cancelled) setUrl(invite);
+      })
+      .catch((cause: unknown) => {
+        if (!cancelled) {
+          setError(cause instanceof Error ? cause.message : 'Your bridge did not return a contact invite.');
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [open, ownNodeId, requestContactQr]);
+
+  return (
+    <Modal
+      open={open}
+      onClose={onClose}
+      title={`Your contact card · ${ownName}`}
+      description="Another phone or the web client scans this to add you as a contact. Your node id stays self-certifying; the name is only the friendly label."
+      size="sm"
+    >
+      {loading ? (
+        <div className="flex items-center justify-center gap-2 py-10 text-xs text-slate-400">
+          <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
+          Asking the bridge for your contact link…
+        </div>
+      ) : url ? (
+        <div className="flex flex-col items-center gap-3">
+          <QRCode value={url} size={220} label={`Contact QR for ${ownName}`} />
+          <code className="max-w-full break-all rounded-lg border border-white/[0.06] bg-white/[0.02] px-2 py-1.5 text-3xs text-slate-400">
+            {url}
+          </code>
+          <CopyButton value={url} label="Copy link" size="md" variant="surface" />
+        </div>
+      ) : (
+        <p className="py-8 text-center text-xs text-rose-300">
+          {error ?? 'Your bridge did not return a contact invite for this node yet.'}
+        </p>
+      )}
+    </Modal>
   );
 }

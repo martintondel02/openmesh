@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react';
 import { Hash, Link2, MessageSquarePlus, Plus, Radio, Search, Users } from 'lucide-react';
 import { useAppStore } from '../../store/app';
+import { displayName } from '../../lib/display';
 import { selectNodesSorted } from '../../store/selectors';
 import { formatLastSeen, formatRole } from '../../lib/utils';
 import { Avatar, Button, EmptyState } from '../../components/ui/primitives';
@@ -30,7 +31,7 @@ export function NewChatModal({
     if (!normalized) return sorted;
     return sorted.filter(
       (node) =>
-        node.name.toLowerCase().includes(normalized) ||
+        displayName({ announcedName: node.name, contactName: contacts[node.node_id]?.name, nodeId: node.node_id }).toLowerCase().includes(normalized) ||
         node.node_id.toLowerCase().includes(normalized) ||
         formatRole(node.class).toLowerCase().includes(normalized),
     );
@@ -130,10 +131,10 @@ export function NewChatModal({
                     }}
                     className="focus-ring flex w-full items-center gap-2.5 rounded-lg px-2 py-2 text-left transition-colors hover:bg-white/[0.04]"
                   >
-                    <Avatar name={node.name} seed={node.node_id} size="sm" online={Date.now() - node.last_seen_ms < 10 * 60_000} />
+                    <Avatar name={displayName({ announcedName: node.name, contactName: contacts[node.node_id]?.name, nodeId: node.node_id })} seed={node.node_id} size="sm" online={Date.now() - node.last_seen_ms < 10 * 60_000} />
                     <span className="min-w-0 flex-1">
                       <span className="flex items-center gap-1.5">
-                        <span className="truncate text-xs font-medium text-slate-200">{node.name || 'unnamed node'}</span>
+                        <span className="truncate text-xs font-medium text-slate-200">{displayName({ announcedName: node.name, contactName: contacts[node.node_id]?.name, nodeId: node.node_id })}</span>
                         {isContact ? <span className="text-3xs text-emerald-400/80">contact</span> : null}
                       </span>
                       <span className="mt-0.5 flex items-center gap-2 text-3xs text-slate-500">
