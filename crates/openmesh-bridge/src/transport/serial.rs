@@ -13,8 +13,18 @@
 //! within the last 90 s (firmware `kCompanionTimeoutMs`), so companion mode sends a `Ping` every
 //! [`PING_INTERVAL`]. The blocking serial IO runs on a dedicated OS thread and exchanges frames
 //! with the async side over channels.
+//!
+//! If the link drops (radio reset/reflash, USB re-enumeration, cable pull), the worker logs a
+//! warning, reopens the port with bounded exponential backoff ([`RECONNECT_MIN`] →
+//! [`RECONNECT_MAX`]) and re-runs the handshake. Shutdown stays responsive while waiting.
+//!
+//! **Writes are not link health.** A USB CDC write can block for the duration of the radio's
+//! LoRa transmission (and the EU868 duty cycle): that is normal backpressure, not a dead link.
+//! Frames are written with a generous [`WRITE_TIMEOUT`]; a timeout is retried a bounded number
+//! of times and then the frame is dropped (OMP tolerates loss). Only read errors, EOF and a
+//! failed reopen trigger the reconnect path.
 
-use std::io::{Read, Write};
+use std::io::Read;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -40,6 +50,20 @@ pub const SLIP_ESC_ESC: u8 = 0xDD;
 pub const HELLO_TIMEOUT: Duration = Duration::from_secs(2);
 /// Companion keepalive interval; must stay well below the firmware's 90 s companion timeout.
 pub const PING_INTERVAL: Duration = Duration::from_secs(20);
+/// First delay before reopening a lost serial link; doubles on every consecutive failure.
+pub const RECONNECT_MIN: Duration = Duration::from_millis(250);
+/// Upper bound for the reconnect backoff.
+pub const RECONNECT_MAX: Duration = Duration::from_secs(5);
+/// How often the reconnect wait checks for shutdown.
+const SHUTDOWN_POLL: Duration = Duration::from_millis(25);
+/// Serial write timeout: a write may block while the radio transmits a frame over LoRa, so this
+/// must absorb radio-busy backpressure (EU868 airtime for one frame is ~1 s). Reads keep the
+/// short [`READ_TIMEOUT`] because it is restored after every write.
+const WRITE_TIMEOUT: Duration = Duration::from_secs(3);
+/// Maximum write attempts for one frame when the radio is busy (initial attempt + one retry).
+const WRITE_MAX_ATTEMPTS: u32 = 2;
+/// Delay between write retries while the radio drains its transmit queue.
+const WRITE_RETRY_DELAY: Duration = Duration::from_millis(250);
 /// Companion protocol version understood by the bridge (`COMPANION-API.md` §3).
 const COMPANION_PROTO: u8 = 1;
 /// Blocking read timeout: bounds shutdown latency and keeps the IO loop responsive.
@@ -367,23 +391,25 @@ fn log_companion_ready(info: &CompanionInfo, config: &SerialConfig) {
 
 /// Send a companion `Hello` and wait up to [`HELLO_TIMEOUT`] for `HelloAck`.
 ///
-/// Returns the radio facts plus any messages that arrived after the ack in the same read, or
-/// `None` when the radio did not answer (raw-frame firmware, wrong port or a dead link).
+/// `Ok(Some(..))` — companion radio detected (facts + any messages that arrived after the ack in
+/// the same read). `Ok(None)` — the radio did not answer, so raw-frame mode is the fallback.
+/// `Err(reason)` — the port itself failed (EOF/read/write error); the caller must reconnect.
 fn detect_companion(
     port: &mut dyn SerialPort,
     decoder: &mut CompanionDecoder,
     config: &SerialConfig,
-) -> Option<(CompanionInfo, Vec<CompanionMsg>)> {
+) -> Result<Option<(CompanionInfo, Vec<CompanionMsg>)>, &'static str> {
     let hello = match companion::encode_slip(&hello_message()) {
         Ok(bytes) => bytes,
         Err(err) => {
             tracing::warn!(error = %err, "failed to encode companion Hello");
-            return None;
+            return Err("failed to encode companion Hello");
         }
     };
-    if let Err(err) = port.write_all(&hello) {
+    let (hello_result, _) = write_frame_bytes(port, &hello, WRITE_TIMEOUT);
+    if let Err(err) = hello_result {
         tracing::warn!(error = %err, port = %config.port, "failed to send companion Hello");
-        return None;
+        return Err("serial write failed during companion handshake");
     }
     if let Err(err) = port.flush() {
         tracing::debug!(error = %err, "serial flush after companion Hello failed");
@@ -396,7 +422,7 @@ fn detect_companion(
                 port = %config.port,
                 "radio did not answer companion Hello; raw serial mode may be unsupported by this firmware"
             );
-            return None;
+            return Ok(None);
         }
         match port.read(&mut read_buf) {
             Ok(n) if n > 0 => {
@@ -411,61 +437,237 @@ fn detect_companion(
                     for msg in &messages {
                         tracing::debug!(message = ?msg, "companion message before HelloAck");
                     }
-                    return Some((info, remaining));
+                    return Ok(Some((info, remaining)));
                 }
                 for msg in &messages {
                     tracing::debug!(message = ?msg, "companion message before HelloAck");
                 }
             }
-            Ok(_) => {}
+            Ok(_) => {
+                tracing::warn!(port = %config.port, "serial link closed (EOF) during companion handshake");
+                return Err("serial link closed (EOF)");
+            }
             Err(err) if err.kind() == std::io::ErrorKind::TimedOut => {}
             Err(err) => {
                 tracing::warn!(error = %err, "serial read failed during companion handshake");
-                return None;
+                return Err("serial read failed during companion handshake");
             }
         }
     }
 }
 
-/// One open serial link plus the channels it exchanges frames over.
-struct SerialLink {
-    port: Box<dyn SerialPort>,
+/// Outcome of one connected session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LinkOutcome {
+    /// Shutdown was requested; stop without reconnecting.
+    Shutdown,
+    /// The link failed (EOF, read/write error); reopen the port and re-run detection.
+    Disconnected(&'static str),
+}
+
+/// Double the reconnect backoff, capped at [`RECONNECT_MAX`].
+fn grow_backoff(current: Duration) -> Duration {
+    (current.saturating_mul(2)).min(RECONNECT_MAX)
+}
+
+/// Open the configured serial port (USB CDC ignores the baud rate).
+fn open_serial(config: &SerialConfig) -> Result<Box<dyn SerialPort>> {
+    serialport::new(&config.port, config.baud)
+        .timeout(READ_TIMEOUT)
+        .open()
+        .with_context(|| format!("opening serial port {}", config.port))
+}
+
+/// Write all of `bytes` with `timeout`, restoring the port's previous (read) timeout afterwards.
+///
+/// Returns the I/O result plus how many bytes were written, so the caller can distinguish a
+/// zero-progress timeout (safe to retry) from a partial frame (must be dropped: retrying would
+/// duplicate the prefix on the wire).
+fn write_frame_bytes(
+    port: &mut dyn SerialPort,
+    bytes: &[u8],
+    timeout: Duration,
+) -> (std::io::Result<()>, usize) {
+    let previous = port.timeout();
+    let _ = port.set_timeout(timeout);
+    let mut written = 0usize;
+    let result = loop {
+        if written >= bytes.len() {
+            break Ok(());
+        }
+        match port.write(&bytes[written..]) {
+            Ok(0) => {
+                break Err(std::io::Error::new(
+                    std::io::ErrorKind::WriteZero,
+                    "serial write returned 0 bytes",
+                ));
+            }
+            Ok(n) => written += n,
+            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(err) => break Err(err),
+        }
+    };
+    let _ = port.set_timeout(previous);
+    (result, written)
+}
+
+/// Owns the `--serial` link: opens the port, detects the protocol and reconnects when it drops.
+struct SerialWorker {
     config: SerialConfig,
     link: LinkId,
     inbound: mpsc::Sender<Inbound>,
     outbound: mpsc::Receiver<TransportFrame>,
     shutdown: watch::Receiver<bool>,
     stats: Arc<LinkStats>,
+    /// Current reconnect delay; reset to [`RECONNECT_MIN`] whenever a session attaches.
+    backoff: Duration,
 }
 
-impl SerialLink {
-    /// Detect the radio protocol, then pump frames until shutdown.
-    fn run(mut self) {
-        let _ = self.port.set_timeout(READ_TIMEOUT);
-        let mut decoder = CompanionDecoder::new();
-        match detect_companion(&mut *self.port, &mut decoder, &self.config) {
-            Some((info, pending)) => {
-                log_companion_ready(&info, &self.config);
-                self.run_companion(&info, pending, decoder);
+impl SerialWorker {
+    /// Run until shutdown, reconnecting with bounded backoff whenever the radio link fails.
+    fn run(mut self, first_port: Box<dyn SerialPort>) {
+        let mut next_port = Some(first_port);
+        loop {
+            if *self.shutdown.borrow() {
+                break;
             }
-            None => {
-                let buffered = decoder.take_buffered();
-                self.run_raw(buffered);
+            let port = match next_port.take() {
+                Some(port) => port,
+                None => match open_serial(&self.config) {
+                    Ok(port) => port,
+                    Err(err) => {
+                        tracing::warn!(
+                            error = %err,
+                            port = %self.config.port,
+                            retry_in_ms = self.backoff.as_millis(),
+                            "serial radio unavailable; retrying"
+                        );
+                        if !self.wait_for_shutdown(self.backoff) {
+                            break;
+                        }
+                        self.backoff = grow_backoff(self.backoff);
+                        continue;
+                    }
+                },
+            };
+            match self.run_session(port) {
+                LinkOutcome::Shutdown => break,
+                LinkOutcome::Disconnected(reason) => {
+                    tracing::warn!(
+                        port = %self.config.port,
+                        reason,
+                        retry_in_ms = self.backoff.as_millis(),
+                        "serial radio link lost; reconnecting"
+                    );
+                    if !self.wait_for_shutdown(self.backoff) {
+                        break;
+                    }
+                    self.backoff = grow_backoff(self.backoff);
+                }
             }
         }
+        tracing::info!(port = %self.config.port, "serial transport stopped");
+    }
+
+    /// Detect the radio protocol on a freshly opened port, then pump frames until it fails.
+    fn run_session(&mut self, mut port: Box<dyn SerialPort>) -> LinkOutcome {
+        let _ = port.set_timeout(READ_TIMEOUT);
+        let mut decoder = CompanionDecoder::new();
+        match detect_companion(&mut *port, &mut decoder, &self.config) {
+            Ok(Some((info, pending))) => {
+                log_companion_ready(&info, &self.config);
+                self.backoff = RECONNECT_MIN;
+                self.run_companion(port, &info, pending, decoder)
+            }
+            Ok(None) => {
+                self.backoff = RECONNECT_MIN;
+                let buffered = decoder.take_buffered();
+                self.run_raw(port, buffered)
+            }
+            Err(reason) => LinkOutcome::Disconnected(reason),
+        }
+    }
+
+    /// Wait for `delay`, returning `false` when shutdown was requested first.
+    fn wait_for_shutdown(&self, delay: Duration) -> bool {
+        let deadline = Instant::now() + delay;
+        loop {
+            if *self.shutdown.borrow() {
+                return false;
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                return true;
+            }
+            std::thread::sleep(SHUTDOWN_POLL.min(deadline - now));
+        }
+    }
+
+    /// Write one SLIP-framed chunk, tolerating radio-busy backpressure.
+    ///
+    /// Returns `false` when the frame was dropped. Write failures never tear the link down: real
+    /// link loss is detected by the read path. A zero-progress timeout (the radio is draining its
+    /// transmit queue) is retried once within [`WRITE_MAX_ATTEMPTS`]; a partially written frame is
+    /// dropped instead of retried so the wire never carries a duplicated prefix.
+    fn write_frame(&mut self, port: &mut dyn SerialPort, bytes: &[u8]) -> bool {
+        for attempt in 1..=WRITE_MAX_ATTEMPTS {
+            let (result, written) = write_frame_bytes(port, bytes, WRITE_TIMEOUT);
+            match result {
+                Ok(()) => return true,
+                Err(err) if written > 0 => {
+                    tracing::warn!(
+                        error = %err,
+                        written,
+                        len = bytes.len(),
+                        "serial write stopped partway; dropping frame (radio backpressure)"
+                    );
+                    return false;
+                }
+                Err(err) => {
+                    let transient = matches!(
+                        err.kind(),
+                        std::io::ErrorKind::TimedOut
+                            | std::io::ErrorKind::WouldBlock
+                            | std::io::ErrorKind::Interrupted
+                    );
+                    if !transient {
+                        tracing::warn!(
+                            error = %err,
+                            "serial write failed; dropping frame (the read path detects real link loss)"
+                        );
+                        return false;
+                    }
+                    tracing::warn!(
+                        error = %err,
+                        attempt,
+                        max_attempts = WRITE_MAX_ATTEMPTS,
+                        "serial write timed out (radio busy); retrying frame"
+                    );
+                    if attempt < WRITE_MAX_ATTEMPTS && !self.wait_for_shutdown(WRITE_RETRY_DELAY) {
+                        return false;
+                    }
+                }
+            }
+        }
+        tracing::warn!(
+            len = bytes.len(),
+            "dropping frame after repeated write backpressure; link stays up"
+        );
+        false
     }
 
     /// Companion mode: `Tx` out, `Rx`/`Event` in, `Ping` keepalive.
     fn run_companion(
-        mut self,
+        &mut self,
+        mut port: Box<dyn SerialPort>,
         info: &CompanionInfo,
         pending: Vec<CompanionMsg>,
         mut decoder: CompanionDecoder,
-    ) {
+    ) -> LinkOutcome {
         let max_frame = usize::from(info.max_frame).min(MTU);
         for msg in pending {
             if !self.handle_companion_message(&msg) {
-                return;
+                return LinkOutcome::Shutdown;
             }
         }
         let mut read_buf = [0u8; 512];
@@ -473,7 +675,7 @@ impl SerialLink {
         let mut nonce: u32 = 0;
         loop {
             if *self.shutdown.borrow() {
-                break;
+                return LinkOutcome::Shutdown;
             }
             while let Ok(frame) = self.outbound.try_recv() {
                 if frame.link.is_some_and(|preferred| preferred != self.link) {
@@ -490,10 +692,9 @@ impl SerialLink {
                 match encode_companion_tx(&frame.bytes) {
                     Ok(bytes) => {
                         self.stats.record_tx();
-                        if let Err(err) = self.port.write_all(&bytes) {
-                            tracing::warn!(error = %err, "serial write failed");
-                            return;
-                        }
+                        // A write failure is radio backpressure, not link loss: drop the frame
+                        // (OMP tolerates loss) and keep the session up.
+                        let _ = self.write_frame(&mut *port, &bytes);
                     }
                     Err(err) => tracing::warn!(error = %err, "failed to encode companion Tx"),
                 }
@@ -503,27 +704,28 @@ impl SerialLink {
                 nonce = nonce.wrapping_add(1);
                 match encode_companion_ping(nonce) {
                     Ok(bytes) => {
-                        if let Err(err) = self.port.write_all(&bytes) {
-                            tracing::warn!(error = %err, "serial keepalive write failed");
-                            return;
-                        }
+                        // A lost keepalive is harmless: the next one is 20 s away.
+                        let _ = self.write_frame(&mut *port, &bytes);
                     }
                     Err(err) => tracing::warn!(error = %err, "failed to encode companion Ping"),
                 }
             }
-            match self.port.read(&mut read_buf) {
+            match port.read(&mut read_buf) {
                 Ok(n) if n > 0 => {
                     for msg in decoder.push(&read_buf[..n]) {
                         if !self.handle_companion_message(&msg) {
-                            return;
+                            return LinkOutcome::Shutdown;
                         }
                     }
                 }
-                Ok(_) => {}
+                Ok(_) => {
+                    tracing::warn!(port = %self.config.port, "serial link closed (EOF)");
+                    return LinkOutcome::Disconnected("serial link closed (EOF)");
+                }
                 Err(err) if err.kind() == std::io::ErrorKind::TimedOut => {}
                 Err(err) => {
                     tracing::warn!(error = %err, "serial read failed");
-                    return;
+                    return LinkOutcome::Disconnected("serial read failed");
                 }
             }
         }
@@ -563,7 +765,7 @@ impl SerialLink {
     }
 
     /// Raw fallback mode: SLIP-delimited OMP frames in both directions.
-    fn run_raw(mut self, buffered: Vec<u8>) {
+    fn run_raw(&mut self, mut port: Box<dyn SerialPort>, buffered: Vec<u8>) -> LinkOutcome {
         tracing::info!(
             port = %self.config.port,
             "serial radio using raw OMP frame mode (no companion HelloAck)"
@@ -572,36 +774,38 @@ impl SerialLink {
         let mut read_buf = [0u8; 512];
         for frame in decoder.push(&buffered) {
             if !self.accept_raw_frame(frame) {
-                return;
+                return LinkOutcome::Shutdown;
             }
         }
         loop {
             if *self.shutdown.borrow() {
-                break;
+                return LinkOutcome::Shutdown;
             }
             while let Ok(frame) = self.outbound.try_recv() {
                 if frame.link.is_some_and(|preferred| preferred != self.link) {
                     continue;
                 }
                 self.stats.record_tx();
-                if let Err(err) = self.port.write_all(&slip_encode(&frame.bytes)) {
-                    tracing::warn!(error = %err, "serial write failed");
-                    return;
-                }
+                // A write failure is radio backpressure, not link loss: drop the frame and keep
+                // the session (read errors/EOF handle real disconnects).
+                let _ = self.write_frame(&mut *port, &slip_encode(&frame.bytes));
             }
-            match self.port.read(&mut read_buf) {
+            match port.read(&mut read_buf) {
                 Ok(n) if n > 0 => {
                     for frame in decoder.push(&read_buf[..n]) {
                         if !self.accept_raw_frame(frame) {
-                            return;
+                            return LinkOutcome::Shutdown;
                         }
                     }
                 }
-                Ok(_) => {}
+                Ok(_) => {
+                    tracing::warn!(port = %self.config.port, "serial link closed (EOF)");
+                    return LinkOutcome::Disconnected("serial link closed (EOF)");
+                }
                 Err(err) if err.kind() == std::io::ErrorKind::TimedOut => {}
                 Err(err) => {
                     tracing::warn!(error = %err, "serial read failed");
-                    return;
+                    return LinkOutcome::Disconnected("serial read failed");
                 }
             }
         }
@@ -633,10 +837,7 @@ pub fn spawn(
     inbound: mpsc::Sender<Inbound>,
     shutdown: watch::Receiver<bool>,
 ) -> Result<TransportHandle> {
-    let port = serialport::new(&config.port, config.baud)
-        .timeout(READ_TIMEOUT)
-        .open()
-        .with_context(|| format!("opening serial port {}", config.port))?;
+    let port = open_serial(&config)?;
     let (tx, outbound) = mpsc::channel::<TransportFrame>(OUTBOUND_QUEUE);
     let stats = make_link_stats();
     let stats_task = stats.clone();
@@ -644,17 +845,16 @@ pub fn spawn(
     std::thread::Builder::new()
         .name("openmesh-serial".into())
         .spawn(move || {
-            let serial = SerialLink {
-                port,
+            let worker = SerialWorker {
                 config,
                 link,
                 inbound,
                 outbound,
                 shutdown,
                 stats: stats_task,
+                backoff: RECONNECT_MIN,
             };
-            serial.run();
-            tracing::debug!("serial transport stopped");
+            worker.run(port);
         })
         .context("spawning serial reader thread")?;
     Ok(TransportHandle {
@@ -853,140 +1053,317 @@ mod tests {
         assert!(companion_info(&rx_message(vec![0u8; HEADER_LEN])).is_none());
     }
 
-    // --- PTY fake-radio integration test (unix only, no hardware) ----------------------------
+    // --- reconnect backoff unit tests ------------------------------------------------------
 
-    /// Drain whatever the radio end has and decode complete companion frames.
+    #[test]
+    fn reconnect_backoff_doubles_and_caps() {
+        let mut delay = RECONNECT_MIN;
+        assert_eq!(delay, Duration::from_millis(250));
+        for expected in [
+            Duration::from_millis(500),
+            Duration::from_secs(1),
+            Duration::from_secs(2),
+            Duration::from_secs(4),
+            RECONNECT_MAX,
+            RECONNECT_MAX,
+        ] {
+            delay = grow_backoff(delay);
+            assert_eq!(delay, expected);
+        }
+    }
+
+    // --- PTY fake-radio integration tests (unix only, no hardware) -------------------------
+
+    /// A fake OpenMesh radio on the master side of a PTY pair.
     #[cfg(unix)]
-    fn pump(
-        radio: &mut dyn SerialPort,
-        buf: &mut Vec<u8>,
-        read_buf: &mut [u8; 512],
-    ) -> Vec<CompanionMsg> {
-        if let Ok(n) = radio.read(read_buf) {
-            if n > 0 {
-                buf.extend_from_slice(&read_buf[..n]);
+    struct FakeRadio {
+        port: serialport::TTYPort,
+        buf: Vec<u8>,
+        read_buf: [u8; 512],
+    }
+
+    #[cfg(unix)]
+    impl FakeRadio {
+        fn new(mut port: serialport::TTYPort) -> Self {
+            port.set_timeout(READ_TIMEOUT).expect("radio timeout");
+            Self {
+                port,
+                buf: Vec::new(),
+                read_buf: [0u8; 512],
             }
         }
-        let mut messages = Vec::new();
+
+        /// Drain the radio end and decode every complete companion frame.
+        fn pump(&mut self) -> Vec<CompanionMsg> {
+            if let Ok(n) = self.port.read(&mut self.read_buf) {
+                if n > 0 {
+                    self.buf.extend_from_slice(&self.read_buf[..n]);
+                }
+            }
+            let mut messages = Vec::new();
+            loop {
+                match companion::decode_slip(&self.buf) {
+                    Ok((msg, consumed)) => {
+                        self.buf.drain(..consumed);
+                        messages.push(msg);
+                    }
+                    Err(openmesh_core::Error::BufferTooSmall { .. }) => break,
+                    Err(_) => {
+                        // Keep the fake radio simple: drop unparsable bytes and resync.
+                        self.buf.clear();
+                        break;
+                    }
+                }
+            }
+            messages
+        }
+
+        fn wait_for(
+            &mut self,
+            timeout: Duration,
+            predicate: impl Fn(&CompanionMsg) -> bool,
+        ) -> Option<CompanionMsg> {
+            let deadline = Instant::now() + timeout;
+            loop {
+                for msg in self.pump() {
+                    if predicate(&msg) {
+                        return Some(msg);
+                    }
+                }
+                if Instant::now() >= deadline {
+                    return None;
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
+
+        fn write_msg(&mut self, msg: &CompanionMsg) {
+            std::io::Write::write_all(&mut self.port, &encoded(msg)).expect("write to bridge");
+        }
+    }
+
+    /// Create (or replace) a symlink that points at a fake radio's PTY slave path.
+    #[cfg(unix)]
+    fn point_symlink_at(dir: &tempfile::TempDir, target: &str) -> std::path::PathBuf {
+        let link = dir.path().join("radio");
+        let _ = std::fs::remove_file(&link);
+        std::os::unix::fs::symlink(target, &link).expect("create pty symlink");
+        link
+    }
+
+    #[cfg(unix)]
+    fn pty_config(link_path: &std::path::Path) -> SerialConfig {
+        SerialConfig {
+            port: link_path.display().to_string(),
+            baud: 115_200,
+            region: "EU868".to_string(),
+            profile: "MEDIUM_FAST".to_string(),
+        }
+    }
+
+    #[cfg(unix)]
+    fn wait_for_inbound(rx: &mut mpsc::Receiver<Inbound>, timeout: Duration) -> Option<Inbound> {
+        let deadline = Instant::now() + timeout;
         loop {
-            match companion::decode_slip(buf) {
-                Ok((msg, consumed)) => {
-                    buf.drain(..consumed);
-                    messages.push(msg);
-                }
-                Err(openmesh_core::Error::BufferTooSmall { .. }) => break,
-                Err(_) => {
-                    // Keep the fake radio simple: drop unparsable bytes and resync.
-                    buf.clear();
-                    break;
-                }
+            if let Ok(inbound) = rx.try_recv() {
+                return Some(inbound);
             }
+            if Instant::now() >= deadline {
+                return None;
+            }
+            std::thread::sleep(Duration::from_millis(10));
         }
-        messages
+    }
+
+    /// Block until the serial worker thread has exited (it holds the only extra stats `Arc`).
+    #[cfg(unix)]
+    fn wait_for_worker_exit(handle: &TransportHandle) {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Arc::strong_count(&handle.stats) > 1 {
+            assert!(Instant::now() < deadline, "serial worker did not stop");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// Drive one complete companion session: Hello -> HelloAck -> Tx -> Rx.
+    #[cfg(unix)]
+    fn run_session_round_trip(
+        radio: &mut FakeRadio,
+        handle: &TransportHandle,
+        inbound_rx: &mut mpsc::Receiver<Inbound>,
+        label: &str,
+    ) {
+        radio
+            .wait_for(Duration::from_secs(5), |msg| {
+                matches!(msg, CompanionMsg::Hello { proto: 1, .. })
+            })
+            .unwrap_or_else(|| panic!("{label}: bridge sent companion Hello"));
+        radio.write_msg(&hello_ack());
+        // Give the worker a moment to leave the handshake loop and enter companion mode.
+        std::thread::sleep(Duration::from_millis(100));
+
+        let frame = vec![0x42u8; 40];
+        handle.send(&TransportFrame {
+            bytes: frame.clone(),
+            mode: openmesh_core::SendMode::Flood,
+            link: None,
+            exclude: None,
+        });
+        let sent = radio
+            .wait_for(Duration::from_secs(5), |msg| {
+                matches!(msg, CompanionMsg::Tx { .. })
+            })
+            .unwrap_or_else(|| panic!("{label}: bridge sent companion Tx"));
+        match sent {
+            CompanionMsg::Tx { frame: decoded } => assert_eq!(decoded, frame, "{label}"),
+            other => panic!("{label}: expected Tx, got {other:?}"),
+        }
+
+        let rx_frame = vec![0x33u8; 40];
+        radio.write_msg(&rx_message(rx_frame.clone()));
+        let inbound = wait_for_inbound(inbound_rx, Duration::from_secs(5))
+            .unwrap_or_else(|| panic!("{label}: bridge forwarded companion Rx"));
+        assert_eq!(inbound.bytes, rx_frame, "{label}");
+        let info = inbound.link.expect("link info");
+        assert_eq!(info.link, 9);
+        assert_eq!(info.rssi, Some(-71));
+        assert_eq!(info.snr, Some(4.0));
     }
 
     #[cfg(unix)]
     #[test]
     fn companion_mode_round_trip_over_pty() {
-        let (mut radio, slave) = serialport::TTYPort::pair().expect("create pty pair");
-        radio.set_timeout(READ_TIMEOUT).expect("radio timeout");
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let (radio_port, slave) = serialport::TTYPort::pair().expect("create pty pair");
+        let link_path = point_symlink_at(&dir, &slave.name().expect("slave pty path"));
+        drop(slave);
 
-        let (outbound_tx, outbound_rx) = mpsc::channel::<TransportFrame>(OUTBOUND_QUEUE);
         let (inbound_tx, mut inbound_rx) = mpsc::channel::<Inbound>(8);
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
-        let stats = make_link_stats();
-        let stats_thread = stats.clone();
-        let config = SerialConfig {
-            port: "pty-fake-radio".to_string(),
-            baud: 115_200,
-            region: "EU868".to_string(),
-            profile: "MEDIUM_FAST".to_string(),
-        };
-        let link_thread = std::thread::spawn(move || {
-            let port: Box<dyn SerialPort> = Box::new(slave);
-            let serial = SerialLink {
-                port,
-                config,
-                link: 9,
-                inbound: inbound_tx,
-                outbound: outbound_rx,
-                shutdown: shutdown_rx,
-                stats: stats_thread,
-            };
-            serial.run();
-        });
+        let handle = spawn(pty_config(&link_path), 9, inbound_tx, shutdown_rx)
+            .expect("spawn serial transport");
+        let mut radio = FakeRadio::new(radio_port);
 
-        let mut buf = Vec::new();
-        let mut read_buf = [0u8; 512];
+        run_session_round_trip(&mut radio, &handle, &mut inbound_rx, "initial");
+        // The 20 s keepalive does not fire in this short test; Tx/Rx mapping is already covered.
+        assert_eq!(handle.stats.rx(), 1);
+        assert_eq!(handle.stats.tx(), 1);
 
-        // 1. The bridge must send a companion Hello.
-        let mut saw_hello = false;
-        let deadline = Instant::now() + Duration::from_secs(3);
-        while Instant::now() < deadline && !saw_hello {
-            for msg in pump(&mut radio, &mut buf, &mut read_buf) {
-                if matches!(msg, CompanionMsg::Hello { proto: 1, .. }) {
-                    saw_hello = true;
-                }
-            }
-            std::thread::sleep(Duration::from_millis(5));
-        }
-        assert!(saw_hello, "bridge sent companion Hello");
+        shutdown_tx.send(true).expect("request shutdown");
+        wait_for_worker_exit(&handle);
+    }
 
-        // 2. Answer with HelloAck: the bridge switches to companion mode.
+    #[cfg(unix)]
+    #[test]
+    fn serial_transport_reconnects_after_disconnect() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let (radio1_port, slave1) = serialport::TTYPort::pair().expect("create pty pair 1");
+        let link_path = point_symlink_at(&dir, &slave1.name().expect("slave 1 path"));
+        drop(slave1);
+
+        let (inbound_tx, mut inbound_rx) = mpsc::channel::<Inbound>(8);
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let handle = spawn(pty_config(&link_path), 9, inbound_tx, shutdown_rx)
+            .expect("spawn serial transport");
+        let mut radio1 = FakeRadio::new(radio1_port);
+
+        run_session_round_trip(&mut radio1, &handle, &mut inbound_rx, "before reconnect");
+        assert_eq!(handle.stats.rx(), 1);
+
+        // "Unplug" the radio: point the path at a second fake radio, then close the first PTY.
+        // The worker sees EOF/error, reopens the path and re-runs the companion handshake.
+        let (radio2_port, slave2) = serialport::TTYPort::pair().expect("create pty pair 2");
+        point_symlink_at(&dir, &slave2.name().expect("slave 2 path"));
+        drop(slave2);
+        drop(radio1);
+
+        let mut radio2 = FakeRadio::new(radio2_port);
+        run_session_round_trip(&mut radio2, &handle, &mut inbound_rx, "after reconnect");
+        assert_eq!(
+            handle.stats.rx(),
+            2,
+            "both sessions delivered one Rx frame each"
+        );
+
+        shutdown_tx.send(true).expect("request shutdown");
+        wait_for_worker_exit(&handle);
+    }
+
+    /// A write that blocks because the radio is busy must not be treated as a dead link: the
+    /// session must survive (no reconnect handshake) and keep forwarding inbound frames.
+    #[cfg(unix)]
+    #[test]
+    fn write_backpressure_keeps_the_link_up() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let (radio_port, slave) = serialport::TTYPort::pair().expect("create pty pair");
+        let link_path = point_symlink_at(&dir, &slave.name().expect("slave pty path"));
+        drop(slave);
+
+        let (inbound_tx, mut inbound_rx) = mpsc::channel::<Inbound>(8);
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let handle = spawn(pty_config(&link_path), 9, inbound_tx, shutdown_rx)
+            .expect("spawn serial transport");
+        let mut radio = FakeRadio::new(radio_port);
+
         radio
-            .write_all(&encoded(&hello_ack()))
-            .expect("write HelloAck");
+            .wait_for(Duration::from_secs(5), |msg| {
+                matches!(msg, CompanionMsg::Hello { proto: 1, .. })
+            })
+            .expect("bridge sent companion Hello");
+        radio.write_msg(&hello_ack());
         std::thread::sleep(Duration::from_millis(100));
 
-        // 3. Engine egress must arrive as a companion Tx.
-        let frame = vec![0x42u8; 40];
-        outbound_tx
-            .try_send(TransportFrame {
-                bytes: frame.clone(),
+        // Queue enough max-size frames to fill the ~12 KiB PTY buffer, then let the fake radio
+        // "transmit" (not read) for longer than the write timeout + retry delay.
+        for _ in 0..OUTBOUND_QUEUE {
+            handle.send(&TransportFrame {
+                bytes: vec![0x5A; MTU],
                 mode: openmesh_core::SendMode::Flood,
                 link: None,
                 exclude: None,
-            })
-            .expect("queue outbound frame");
-        let mut saw_tx = false;
-        let mut sent_frame = Vec::new();
-        let deadline = Instant::now() + Duration::from_secs(3);
-        while Instant::now() < deadline && !saw_tx {
-            for msg in pump(&mut radio, &mut buf, &mut read_buf) {
-                if let CompanionMsg::Tx { frame } = msg {
-                    saw_tx = true;
-                    sent_frame = frame;
-                }
+            });
+        }
+        std::thread::sleep(WRITE_TIMEOUT + WRITE_RETRY_DELAY + Duration::from_millis(500));
+
+        // Once the radio drains its buffer every frame arrives and there is no second Hello.
+        let mut frames = Vec::new();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline {
+            frames.extend(radio.pump());
+            if frames
+                .iter()
+                .filter(|msg| matches!(msg, CompanionMsg::Tx { .. }))
+                .count()
+                >= OUTBOUND_QUEUE
+            {
+                break;
             }
             std::thread::sleep(Duration::from_millis(5));
         }
-        assert!(saw_tx, "bridge sent companion Tx for an engine frame");
-        assert_eq!(sent_frame, frame);
+        let tx_count = frames
+            .iter()
+            .filter(|msg| matches!(msg, CompanionMsg::Tx { .. }))
+            .count();
+        assert!(
+            tx_count > OUTBOUND_QUEUE / 2,
+            "expected most queued frames after backpressure, got {tx_count}"
+        );
+        assert!(
+            !frames
+                .iter()
+                .any(|msg| matches!(msg, CompanionMsg::Hello { .. })),
+            "write backpressure must not trigger a reconnect"
+        );
 
-        // 4. Radio ingress must reach the engine as Inbound with signal metadata.
-        let rx_frame = vec![0x33u8; 40];
-        radio
-            .write_all(&encoded(&rx_message(rx_frame.clone())))
-            .expect("write Rx");
-        let mut got_inbound = None;
-        let deadline = Instant::now() + Duration::from_secs(3);
-        while Instant::now() < deadline && got_inbound.is_none() {
-            if let Ok(inbound) = inbound_rx.try_recv() {
-                got_inbound = Some(inbound);
-            } else {
-                std::thread::sleep(Duration::from_millis(10));
-            }
-        }
-        let inbound = got_inbound.expect("bridge forwarded companion Rx to the engine");
+        // The session is still alive: inbound frames still reach the engine.
+        let rx_frame = vec![0x44u8; 40];
+        radio.write_msg(&rx_message(rx_frame.clone()));
+        let inbound = wait_for_inbound(&mut inbound_rx, Duration::from_secs(5))
+            .expect("session alive after write backpressure");
         assert_eq!(inbound.bytes, rx_frame);
-        let info = inbound.link.expect("link info");
-        assert_eq!(info.link, 9);
-        assert_eq!(info.rssi, Some(-71));
-        assert_eq!(info.snr, Some(4.0));
-        assert_eq!(stats.rx(), 1);
+        assert_eq!(handle.stats.rx(), 1);
 
-        // 5. Shutdown stops the link thread cleanly.
-        shutdown_tx.send(true).expect("send shutdown");
-        link_thread.join().expect("serial thread stops");
+        shutdown_tx.send(true).expect("request shutdown");
+        wait_for_worker_exit(&handle);
     }
 }
