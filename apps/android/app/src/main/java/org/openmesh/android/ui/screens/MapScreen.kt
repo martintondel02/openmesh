@@ -83,7 +83,7 @@ fun MapScreen(repository: MeshRepository) {
                     val position = node.position ?: return@forEach
                     val marker = Marker(view).apply {
                         this.position = GeoPoint(position.lat, position.lon, position.altM?.toDouble() ?: 0.0)
-                        title = node.name
+                        title = repository.displayNameFor(node.nodeId)
                         snippet = "${node.nodeClass.label} · ${node.hops} hop(s)"
                         setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM)
                         setOnMarkerClickListener { _, _ ->
@@ -141,7 +141,7 @@ fun MapScreen(repository: MeshRepository) {
             ) {
                 Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f)) {
-                        Text(node.name, style = MaterialTheme.typography.titleMedium)
+                        Text(repository.displayNameFor(node.nodeId), style = MaterialTheme.typography.titleMedium)
                         Text(
                             "${node.nodeClass.label} · ${node.hops} hop(s) · seen ${relativeTime(node.lastSeenMs)}",
                             style = MaterialTheme.typography.bodyMedium,

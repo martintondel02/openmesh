@@ -55,6 +55,7 @@ import org.openmesh.android.ui.components.NodeIdText
 import org.openmesh.android.ui.components.SectionTitle
 import org.openmesh.android.ui.components.StatusPill
 import org.openmesh.android.ui.components.formatDuration
+import org.openmesh.android.ui.people.NamePolicy
 import org.openmesh.android.ui.radio.RadioPresentation
 import org.openmesh.android.ui.theme.MeshOnSurfaceVariant
 import org.openmesh.android.ui.theme.MeshError
@@ -78,6 +79,8 @@ fun SettingsScreen(
     val engine by repository.engineStatus.collectAsState()
     val context = LocalContext.current
     var nodeName by remember(settings.nodeName) { mutableStateOf(settings.nodeName) }
+    var nameError by remember { mutableStateOf<String?>(null) }
+    var nameSaved by remember { mutableStateOf<String?>(null) }
     var showOverrideDialog by remember { mutableStateOf(false) }
 
     val profile = LoraProfile.fromName(settings.profile)
@@ -179,25 +182,82 @@ fun SettingsScreen(
                 }
             }
 
-            SectionTitle("Identity")
+            SectionTitle("Your identity")
             MeshCard {
                 Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    val selfId = engine.nodeIdHex ?: radio.nodeId
+                    Text(
+                        "You are ${settings.nodeName}" + (selfId?.let { " · ${NamePolicy.shortId(it)}" } ?: ""),
+                        style = MaterialTheme.typography.titleMedium,
+                    )
+                    Text(
+                        "Your display name is announced to other nodes so people can recognise you. " +
+                            "Your node id stays unique and permanent — renaming never changes your " +
+                            "identity or keys.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MeshOnSurfaceVariant,
+                    )
+                    val bytes = nodeName.trim().toByteArray(Charsets.UTF_8).size
+                    val liveValidation = NamePolicy.validate(nodeName)
                     OutlinedTextField(
                         value = nodeName,
                         onValueChange = {
-                            nodeName = it.take(32)
-                            repository.updateSettings { current -> current.copy(nodeName = nodeName) }
+                            nodeName = it.take(64)
+                            nameError = null
+                            nameSaved = null
                         },
-                        label = { Text("Node name (announce)") },
+                        label = { Text("Display name (announced)") },
                         singleLine = true,
+                        isError = nameError != null,
+                        supportingText = {
+                            Text(
+                                nameError
+                                    ?: if (!liveValidation.ok && nodeName.isNotBlank()) {
+                                        liveValidation.error ?: "This display name is not valid."
+                                    } else {
+                                        "$bytes/${NamePolicy.MAX_NAME_BYTES} bytes · peers see this name " +
+                                            "in announces (next announce fires immediately on save)"
+                                    },
+                            )
+                        },
                         modifier = Modifier.fillMaxWidth(),
                     )
-                    NodeIdText(engine.nodeIdHex ?: radio.nodeId ?: "identity not loaded")
+                    nameSaved?.let { saved ->
+                        Text(
+                            "Saved — announcing “$saved” to the mesh now.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MeshPrimary,
+                        )
+                    }
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Button(
+                            onClick = {
+                                repository.saveDisplayName(nodeName)
+                                    .onSuccess { saved ->
+                                        nodeName = saved
+                                        nameError = null
+                                        nameSaved = saved
+                                    }
+                                    .onFailure { error ->
+                                        nameSaved = null
+                                        nameError = error.message ?: "Could not save the display name."
+                                    }
+                            },
+                            enabled = liveValidation.ok && nodeName.trim() != settings.nodeName,
+                            modifier = Modifier.weight(1f),
+                        ) { Text("Save display name") }
+                        OutlinedButton(onClick = {
+                            nodeName = settings.nodeName
+                            nameError = null
+                            nameSaved = null
+                        }) { Text("Reset") }
+                    }
+                    NodeIdText(selfId ?: "identity not loaded")
                     Text(
-                        "Identity: Ed25519 signing key + X25519 DH key derived from one 32-byte seed. " +
-                            "The Android app holds the seed wrapped by AndroidKeyStore; " +
-                            "the radio never holds your user keys.",
-                        style = MaterialTheme.typography.bodyMedium,
+                        "Node id (permanent) · identity: Ed25519 signing key + X25519 DH key derived " +
+                            "from one 32-byte seed, held by the app wrapped in AndroidKeyStore. The radio " +
+                            "never holds your user keys. Your contact QR is on the Contacts tab.",
+                        style = MaterialTheme.typography.bodySmall,
                         color = MeshOnSurfaceVariant,
                     )
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {

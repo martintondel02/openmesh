@@ -185,7 +185,10 @@ fun ChatListScreen(
                             onOpenThread(contact.nodeId, false)
                         }) {
                             Column(Modifier.fillMaxWidth()) {
-                                Text(contact.name, style = MaterialTheme.typography.titleMedium)
+                                Text(
+                                    repository.displayNameFor(contact.nodeId),
+                                    style = MaterialTheme.typography.titleMedium,
+                                )
                                 Text(
                                     contact.nodeId,
                                     style = MaterialTheme.typography.labelSmall,

@@ -74,6 +74,8 @@ import org.openmesh.android.data.transport.RadioHealthPolicy
 import org.openmesh.android.data.transport.RadioPhase
 import org.openmesh.android.data.transport.UsbSerialTransport
 import org.openmesh.android.media.MediaMath
+import org.openmesh.android.ui.people.DeliveryPresentation
+import org.openmesh.android.ui.people.NamePolicy
 import org.openmesh.android.media.MediaTierLoader
 import org.openmesh.android.media.MediaTierPolicy
 import org.openmesh.android.media.MediaTierPresets
@@ -426,11 +428,20 @@ class MeshRepository(
 
     fun nodeFor(nodeId: String): NodeInfo? = _nodes.value.firstOrNull { it.nodeId == nodeId }
 
-    fun displayNameFor(nodeId: String): String =
-        _channels.value.firstOrNull { it.id == nodeId }?.name
-            ?: contactFor(nodeId)?.name
-            ?: nodeFor(nodeId)?.name
-            ?: nodeId.take(8)
+    /**
+     * Best display name: channel name → name the peer last announced → locally pinned
+     * invite/contact name → "node <first8>". An announced rename replaces the stale cached name;
+     * the pinned invite name is only a fallback (there is no alias-editing UI yet).
+     */
+    fun displayNameFor(nodeId: String): String = NamePolicy.displayName(
+        peerId = nodeId,
+        announcedName = nodeFor(nodeId)?.name,
+        inviteName = contactFor(nodeId)?.name,
+        channelName = _channels.value.firstOrNull { it.id == nodeId }?.name,
+    )
+
+    /** Short id (first 8 hex chars) shown next to friendly names in peer details. */
+    fun shortIdFor(nodeId: String): String = NamePolicy.shortId(nodeId)
 
     fun sendText(peerId: String, text: String, channel: Boolean = false): Long {
         val trimmed = text.trim()
@@ -830,6 +841,10 @@ class MeshRepository(
             updateDeliveryAnywhere(id, DeliveryState.SENT, channel)
             delay(1200)
             updateDeliveryAnywhere(id, DeliveryState.DELIVERED, channel)
+            delay(1500)
+            // Demo mode simulates the peer opening/reading a direct message so READ is reviewable.
+            // Channels have no per-recipient read receipts, so they stop at Delivered.
+            if (!channel) updateDeliveryAnywhere(id, DeliveryState.READ, channel)
         }
     }
 
@@ -879,14 +894,26 @@ class MeshRepository(
     }
 
     private fun updateDeliveryAnywhere(id: Long, state: DeliveryState, channel: Boolean?) {
+        fun applyTo(message: Message): Message =
+            if (message.id == id && DeliveryPresentation.isUpgrade(message.delivery, state)) {
+                message.copy(delivery = state)
+            } else {
+                message
+            }
         fun mapThreads(map: Map<String, List<Message>>): Map<String, List<Message>> =
-            map.mapValues { (_, list) -> list.map { if (it.id == id) it.copy(delivery = state) else it } }
+            map.mapValues { (_, list) -> list.map(::applyTo) }
         _messages.value = mapThreads(_messages.value)
         _channelMessages.value = mapThreads(_channelMessages.value)
         rebuildConversations()
         scope.launch {
-            val entity = dao.messages().firstOrNull { it.id == id }
-            if (entity != null) dao.updateDelivery(id, state.name, entity.read)
+            val entity = dao.messages().firstOrNull { it.id == id } ?: return@launch
+            val current = runCatching { DeliveryState.valueOf(entity.delivery) }
+                .getOrDefault(DeliveryState.QUEUED)
+            // Status updates are monotonic: a late SENT/resource ack must not downgrade
+            // DELIVERED/READ, and a stale FAILED must not override a confirmed delivery.
+            if (DeliveryPresentation.isUpgrade(current, state)) {
+                dao.updateDelivery(id, state.name, entity.read)
+            }
         }
     }
 
@@ -896,7 +923,7 @@ class MeshRepository(
             val contact = contacts.firstOrNull { it.nodeId == peerId }
             Conversation(
                 peerId = peerId,
-                peerName = contact?.name ?: displayNameFor(peerId),
+                peerName = displayNameFor(peerId),
                 lastMessage = thread.lastOrNull(),
                 unreadCount = thread.count { !it.outgoing && !it.read },
                 online = _nodes.value.any { it.nodeId == peerId && it.lastSeenMs > System.currentTimeMillis() - 5 * 60_000 },
@@ -1223,11 +1250,14 @@ class MeshRepository(
 
             is FramedCompanionClient.CompanionEvent.Config -> {
                 val entries = event.entries
+                // The app owns the display name. A radio Config echo can carry the pre-rename
+                // value for a moment while the new name is being pushed, and adopting it would
+                // silently revert the user's rename (seen live on the test phone). Node name is
+                // therefore never taken from the radio config; radio-owned keys are still adopted.
                 updateSettings {
                     it.copy(
                         profile = entries["radio.profile"] ?: it.profile,
                         region = entries["radio.region"] ?: it.region,
-                        nodeName = entries["node.name"] ?: it.nodeName,
                         storeForward = (entries["mesh.store"] ?: "1") == "1",
                     )
                 }
@@ -1613,14 +1643,40 @@ class MeshRepository(
             if (updated.defaultImageTier != previous.defaultImageTier) prefs.setDefaultImageTier(updated.defaultImageTier)
             if (updated.defaultVoiceTier != previous.defaultVoiceTier) prefs.setDefaultVoiceTier(updated.defaultVoiceTier)
         }
+        val nameChanged = updated.nodeName != previous.nodeName
         if (started) {
             val patch = """{"name":${jsonString(updated.nodeName)},"profile":"${updated.profile}","region":"${updated.region}","storeForward":${updated.storeForward},"announceIntervalS":${updated.announceIntervalSec.toLong()}}"""
             runCatching { engine.setConfig(patch) }
             val radioChanged = updated.profile != previous.profile || updated.region != previous.region
-            if (radioChanged) {
+            if (radioChanged || nameChanged) {
                 companion?.let { client -> pushRadioConfig(client) }
             }
+            if (nameChanged) {
+                // A rename should reach peers now, not at the next 30-min announce cycle.
+                MeshLog.i("display name changed: '${previous.nodeName}' -> '${updated.nodeName}'; announcing now")
+                runCatching { engine.announce(System.currentTimeMillis()) }
+                    .onFailure { MeshLog.w("announce after rename failed: ${it.message}") }
+                _uiEvents.tryEmit(
+                    UiEvent.Snackbar("Display name saved — announcing “${updated.nodeName}” to the mesh"),
+                )
+            }
         }
+    }
+
+    /**
+     * Validate and save a new display name. The name travels in announces (32-byte limit); the
+     * node id stays permanent and unique, so changing the name never changes identity or keys.
+     */
+    fun saveDisplayName(raw: String): Result<String> {
+        val validation = NamePolicy.validate(raw)
+        val name = validation.value
+        if (!validation.ok || name == null) {
+            return Result.failure(IllegalArgumentException(validation.error ?: "Enter a display name."))
+        }
+        if (name == _settings.value.nodeName) return Result.success(name)
+        updateSettings { it.copy(nodeName = name) }
+        MeshLog.i("display name saved: '$name' (bytes=${name.toByteArray(Charsets.UTF_8).size})")
+        return Result.success(name)
     }
 
     fun setUiMode(mode: UiMode) = updateSettings { it.copy(uiMode = mode.wire) }
@@ -1639,6 +1695,11 @@ class MeshRepository(
                 // Demo mode is a simulated mesh: drop any real link and show the demo radio status.
                 _radio.value = DemoData.radioStatus
                 disconnectCompanion()
+            } else {
+                // The demo seeds live only in memory; going back to the real engine must restore
+                // the persisted conversations/contacts/nodes, otherwise demo chats keep showing.
+                loadFromDatabase()
+                rebuildConversations()
             }
             if (started) startEngine()
         }

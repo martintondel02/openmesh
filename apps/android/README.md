@@ -32,11 +32,11 @@ USB. No bridge, no server, no account.
 | Persistence | ✅ Room (messages, contacts, channels, node cache), DataStore (prefs, UI mode, setup, engine state, identity ciphertext); identity seed wrapped by AndroidKeyStore AES-GCM |
 | Notifications | ✅ message channel with sender/channel + text preview (never media), tap → thread, mark-read on open; persistent service notification |
 | Onboarding | ✅ 3 steps (role → country/name/privacy → secure) applying the shared `content/presets/setup.json` preset; creates a private channel + invite QR |
-| Chats + thread | ✅ direct/channel threads, delivery ticks, retry, reply model, day separators, text/position/attachment bubbles |
+| Chats + thread | ✅ direct/channel threads, announced display names, explicit delivery/read labels (tap a bubble for the plain-language status), retry, reply model, day separators, text/position/attachment bubbles |
 | Media | ✅ send: gallery/camera image → downscale+WebP loop to the profile cap with pre-send airtime estimate; voice note with `MediaRecorder` AAC-LC mono 16 kHz ~12 kbps MP4 (duration cap per profile). Receive: images decode inline (tap → full-screen viewer), voice notes play in the thread (Codec2 via FFI → `AudioTrack`, Opus/AAC via `MediaPlayer`) with play/stop state and honest format/duration/size labels |
 | QR | ✅ zxing scan for contact/channel invites; own contact QR; channel invite QR; every `openmesh://` URL validated |
 | Channels | ✅ create with invite QR, join via scan/paste, list/unread |
-| Nodes / map | ✅ node list (role, hops, RSSI/SNR, battery, last seen); osmdroid map with node markers |
+| Nodes / map | ✅ node list (announced name + short id, role, hops, RSSI/SNR, battery, last seen); peer link-stability panel (quality, route, delivery summary); osmdroid map with node markers |
 | Radio screen | ✅ BLE/USB connect, firmware/region/profile, signal, frames/airtime counters, tips |
 | Settings | ✅ beginner/advanced modes, name/role/region/profile/store-forward/announce, notifications, radio, airtime, identity/backup warning, help/about links |
 | Help | ✅ bundled `content/help` (17 topics, offline), search, beginner/advanced filter, lightweight markdown reader; every control maps to a help topic (`HelpKeys`) |
@@ -131,6 +131,37 @@ by Gradle and parsed by `MediaTiers.kt` (JVM parity test against the real reposi
   frame streams (7 B/40 ms tiny, 8 B/20 ms medium).
 
 ---
+
+## Display names, delivery status and peer details (v0.7.2)
+
+**Display name (announced, not identity).** Settings → *Your identity* shows `You are <name> · <short id>`.
+The name is carried in announces (max 32 UTF‑8 bytes, trimmed, empty rejected) so other nodes can
+show a friendly name; the 8‑byte node id and the Ed25519/X25519 keys never change when you rename.
+Saving a name applies it to the engine config, pushes it to the radio companion and **sends an
+announce immediately** (the regular announce interval is 30 min), then shows a confirmation. Your
+contact QR on the Contacts tab uses the same name. Peers that have not announced a name appear as
+`node <first8>`.
+
+The app resolves a label in this order: channel name → the name the peer last announced → the
+locally pinned invite/contact name → `node <first8>`. A peer rename therefore replaces a stale
+cached name; a pinned invite name is only a fallback (there is no alias-editing UI yet). Names are
+shown in the chats list, thread headers, channel sender labels, nodes list/details, map markers,
+notifications and the peer panel. Peer details always show the name **and** the short id.
+
+**Delivery and read receipts.** Outgoing bubbles show an explicit word next to the tick:
+*Queued* (waiting for a radio link; queued messages are kept), *Sent*, *Delivered*, *Read*,
+*At relay* (store-and-forward) or *Failed — tap to retry*. Tap or long-press an outgoing bubble for a
+plain-language explanation. Direct messages can receive a `read` ack from the peer (the app sends
+`mark_read` when you open a thread); channel/group messages have **no per-person receipts**, so the
+copy says so instead of pretending. Status updates are monotonic — a late packet cannot downgrade
+*Delivered*/*Read* back to *Sent*.
+
+**Peer link stability panel.** Tap a chat header (or a node in the Nodes tab) for name + short id,
+role/class, hops, RSSI/SNR, last heard, a *Strong / OK / Weak / Offline* quality label, whether they
+are a pinned contact, the phone's own radio-link summary, and a delivery/read summary for that
+conversation (or channel semantics for group chats). Route wording is beginner-friendly: *Direct
+link (0 hops)* vs *Via N relays*. A node not heard for 5 minutes is labelled *Offline* even if an old
+RSSI value is cached.
 
 ## Build
 

@@ -6,8 +6,10 @@ import android.net.Uri
 import android.provider.OpenableColumns
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -31,6 +33,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.AttachFile
 import androidx.compose.material.icons.filled.Image
+import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.PhotoCamera
 import androidx.compose.material.icons.filled.PlayArrow
@@ -74,13 +77,17 @@ import org.openmesh.android.ui.components.AirtimeEstimateDialog
 import org.openmesh.android.ui.components.AttachmentImageViewerDialog
 import org.openmesh.android.ui.components.AttachmentThumbnail
 import org.openmesh.android.ui.components.DeliveryIcon
+import org.openmesh.android.ui.components.PeerDetailDialog
 import org.openmesh.android.ui.components.FileAttachmentRow
 import org.openmesh.android.ui.components.formatDuration
 import org.openmesh.android.ui.components.relativeTime
+import org.openmesh.android.ui.people.DeliveryPresentation
+import org.openmesh.android.ui.people.NamePolicy
 import org.openmesh.android.ui.theme.MeshError
 import org.openmesh.android.ui.theme.MeshOnSurfaceVariant
 import org.openmesh.android.ui.theme.MeshOutline
 import org.openmesh.android.ui.theme.MeshPrimary
+import org.openmesh.android.ui.components.radioToneColor
 import org.openmesh.android.ui.theme.MeshSurfaceHigh
 import org.openmesh.android.ui.theme.MeshTertiary
 
@@ -111,6 +118,8 @@ fun ChatThreadScreen(
     var voiceState by remember { mutableStateOf(VoicePlaybackUiState.IDLE) }
     var voiceError by remember { mutableStateOf<String?>(null) }
     var imageViewer by remember { mutableStateOf<Pair<Bitmap, String>?>(null) }
+    var showPeerDetail by remember { mutableStateOf(false) }
+    var statusMessage by remember { mutableStateOf<Message?>(null) }
 
     DisposableEffect(Unit) {
         onDispose { attachmentPlayer.stop() }
@@ -181,7 +190,11 @@ fun ChatThreadScreen(
             IconButton(onClick = onBack) {
                 Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
             }
-            Column(Modifier.weight(1f)) {
+            Column(
+                Modifier
+                    .weight(1f)
+                    .clickable { showPeerDetail = true },
+            ) {
                 Text(
                     if (isChannel) "#${repository.displayNameFor(peerId)}" else repository.displayNameFor(peerId),
                     style = MaterialTheme.typography.titleLarge,
@@ -189,11 +202,18 @@ fun ChatThreadScreen(
                     overflow = TextOverflow.Ellipsis,
                 )
                 Text(
-                    if (isChannel) "Channel · ${settings.profile.replace('_', ' ').lowercase()} · ${settings.region}"
-                    else "End-to-end encrypted · ${settings.profile.replace('_', ' ').lowercase()} · ${settings.region}",
+                    if (isChannel) {
+                        "Channel · ${settings.profile.replace('_', ' ').lowercase()} · ${settings.region}"
+                    } else {
+                        "${NamePolicy.shortId(peerId)} · ${settings.profile.replace('_', ' ').lowercase()} · " +
+                            settings.region
+                    },
                     style = MaterialTheme.typography.labelMedium,
                     color = MeshOnSurfaceVariant,
                 )
+            }
+            IconButton(onClick = { showPeerDetail = true }) {
+                Icon(Icons.Filled.Info, contentDescription = "Peer details and link quality")
             }
         }
 
@@ -213,6 +233,7 @@ fun ChatThreadScreen(
                     voiceError = voiceError,
                     onToggleVoice = { toggleVoice(it) },
                     onOpenImage = { bitmap, name -> imageViewer = bitmap to name },
+                    onShowStatus = { statusMessage = it },
                 )
             }
             if (thread.isEmpty()) {
@@ -306,9 +327,69 @@ fun ChatThreadScreen(
             onDismiss = { imageViewer = null },
         )
     }
+
+    if (showPeerDetail) {
+        PeerDetailDialog(
+            repository = repository,
+            peerId = peerId,
+            isChannel = isChannel,
+            onDismiss = { showPeerDetail = false },
+        )
+    }
+
+    statusMessage?.let { message ->
+        MessageStatusDialog(
+            message = message,
+            isChannel = isChannel,
+            peerName = repository.displayNameFor(peerId),
+            onRetry = {
+                repository.retryMessage(message.id)
+                statusMessage = null
+            },
+            onDismiss = { statusMessage = null },
+        )
+    }
+}
+
+/**
+ * Plain-language message status: never icon-only. Explains channel vs direct-message semantics
+ * and offers Retry for failed sends.
+ */
+@Composable
+private fun MessageStatusDialog(
+    message: Message,
+    isChannel: Boolean,
+    peerName: String,
+    onRetry: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Message status · ${DeliveryPresentation.label(message.delivery)}") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(DeliveryPresentation.explanation(message.delivery, isChannel, peerName))
+                Text(
+                    "Sent ${relativeTime(message.sentAtMs)}" +
+                        if (isChannel) " · channel message" else " · direct message",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MeshOnSurfaceVariant,
+                )
+            }
+        },
+        confirmButton = {
+            Row {
+                if (message.delivery == DeliveryState.FAILED) {
+                    TextButton(onClick = onRetry) { Text("Retry") }
+                }
+                TextButton(onClick = onDismiss) { Text("Close") }
+            }
+        },
+    )
 }
 
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun MessageBubble(
     message: Message,
@@ -319,6 +400,7 @@ private fun MessageBubble(
     voiceError: String?,
     onToggleVoice: (Message) -> Unit,
     onOpenImage: (Bitmap, String) -> Unit,
+    onShowStatus: (Message) -> Unit,
 ) {
     val outgoing = message.outgoing
     val bubbleColor = if (outgoing) MeshPrimary.copy(alpha = 0.16f) else MeshSurfaceHigh
@@ -331,11 +413,22 @@ private fun MessageBubble(
                 .fillMaxWidth(0.82f)
                 .clip(RoundedCornerShape(14.dp))
                 .background(bubbleColor)
+                // Tap or long-press an outgoing bubble for the plain-language delivery status.
+                .then(
+                    if (outgoing) {
+                        Modifier.combinedClickable(
+                            onClick = { onShowStatus(message) },
+                            onLongClick = { onShowStatus(message) },
+                        )
+                    } else {
+                        Modifier
+                    },
+                )
                 .padding(horizontal = 12.dp, vertical = 8.dp),
         ) {
             if (!outgoing && isChannel) {
                 Text(
-                    message.fromId.take(8),
+                    repository.displayNameFor(message.fromId),
                     style = MaterialTheme.typography.labelSmall,
                     color = MeshTertiary,
                 )
@@ -395,10 +488,12 @@ private fun MessageBubble(
                     color = MeshOnSurfaceVariant,
                 )
                 if (outgoing) {
-                    if (message.delivery == DeliveryState.QUEUED) {
-                        Spacer(Modifier.width(4.dp))
-                        Text("queued", style = MaterialTheme.typography.labelSmall, color = MeshTertiary)
-                    }
+                    Spacer(Modifier.width(4.dp))
+                    Text(
+                        DeliveryPresentation.bubbleStatus(message.delivery),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = radioToneColor(DeliveryPresentation.tone(message.delivery)),
+                    )
                     Spacer(Modifier.width(4.dp))
                     DeliveryIcon(message.delivery)
                 }

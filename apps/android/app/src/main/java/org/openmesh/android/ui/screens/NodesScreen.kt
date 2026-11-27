@@ -25,7 +25,6 @@ import androidx.compose.material.icons.filled.GpsFixed
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.SolarPower
 import androidx.compose.material.icons.filled.Storage
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
@@ -47,9 +46,11 @@ import org.openmesh.android.data.model.NodeClass
 import org.openmesh.android.data.repository.MeshRepository
 import org.openmesh.android.ui.components.MeshCard
 import org.openmesh.android.ui.components.NodeIdText
+import org.openmesh.android.ui.components.PeerDetailDialog
 import org.openmesh.android.ui.components.SectionTitle
 import org.openmesh.android.ui.components.StatusPill
 import org.openmesh.android.ui.components.relativeTime
+import org.openmesh.android.ui.people.NamePolicy
 import org.openmesh.android.ui.radio.RadioPresentation
 import org.openmesh.android.ui.theme.MeshOnSurfaceVariant
 import org.openmesh.android.ui.theme.MeshPrimary
@@ -64,11 +65,13 @@ fun NodesScreen(repository: MeshRepository) {
     val radio by repository.radio.collectAsState()
     val settings by repository.settings.collectAsState()
     var query by remember { mutableStateOf("") }
-    var selected by remember { mutableStateOf<NodeInfo?>(null) }
+    var selectedPeerId by remember { mutableStateOf<String?>(null) }
 
+    // Names come from the repository so announced renames show up here too (name + short id).
+    fun displayName(node: NodeInfo): String = repository.displayNameFor(node.nodeId)
     val filtered = nodes
-        .filter { query.isBlank() || it.name.contains(query, ignoreCase = true) || it.nodeId.contains(query, ignoreCase = true) }
-        .sortedWith(compareBy({ it.hops }, { it.name.lowercase() }))
+        .filter { query.isBlank() || displayName(it).contains(query, ignoreCase = true) || it.nodeId.contains(query, ignoreCase = true) }
+        .sortedWith(compareBy({ it.hops }, { displayName(it).lowercase() }))
 
     Column(Modifier.fillMaxSize()) {
         Column(Modifier.padding(horizontal = 16.dp, vertical = 12.dp)) {
@@ -115,34 +118,23 @@ fun NodesScreen(repository: MeshRepository) {
             }
             item { SectionTitle("Known nodes") }
             items(filtered, key = { it.nodeId }) { node ->
-                NodeRow(node, onClick = { selected = node })
+                NodeRow(node, name = displayName(node), onClick = { selectedPeerId = node.nodeId })
             }
         }
     }
 
-    selected?.let { node ->
-        AlertDialog(
-            onDismissRequest = { selected = null },
-            title = { Text(node.name) },
-            text = {
-                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    NodeIdText(node.nodeId)
-                    Text("Role: ${node.nodeClass.label}")
-                    Text("Caps: ${node.caps.ifEmpty { setOf("none") }.joinToString(", ")}")
-                    Text("Hops: ${node.hops} · last seen ${relativeTime(node.lastSeenMs)}")
-                    node.rssi?.let { Text("RSSI $it dBm" + (node.snr?.let { snr -> " · SNR $snr dB" } ?: "")) }
-                    node.batteryPct?.let { Text("Battery $it %") }
-                    node.position?.let { Text("%.5f, %.5f".format(it.lat, it.lon)) }
-                    if (node.isContact) Text("Saved contact", color = MeshPrimary)
-                }
-            },
-            confirmButton = { TextButton(onClick = { selected = null }) { Text("Close") } },
+    selectedPeerId?.let { peerId ->
+        PeerDetailDialog(
+            repository = repository,
+            peerId = peerId,
+            isChannel = false,
+            onDismiss = { selectedPeerId = null },
         )
     }
 }
 
 @Composable
-private fun NodeRow(node: NodeInfo, onClick: () -> Unit) {
+private fun NodeRow(node: NodeInfo, name: String, onClick: () -> Unit) {
     Row(
         Modifier
             .fillMaxWidth()
@@ -165,7 +157,7 @@ private fun NodeRow(node: NodeInfo, onClick: () -> Unit) {
         Column(Modifier.weight(1f)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
-                    node.name,
+                    name,
                     style = MaterialTheme.typography.titleMedium,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
@@ -179,7 +171,7 @@ private fun NodeRow(node: NodeInfo, onClick: () -> Unit) {
             }
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
-                    "${node.nodeClass.label} · ${node.hops} hop(s)",
+                    "${NamePolicy.shortId(node.nodeId)} · ${node.nodeClass.label} · ${node.hops} hop(s)",
                     style = MaterialTheme.typography.bodyMedium,
                     color = MeshOnSurfaceVariant,
                 )

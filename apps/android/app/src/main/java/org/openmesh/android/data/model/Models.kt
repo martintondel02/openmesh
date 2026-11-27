@@ -39,7 +39,7 @@ enum class NodeClass {
 
 enum class MessageKind { TEXT, POSITION, ATTACHMENT, TELEMETRY }
 
-enum class DeliveryState { QUEUED, SENT, DELIVERED, FAILED, STORED_AT_RELAY }
+enum class DeliveryState { QUEUED, SENT, DELIVERED, READ, FAILED, STORED_AT_RELAY }
 
 data class Position(
     val lat: Double,

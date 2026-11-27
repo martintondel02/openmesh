@@ -111,7 +111,11 @@ fun ContactsScreen(repository: MeshRepository, onScan: () -> Unit, onOpenHelp: (
                 }
             }
             items(contacts, key = { it.nodeId }) { contact ->
-                ContactRow(contact, onRemove = { repository.removeContact(contact.nodeId) })
+                ContactRow(
+                    contact = contact,
+                    displayName = repository.displayNameFor(contact.nodeId),
+                    onRemove = { repository.removeContact(contact.nodeId) },
+                )
             }
             item { Spacer(Modifier.height(8.dp)) }
             item {
@@ -164,7 +168,7 @@ fun ContactsScreen(repository: MeshRepository, onScan: () -> Unit, onOpenHelp: (
 }
 
 @Composable
-private fun ContactRow(contact: Contact, onRemove: () -> Unit) {
+private fun ContactRow(contact: Contact, displayName: String, onRemove: () -> Unit) {
     Row(
         Modifier
             .fillMaxWidth()
@@ -176,7 +180,7 @@ private fun ContactRow(contact: Contact, onRemove: () -> Unit) {
         Column(Modifier.weight(1f)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
-                    contact.name,
+                    displayName,
                     style = MaterialTheme.typography.titleMedium,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,

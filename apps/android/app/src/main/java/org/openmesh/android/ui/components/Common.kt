@@ -18,6 +18,7 @@ import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.DoneAll
 import androidx.compose.material.icons.filled.Error
 import androidx.compose.material.icons.filled.Inventory2
+import androidx.compose.material.icons.filled.MarkEmailRead
 import androidx.compose.material.icons.filled.Schedule
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
@@ -200,6 +201,7 @@ fun DeliveryIcon(state: DeliveryState) {
         DeliveryState.QUEUED -> Icon(Icons.Filled.Schedule, "queued", tint = MeshOnSurfaceVariant, modifier = Modifier.size(14.dp))
         DeliveryState.SENT -> Icon(Icons.Filled.Check, "sent", tint = MeshOnSurfaceVariant, modifier = Modifier.size(14.dp))
         DeliveryState.DELIVERED -> Icon(Icons.Filled.DoneAll, "delivered", tint = MeshPrimary, modifier = Modifier.size(14.dp))
+        DeliveryState.READ -> Icon(Icons.Filled.MarkEmailRead, "read", tint = MeshPrimary, modifier = Modifier.size(14.dp))
         DeliveryState.STORED_AT_RELAY -> Icon(Icons.Filled.Inventory2, "stored at relay", tint = MeshTertiary, modifier = Modifier.size(14.dp))
         DeliveryState.FAILED -> Icon(Icons.Filled.Error, "failed", tint = MeshError, modifier = Modifier.size(14.dp))
     }

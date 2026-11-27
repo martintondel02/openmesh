@@ -416,7 +416,7 @@ class UniFfiEngineBridge : EngineBridge {
         is FfiEvent.Ack -> CoreEvent.DeliveryChanged(
             event.msgId,
             when (event.kind) {
-                "read" -> DeliveryState.DELIVERED
+                "read" -> DeliveryState.READ
                 "delivered", "resource_complete" -> DeliveryState.DELIVERED
                 else -> DeliveryState.SENT
             },
