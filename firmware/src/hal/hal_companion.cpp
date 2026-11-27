@@ -39,7 +39,17 @@ int UsbTransport::read(uint8_t* buffer, size_t capacity) {
 
 size_t UsbTransport::write(const uint8_t* data, size_t len) {
     if (!begun_) return 0;
-    return (size_t)Serial.write(data, len);
+    // A CDC write can be short when the TX buffer is full; never truncate a companion frame.
+    size_t sent = 0;
+    const uint32_t start = millis();
+    while (sent < len) {
+        const size_t n = (size_t)Serial.write(data + sent, len - sent);
+        sent += n;
+        if (sent >= len) break;
+        if (millis() - start > 1000u) break;  // never wedge the main loop
+        delay(1);
+    }
+    return sent;
 }
 
 bool UsbTransport::connected() const { return begun_; }
@@ -97,7 +107,34 @@ int BleTransport::read(uint8_t* buffer, size_t capacity) {
 
 size_t BleTransport::write(const uint8_t* data, size_t len) {
     if (!enabled_) return 0;
-    return (size_t)g_bleuart.write(data, len);
+    // Adafruit's BLEUart defaults to unbuffered TX: BLEUart::write() sends exactly ONE notification
+    // (<= ATT MTU - 3 bytes) but reports the full length as written. A single call therefore
+    // silently truncated larger companion replies (HelloAck at the default 23-byte MTU), which
+    // broke the companion handshake. Send the frame in MTU-sized chunks and retry a chunk that the
+    // link-layer TX queue cannot take yet. The timeout keeps the main loop from ever wedging.
+    const uint16_t conn_hdl = Bluefruit.connHandle();
+    BLEConnection* conn = Bluefruit.Connection(conn_hdl);
+    size_t chunk = 20;
+    if (conn != nullptr) {
+        const uint16_t mtu = conn->getMtu();
+        if (mtu > 3) chunk = (size_t)mtu - 3;
+    }
+    if (chunk > 244u) chunk = 244u;  // largest notification the TX characteristic is configured for
+
+    size_t sent = 0;
+    const uint32_t start = millis();
+    while (sent < len) {
+        size_t n = len - sent;
+        if (n > chunk) n = chunk;
+        const size_t w = (size_t)g_bleuart.write(data + sent, n);
+        if (w == 0) {
+            if (millis() - start > 4000u) break;  // link stalled: give up rather than hang the loop
+            delay(2);
+            continue;
+        }
+        sent += n;
+    }
+    return sent;
 }
 
 bool BleTransport::connected() const { return Bluefruit.connected() > 0; }

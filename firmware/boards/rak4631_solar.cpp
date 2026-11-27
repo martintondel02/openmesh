@@ -11,7 +11,7 @@ namespace {
 const Board kBoard = [] {
     Board b;
     b.id = "rak4631_solar";
-    b.display_name = "RAK WisBlock 4631 solar node";
+    b.display_name = "OpenMesh RAK4631 solar";
     b.mcu = "nRF52840";
     b.radio_chip = "SX1262";
     b.default_region = "EU868";

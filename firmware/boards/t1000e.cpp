@@ -11,7 +11,7 @@ namespace {
 const Board kBoard = [] {
     Board b;
     b.id = "t1000e";
-    b.display_name = "Seeed SenseCAP T1000-E";
+    b.display_name = "OpenMesh T1000-E";
     b.mcu = "nRF52840";
     b.radio_chip = "LR1110";
     b.default_region = "EU868";
