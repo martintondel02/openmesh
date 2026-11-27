@@ -34,6 +34,20 @@ short fingerprint or scanning a QR proves you have the right public key.
    it over a channel you trust. Contact invites contain no secrets.
 3. Never send `identity.key` or a backup seed to anyone, ever.
 
+### Your display name vs your node id
+
+* Your **display name** (Settings → Identity / Display name) is the friendly label other clients
+  see; it travels in your announces. Change it whenever you like — clients apply it immediately
+  in the app and peers see it at the next announce (the app can also announce right after saving).
+* Your **node id** (16 hex characters, shown shortened as the first 8) is derived from your public
+  keys and never changes unless you change identity. It is the address, not the name: people can
+  rename themselves, ids stay unique.
+* Names are **not authenticated by themselves** and can collide; use the node id, a scanned
+  contact QR or a fingerprint comparison when identity matters. A pinned contact stores the
+  public key, so a renamed peer is still the same verified contact.
+* If you restore your identity backup on a new device the name comes from that device's settings;
+  peers see the old name until your next announce.
+
 ### Add someone
 
 1. Scan their contact QR or paste their `openmesh://contact?…` invite.

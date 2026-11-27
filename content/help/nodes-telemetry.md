@@ -77,6 +77,15 @@ repeater, use class `repeater` and the relay role.
 * `battery_pct` is an estimate; `battery_mv` is the raw voltage. Treat sudden percentage drops as
   suspect until confirmed by voltage.
 * Airtime counters reset when the node reboots; compare over longer windows.
+* **Is this peer reachable?** The peer card (chat header or node details) summarises it in plain
+  language: **Strong / OK / Weak / Offline**, from RSSI and how recently the peer was heard,
+  plus hops (0 = direct neighbour, >0 = via relay), RSSI/SNR, last heard time and whether you
+  pinned them as a contact. "Offline" means not heard recently — a store-capable relay may still
+  hold mail for them.
+* **Your radio vs the peer** are different things: the radio link card shows whether your own
+  radio is connected and healthy; the peer card shows whether that specific node is reachable
+  over the mesh. A healthy radio with an "Offline" peer means the peer is out of range, not that
+  your radio is broken.
 
 ## Troubleshooting
 

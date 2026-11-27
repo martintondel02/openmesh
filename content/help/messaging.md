@@ -34,7 +34,11 @@ or move to a better position.
 ## Quick start
 
 1. Open **Chats**, choose a conversation, type a message and send.
-2. Watch the tick: single means "sent from your radio", double means "their device has it".
+2. Watch the status: the bubble shows an icon plus a label — **Sending…**, **Sent** (handed to
+   your radio), **Delivered to <name>** (their device acknowledged it), **Read by <name>** (they
+   opened the conversation; only if read receipts are on), **Queued** (radio not ready yet) or
+   **Not delivered**. Tap the message (or its info action) for a details dialog with the same
+   explanation and a Retry button when failed.
 3. If the person is out of range, send anyway. If a store-capable repeater is in range, the app
    will keep the message queued and deliver it when they return. You can see queued mail under
    the node's details or in the message's status.
@@ -63,8 +67,15 @@ or move to a better position.
   stores ciphertext only; the relay cannot read your message and cannot prove it delivered. Treat
   "stored" as "likely to arrive later", not a guarantee: envelopes expire after 72 hours by
   default, and a full store evicts the oldest mail first.
-* **Group delivery** — channel messages are broadcast to all members; the delivery tick reflects
-  ACK coverage from the channel peers your node heard. Missing some peers is normal on radio.
+* **Group delivery** — channel messages are broadcast to all members, so there is no
+  per-recipient receipt: the app labels them **Sent to channel** and the details dialog says so
+  explicitly. Missing some peers at send time is normal on radio; there is no "delivered to
+  everyone" state.
+* **Direct delivery** — a direct message is acknowledged by the recipient's device (delivered) and
+  optionally when they open the conversation (read). "Delivered" never means a human read it.
+* **Why a tick can stall** — under duty-cycle limits a message may wait behind a media transfer;
+  the status stays **Sent** until the ACK arrives, and the details dialog explains it is waiting
+  rather than lost.
 
 ## Troubleshooting
 
