@@ -161,6 +161,8 @@ struct EngineStats {
     uint32_t tx_frames = 0;
     uint32_t relayed = 0;
     uint32_t dropped = 0;
+    // RxFrame engine events silently discarded because the event queue was full (burst overload).
+    uint32_t events_dropped = 0;
     uint32_t malformed = 0;
     uint32_t duplicates = 0;
     uint32_t decrypt_errors = 0;

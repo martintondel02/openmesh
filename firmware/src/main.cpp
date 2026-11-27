@@ -32,6 +32,11 @@
 #ifndef OM_ANNOUNCE_TTL_SECONDS
 #define OM_ANNOUNCE_TTL_SECONDS 1800
 #endif
+// Bring-up diagnostics: set to 1 to print the BLE companion burst-queue counters to USB serial
+// every 10 s. The counters themselves are always compiled (used for drop/evdrop provability).
+#ifndef OM_BLE_TX_DIAG
+#define OM_BLE_TX_DIAG 0
+#endif
 
 namespace {
 
@@ -79,6 +84,7 @@ bool g_gps_emitted = false;
 bool g_led_on = false;
 bool g_button_handled = false;
 uint64_t g_button_down_ms = 0;
+uint32_t g_ble_rx_events_fwd = 0;  // RxFrame events handed to the companion link (BLE+USB)
 
 uint32_t deviceUniqueWord(uint32_t index) {
 #if defined(ARDUINO_ARCH_NRF52) || defined(NRF52_SERIES)
@@ -228,6 +234,7 @@ void drainEvents() {
                 std::snprintf(msg.link, sizeof(msg.link), event.link == Link::Ble ? "ble" : "lora");
                 msg.at_ms = millis();
                 companionSend(msg);
+                ++g_ble_rx_events_fwd;
                 break;
             }
             case EventType::LowBattery:
@@ -590,6 +597,34 @@ void loop() {
         }
     }
     pollCompanion();
+#if OM_ENABLE_BLE
+    // Drain companion replies/events toward the BLE app at the link's pace (burst-safe queue).
+    g_ble.service();
+#if OM_BLE_TX_DIAG
+    {
+        static uint32_t s_ble_stats_ms = 0;
+        static uint32_t s_ble_drops_seen = 0;
+        const uint32_t ble_drops = g_ble.droppedFrames();
+        const bool drop_changed = ble_drops != s_ble_drops_seen;
+        if (drop_changed || now - s_ble_stats_ms >= 10000u) {
+            s_ble_stats_ms = (uint32_t)now;
+            if (drop_changed || g_ble.sentChunks() > 0 || g_ble.queuedBytes() > 0) {
+                Serial.printf(
+                    "[om] ble tx mtu=%u q=%lu peak=%lu sent=%lu fail=%lu drops=%lu drop_bytes=%lu "
+                    "rx=%lu fwd=%lu evdrop=%lu\n",
+                    (unsigned)g_ble.mtu(), (unsigned long)g_ble.queuedBytes(),
+                    (unsigned long)g_ble.peakQueuedBytes(), (unsigned long)g_ble.sentChunks(),
+                    (unsigned long)g_ble.notifyFailures(), (unsigned long)ble_drops,
+                    (unsigned long)g_ble.droppedBytes(),
+                    (unsigned long)g_engine.stats().rx_frames,
+                    (unsigned long)g_ble_rx_events_fwd,
+                    (unsigned long)g_engine.stats().events_dropped);
+            }
+            s_ble_drops_seen = ble_drops;
+        }
+    }
+#endif  // OM_BLE_TX_DIAG
+#endif
     applyRadioConfigIfChanged();
     g_engine.tick(now);
     drainEvents();

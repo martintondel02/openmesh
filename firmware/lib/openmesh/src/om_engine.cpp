@@ -197,7 +197,11 @@ void Engine::emitFrameEvent(const Frame& frame, Link link, int16_t rssi, int16_t
     e.peer = frame.src;
     const size_t n = frame.encode(e.frame, sizeof(e.frame));
     e.frame_len = (uint16_t)n;
-    events_.push(e);
+    if (!events_.push(e)) {
+        // The companion link did not drain the queue fast enough (resource bursts). Counted so the
+        // loss is observable instead of silent.
+        ++stats_.events_dropped;
+    }
 }
 
 bool Engine::onBytes(const uint8_t* data, size_t len, Link link, int16_t rssi, int16_t snr,

@@ -70,7 +70,15 @@ namespace {
 // (SLIP + OM chunk, up to ~300 B) in a burst could overflow it while the firmware was busy
 // queueing a reply, silently losing the frame. 1 KiB keeps a full frame plus slack.
 BLEUart g_bleuart(1024);
-}
+
+// Burst-safe TX ring for the BLE companion link. A resource payload is forwarded as a burst of
+// Rx events; each event is 13 notifications at the default 23-byte ATT MTU. 16 KiB covers a full
+// 6 KiB image payload (34 OMP frames) with SLIP overhead plus the envelope/replies.
+constexpr size_t kTxRingSize = 16u * 1024u;
+uint8_t g_tx_ring[kTxRingSize];
+size_t g_tx_head = 0;  // next write position
+size_t g_tx_tail = 0;  // next byte to notify
+}  // namespace
 bool BleTransport::begin(const char* device_name) {
     // The SoftDevice may already be enabled (BLE-closed "SD for flash" images, or an early-start
     // bring-up); only initialise it once and then just configure/advertise.
@@ -98,8 +106,22 @@ bool BleTransport::begin(const char* device_name) {
                   sd_ok ? 1 : 0, (int)uart_err, adv_ok ? 1 : 0,
                   mac[5], mac[4], mac[3], mac[2], mac[1], mac[0], device_name);
     enabled_ = sd_ok && (uart_err == ERROR_NONE) && adv_ok;
+    // Fresh session: reset the burst queue and its diagnostics.
+    g_tx_head = 0;
+    g_tx_tail = 0;
+    queued_bytes_ = 0;
+    peak_queued_bytes_ = 0;
+    chunks_sent_ = 0;
+    notify_failures_ = 0;
+    frames_dropped_ = 0;
+    bytes_dropped_ = 0;
+    mtu_ = 23;
     return enabled_;
 }
+
+namespace {
+size_t ring_used() { return (g_tx_head + kTxRingSize - g_tx_tail) % kTxRingSize; }
+}  // namespace
 
 int BleTransport::read(uint8_t* buffer, size_t capacity) {
     if (!enabled_) return 0;
@@ -109,35 +131,67 @@ int BleTransport::read(uint8_t* buffer, size_t capacity) {
 }
 
 size_t BleTransport::write(const uint8_t* data, size_t len) {
-    if (!enabled_) return 0;
-    // Adafruit's BLEUart defaults to unbuffered TX: BLEUart::write() sends exactly ONE notification
-    // (<= ATT MTU - 3 bytes) but reports the full length as written. A single call therefore
-    // silently truncated larger companion replies (HelloAck at the default 23-byte MTU), which
-    // broke the companion handshake. Send the frame in MTU-sized chunks and retry a chunk that the
-    // link-layer TX queue cannot take yet. The timeout keeps the main loop from ever wedging.
-    const uint16_t conn_hdl = Bluefruit.connHandle();
-    BLEConnection* conn = Bluefruit.Connection(conn_hdl);
+    if (!enabled_ || data == nullptr) return 0;
+    if (len == 0) return 0;
+    // Whole companion frames are queued, never partially delivered and never dropped just because
+    // the SoftDevice notification queue is momentarily full. Adafruit's BLEUart::write() sends ONE
+    // notification (<= ATT MTU - 3) and returns 0 when the link's TX queue rejects it; a 34-chunk
+    // resource payload burst at 20-byte notifications used to outrun that queue, and the old
+    // bounded retry (500 ms) then silently dropped the rest of the frame. service() drains this
+    // ring at the link's pace from the main loop instead.
+    const size_t used = ring_used();
+    const size_t free = kTxRingSize - 1u - used;
+    if (free < len) {
+        ++frames_dropped_;
+        bytes_dropped_ += (uint32_t)len;
+        return 0;
+    }
+    size_t tail = g_tx_head;
+    for (size_t i = 0; i < len; ++i) {
+        g_tx_ring[tail] = data[i];
+        tail = (tail + 1u) % kTxRingSize;
+    }
+    g_tx_head = tail;
+    queued_bytes_ = (uint32_t)ring_used();
+    if (queued_bytes_ > peak_queued_bytes_) peak_queued_bytes_ = queued_bytes_;
+    return len;
+}
+
+void BleTransport::service() {
+    if (!enabled_) return;
+    // A BLE drop invalidates pending notifications for that app session: clear rather than deliver
+    // stale Rx events to the next connection.
+    if (!connected()) {
+        g_tx_tail = g_tx_head;
+        queued_bytes_ = 0;
+        return;
+    }
+    if (ring_used() == 0) return;
     size_t chunk = 20;
+    BLEConnection* conn = Bluefruit.Connection(Bluefruit.connHandle());
     if (conn != nullptr) {
         const uint16_t mtu = conn->getMtu();
+        mtu_ = mtu;
         if (mtu > 3) chunk = (size_t)mtu - 3;
     }
     if (chunk > 244u) chunk = 244u;  // largest notification the TX characteristic is configured for
-
-    size_t sent = 0;
-    const uint32_t start = millis();
-    while (sent < len) {
-        size_t n = len - sent;
+    // Push at most one connection-event worth per call so the main loop (radio/companion RX) is
+    // never starved; the rest stays queued for the next loop iteration.
+    uint32_t budget = 16;
+    while (ring_used() > 0 && budget-- > 0) {
+        const size_t used = ring_used();
+        const size_t contiguous = kTxRingSize - g_tx_tail;
+        size_t n = used < contiguous ? used : contiguous;
         if (n > chunk) n = chunk;
-        const size_t w = (size_t)g_bleuart.write(data + sent, n);
+        const size_t w = (size_t)g_bleuart.write(g_tx_ring + g_tx_tail, n);
         if (w == 0) {
-            if (millis() - start > 500u) break;  // link stalled: drop the rest, never hang the loop
-            delay(2);
-            continue;
+            ++notify_failures_;
+            break;
         }
-        sent += n;
+        g_tx_tail = (g_tx_tail + w) % kTxRingSize;
+        ++chunks_sent_;
     }
-    return sent;
+    queued_bytes_ = (uint32_t)ring_used();
 }
 
 bool BleTransport::connected() const { return Bluefruit.connected() > 0; }
@@ -224,11 +278,21 @@ size_t BleTransport::write(const uint8_t* data, size_t len) {
 
 bool BleTransport::connected() const { return enabled_ && NimBLEDevice::getServer() != nullptr && NimBLEDevice::getServer()->getConnectedCount() > 0; }
 
+// ESP32 NimBLE path not migrated to the burst ring yet; notifications are sent synchronously in
+// write(), so just reset diagnostics.
+void BleTransport::service() {
+    queued_bytes_ = 0;
+    peak_queued_bytes_ = 0;
+    frames_dropped_ = 0;
+    bytes_dropped_ = 0;
+}
+
 #else
 bool BleTransport::begin(const char*) { return false; }
 int BleTransport::read(uint8_t*, size_t) { return 0; }
 size_t BleTransport::write(const uint8_t*, size_t) { return 0; }
 bool BleTransport::connected() const { return false; }
+void BleTransport::service() {}
 #endif
 
 // --- SoftDevice-only bring-up (BLE compiled out) -------------------------------------------
@@ -239,6 +303,15 @@ bool beginSoftDevice() {
     // bring-up experiment, where advertising starts after boot. The USB/TinyUSB <-> SoftDevice
     // hand-off happens here, once.
     if (softDeviceEnabled()) return true;
+#if defined(OM_ENABLE_BLE) && (OM_ENABLE_BLE)
+    // Larger ATT MTU ceiling + deeper HVN TX queue so a companion burst (a resource payload is
+    // forwarded as 34 Rx events = hundreds of notifications at the default 23-byte MTU) cannot
+    // outrun the SoftDevice notification queue. The MTU ceiling only takes effect once the client
+    // requests it; the deeper queue helps immediately. Modest values keep the S140 RAM reservation
+    // in the linker's 24 KiB window.
+    Bluefruit.configPrphConn(247, BLE_GAP_EVENT_LENGTH_DEFAULT, 4,
+                             BLE_GATTC_WRITE_CMD_TX_QUEUE_SIZE_DEFAULT);
+#endif
     const bool ok = Bluefruit.begin();
     setSoftDeviceEnabled(ok);
     return ok;
