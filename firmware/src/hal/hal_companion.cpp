@@ -74,6 +74,14 @@ BLEUart g_bleuart(1024);
 // Burst-safe TX ring for the BLE companion link. A resource payload is forwarded as a burst of
 // Rx events; each event is 13 notifications at the default 23-byte ATT MTU. 16 KiB covers a full
 // 6 KiB image payload (34 OMP frames) with SLIP overhead plus the envelope/replies.
+// BLEUart RX FIFO overflow bytes: the app's companion Tx frames arrive as GATT writes; when the
+// 1 KiB FIFO is full the Arduino layer silently truncates the write (no counter). Counted here so
+// an app->radio ACK burst that outruns pollCompanion() is observable instead of vanishing.
+uint32_t g_ble_rx_overflow_bytes = 0;
+void noteBleRxOverflow(uint16_t /*conn_hdl*/, uint16_t leftover) {
+    g_ble_rx_overflow_bytes += leftover;
+}
+
 constexpr size_t kTxRingSize = 16u * 1024u;
 uint8_t g_tx_ring[kTxRingSize];
 size_t g_tx_head = 0;  // next write position
@@ -90,6 +98,9 @@ bool BleTransport::begin(const char* device_name) {
     Bluefruit.Periph.setConnInterval(9, 12);
     // BLEUart::begin() returns err_t (0 = ERROR_NONE), not bool.
     const err_t uart_err = g_bleuart.begin();
+    // RX overflow callback (installed after begin(); the BLEUart constructor leaves it null, which
+    // made app-write bursts disappear with no diagnostic).
+    g_bleuart.setRxOverflowCallback(noteBleRxOverflow);
     Bluefruit.Advertising.addFlags(BLE_GAP_ADV_FLAGS_LE_ONLY_GENERAL_DISC_MODE);
     Bluefruit.Advertising.addTxPower();
     Bluefruit.Advertising.addService(g_bleuart);
@@ -116,6 +127,7 @@ bool BleTransport::begin(const char* device_name) {
     frames_dropped_ = 0;
     bytes_dropped_ = 0;
     mtu_ = 23;
+    g_ble_rx_overflow_bytes = 0;
     return enabled_;
 }
 
@@ -195,6 +207,8 @@ void BleTransport::service() {
 }
 
 bool BleTransport::connected() const { return Bluefruit.connected() > 0; }
+
+uint32_t BleTransport::rxOverflowBytes() const { return g_ble_rx_overflow_bytes; }
 
 // --- BLE NUS: ESP32-S3 (NimBLE-Arduino 1.4.x) -----------------------------------------------
 #elif defined(ESP32) && defined(OM_ENABLE_BLE)
@@ -287,12 +301,15 @@ void BleTransport::service() {
     bytes_dropped_ = 0;
 }
 
+uint32_t BleTransport::rxOverflowBytes() const { return 0; }
+
 #else
 bool BleTransport::begin(const char*) { return false; }
 int BleTransport::read(uint8_t*, size_t) { return 0; }
 size_t BleTransport::write(const uint8_t*, size_t) { return 0; }
 bool BleTransport::connected() const { return false; }
 void BleTransport::service() {}
+uint32_t BleTransport::rxOverflowBytes() const { return 0; }
 #endif
 
 // --- SoftDevice-only bring-up (BLE compiled out) -------------------------------------------

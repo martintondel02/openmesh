@@ -86,6 +86,15 @@ bool g_button_handled = false;
 uint64_t g_button_down_ms = 0;
 uint32_t g_ble_rx_events_fwd = 0;  // RxFrame events handed to the companion link (BLE+USB)
 
+// TX-path outcome counters (gated diag only; no companion/StatsGet layout change). These make
+// silent discards visible: a radio TX failure used to be counted as `malformed` (an RX bucket)
+// and the frame was dropped with no retry; an encode failure was discarded with no counter at all.
+uint32_t g_radio_tx_attempts = 0;
+uint32_t g_radio_tx_ok = 0;
+uint32_t g_radio_tx_fail = 0;
+uint32_t g_tx_encode_fail = 0;
+uint32_t g_companion_decode_fail = 0;  // app->radio companion chunks that failed CBOR/CRC decode
+
 // True when a companion app is attached and consuming traffic (BLE connected, or a USB host has
 // spoken companion protocol recently). Used to switch relay copies to best-effort mode.
 bool companionTransportActive() {
@@ -284,11 +293,17 @@ void drainOutbox() {
         const OutFrame& out = g_engine.outbox().at(index);
         const size_t len = out.frame.encode(encoded, sizeof(encoded));
         if (len > 0) {
+            ++g_radio_tx_attempts;
             if (!g_radio.transmit(encoded, len)) {
-                ++g_engine.mutableStats().malformed;  // radio TX failure counter reuse
+                // Radio TX failure: the frame is discarded here (no retry). Counted separately from
+                // malformed RX frames so a wedged/refusing transmitter is distinguishable.
+                ++g_radio_tx_fail;
             } else {
+                ++g_radio_tx_ok;
                 g_radio.startReceive();
             }
+        } else {
+            ++g_tx_encode_fail;  // encode failure: previously discarded silently
         }
         g_engine.outbox().removeAt(index);
     }
@@ -362,6 +377,8 @@ void pollCompanion() {
                 g_last_usb_ms = millis();
                 g_engine.noteCompanionActivity(g_last_usb_ms);
                 handleCompanionMessage(g_rx_msg);
+            } else {
+                ++g_companion_decode_fail;
             }
         }
     }
@@ -373,6 +390,8 @@ void pollCompanion() {
                     g_last_ble_ms = millis();
                     g_engine.noteCompanionActivity(g_last_ble_ms);
                     handleCompanionMessage(g_rx_msg);
+                } else {
+                    ++g_companion_decode_fail;
                 }
             }
         }
@@ -633,7 +652,9 @@ void loop() {
                 Serial.printf(
                     "[om] ble tx mtu=%u q=%lu peak=%lu sent=%lu fail=%lu drops=%lu drop_bytes=%lu "
                     "rx=%lu fwd=%lu evdrop=%lu relayed=%lu txf=%lu txair=%lu "
-                    "txq=%lu apptx=%lu appair=%lu reldef=%lu relvict=%lu\n",
+                    "txq=%lu apptx=%lu appair=%lu reldef=%lu relvict=%lu "
+                    "txatt=%lu txok=%lu txfail=%lu encfail=%lu slipdrop=%lu blerxdrop=%lu "
+                    "decfail=%lu\n",
                     (unsigned)g_ble.mtu(), (unsigned long)g_ble.queuedBytes(),
                     (unsigned long)g_ble.peakQueuedBytes(), (unsigned long)g_ble.sentChunks(),
                     (unsigned long)g_ble.notifyFailures(), (unsigned long)ble_drops,
@@ -648,7 +669,12 @@ void loop() {
                     (unsigned long)g_engine.stats().app_tx_frames,
                     (unsigned long)g_engine.stats().app_tx_airtime_ms,
                     (unsigned long)g_engine.stats().relay_deferred,
-                    (unsigned long)g_engine.stats().relay_evicted);
+                    (unsigned long)g_engine.stats().relay_evicted,
+                    (unsigned long)g_radio_tx_attempts, (unsigned long)g_radio_tx_ok,
+                    (unsigned long)g_radio_tx_fail, (unsigned long)g_tx_encode_fail,
+                    (unsigned long)(g_usb_slip.framesDropped() + g_ble_slip.framesDropped()),
+                    (unsigned long)g_ble.rxOverflowBytes(),
+                    (unsigned long)g_companion_decode_fail);
             }
             s_ble_drops_seen = ble_drops;
         }

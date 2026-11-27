@@ -40,6 +40,9 @@ public:
     uint32_t droppedFrames() const { return frames_dropped_; }
     uint16_t mtu() const { return mtu_; }  // negotiated ATT MTU (23 until the client requests more)
     uint32_t droppedBytes() const { return bytes_dropped_; }
+    // Bytes lost when the BLEUart RX FIFO overflowed (app writes: companion Tx frames). The
+    // Arduino BLEUart silently truncates on overflow unless the overflow callback is installed.
+    uint32_t rxOverflowBytes() const;
 
 private:
     bool enabled_ = false;
