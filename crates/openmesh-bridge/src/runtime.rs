@@ -2724,7 +2724,6 @@ mod radio_state_tests {
     }
 }
 
-
 #[cfg(test)]
 mod contact_url_format_tests {
     use super::*;

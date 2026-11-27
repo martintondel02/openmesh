@@ -918,9 +918,15 @@ async fn websocket_commands_cover_documented_surface() {
     assert_eq!(hello["type"], "hello");
     // The bridge advertises its own 72-byte public identity (base64) so clients can add it as a
     // contact and keep verifying its signed messages across client restarts.
-    let self_id = hello["data"]["node"]["node_id"].as_str().unwrap().to_string();
+    let self_id = hello["data"]["node"]["node_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
     assert_eq!(
-        hello["data"]["node"]["public_key"].as_str().map(str::len).unwrap_or(0),
+        hello["data"]["node"]["public_key"]
+            .as_str()
+            .map(str::len)
+            .unwrap_or(0),
         96
     );
 
