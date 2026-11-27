@@ -36,10 +36,16 @@ Final verified images (all fixes in this tree):
   `22 dBm` (RAK4631 SX1262 cap).
 * `Stats` deltas move in the expected direction under traffic: `tx_frames`, `airtime_ms`,
   `rx_frames`, `relayed`, `dedup_drops` (see §2).
-* BLE + USB coexistence (product images): host BlueZ scans see `Seeed SenseCAP T1000-E` and
-  `RAK WisBlock 4631 solar`; 0 USB disconnects after boot on both boards while advertising, and the
-  USB companion `caps` include the BLE capability (101 / 615); two-node RF still passes with the
-  BLE images loaded (§4).
+* BLE + USB coexistence (product images): host BlueZ scans see `OpenMesh T1000-E` and
+  `OpenMesh RAK4631 solar` (the Android app only lists radios whose advertised name starts with
+  `OpenMesh`); 0 USB disconnects after boot on both boards while advertising, and the USB companion
+  `caps` include the BLE capability (101 / 615); two-node RF still passes with the BLE images
+  loaded (§4).
+* BLE NUS companion **session** verified from a host BLE client (2026-11-27): connected to
+  `OpenMesh T1000-E`, wrote a companion `Ping` and received `Pong {nonce}`, then `Hello` and received
+  `HelloAck {proto:1, fw_version:"0.7.1", node_id:7fe558cfc94d9c60, caps:101, region:"EU868",
+  profile:"MEDIUM_FAST"}`. This is the same session the Android app performs, so the app-side
+  handshake path is exercised end to end. See §2.7 for the BLE write bug this uncovered.
 
 ### Two-node RF acceptance (2026-11-27, final run)
 
@@ -173,6 +179,21 @@ The full blank-board path was then exercised end to end on the T1000-E (2026-11-
 Also verified with the same images: `env:t1000e_fswrite` wrote and read back a file
 (`FSPROBE stage=5 msg=read=19 data=fsprobe-0123456789`).
 
+### 2.7 BLE companion session and partial-write truncation (fixed)
+
+Once the T1000-E advertised `OpenMesh T1000-E` and the Android app's scan prefix matched, a host BLE
+client found the radio immediately, but only `Ping -> Pong` worked: `HelloAck` arrived truncated
+("premature end of stream"). Root cause: Adafruit's `BLEUart` defaults to **unbuffered TX**;
+`BLEUart::write()` sends exactly **one** notification (≤ ATT MTU − 3 bytes) but reports the whole
+length as written. At the default 23-byte MTU the firmware therefore silently dropped most of any
+larger companion reply (`HelloAck`, `Stats`). The firmware BLE transport now chunks every companion
+frame to the negotiated MTU and retries chunks the link-layer queue cannot take yet (bounded so the
+main loop cannot wedge); the USB transport got the same bounded retry for partial CDC writes.
+
+Verified after the fix: host BLE client → `Ping/Pong` and `Hello/HelloAck` both complete and parse
+correctly at MTU 23 (the worst case); companion frames are ≤ ~1 KiB and BLE chunk sizes scale with
+the negotiated MTU (Android's Nordic BLE library requests a larger MTU).
+
 ---
 
 ## 3. Flashing notes (both boards, no buttons once an app runs)
@@ -216,7 +237,8 @@ see §2.6. The BLE-first/`OM_ENABLE_SOFTDEVICE` architecture from earlier in the
 | --- | --- | --- |
 | USB disconnects after boot | 0 | 0 |
 | USB companion Ping/Hello/Stats | PASS (`caps` 101, includes BLE) | PASS (`caps` 615, includes BLE) |
-| BLE advertising seen by host BlueZ | `Seeed SenseCAP T1000-E` | `RAK WisBlock 4631 solar` |
+| BLE advertising seen by host BlueZ | `OpenMesh T1000-E` | `OpenMesh RAK4631 solar` |
+| BLE NUS companion session (host client) | **PASS: Ping/Pong + HelloAck** | not exercised (wired to the PC bridge) |
 | Two-node RF test | **PASS both directions** | **PASS both directions** |
 
 **Consequences for the earlier bootloader question:** no RAK bootloader/SoftDevice upgrade is
@@ -229,7 +251,7 @@ advertising-after-boot ordering. What is still not verified is a BLE **companion
 
 | Env | Purpose | State |
 | --- | --- | --- |
-| `t1000e` | product T1000-E with BLE | **verified: BLE + USB coexist, advertising, companion, RF two-node PASS** |
+| `t1000e` | product T1000-E with BLE | **verified: BLE + USB coexist, advertising, BLE NUS session (host), USB companion, RF two-node PASS** |
 | `t1000e_usb` | full app, BLE closed, SoftDevice on, light sleep | **verified: companion + RF, two-node PASS** |
 | `t1000e_probe` | USB CDC + LED probe | boots |
 | `t1000e_fswrite` | InternalFS write probe (SoftDevice on, BLE closed) | **verified: writes and reads back a file** |
@@ -250,9 +272,13 @@ listed in §6).
 
 ## 6. Remaining work, in order
 
-1. **BLE companion transport (NUS).** Advertising is verified on both boards and the USB companion
-   is verified end to end, but no BLE **session** has been exercised yet: connect to the NUS, write a
-   Ping, receive a Pong. Then run the two-node harness over BLE on one side.
+1. **Android app end-to-end.** The BLE NUS session is verified from a host BLE client (Ping/Pong +
+   HelloAck), the app build/installs on the test phone, and the PC bridge/web side is being
+   brought up; the remaining verification is the user-facing phone-app -> BLE radio -> LoRa ->
+   second radio -> bridge -> web GUI path, including a shared channel invite. A second open item:
+   the bridge's `--serial` transport is a raw OMP-frame pipe while the firmware speaks the companion
+   protocol (see the bridge workstream) — that link must use the companion client before the web
+   GUI can receive radio traffic.
 2. **Deep sleep / power budget.** The receiver stays on continuously today; implement radio RX
    windows and measure current (light sleep via `delay()` + FreeRTOS tickless idle is in place).
    Battery/ADC calibration and GNSS date/time remain as before (§9 in `firmware/README.md`).

@@ -30,7 +30,9 @@ for rel in REQUIRED:
         problems.append(f"missing required document: {rel}")
 
 for md in ROOT.rglob("*.md"):
-    skip_parts = {".git", "node_modules", "target", ".pio", "build", "dist"}
+    # "assets" holds generated copies (e.g. Gradle copies content/help into the Android app), not
+    # canonical docs; the canonical corpus is checked by check_help.py.
+    skip_parts = {".git", "node_modules", "target", ".pio", "build", "dist", "assets"}
     if any(part in skip_parts for part in md.parts):
         continue
     # generated copies of embedded content (help corpus is checked at the source by check_help.py)

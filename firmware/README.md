@@ -366,6 +366,8 @@ their BLE-compiled-out images (`env:t1000e_usb`, `env:rak4631_usb`). Bring-up re
 | RAK startup | **do not** add `-Wl,--defsym=__StackSize=...`: it changes the symbol the Adafruit startup stack-fill loop uses while the linker keeps `__StackLimit`, so the fill runs past the end of RAM and the chip faults before `setup()` (the former 16 KiB "fix" was the RAK blocker; the 2 KiB linker stack is ISR/SoftDevice-only) |
 | Runtime / sleep | `sleepMs()` calls `delay()` (TinyUSB CDC flush + `vTaskDelay`) instead of a busy loop, so the FreeRTOS tickless-idle low-power state is used; direct RTC1/WFE pokes remain forbidden (FreeRTOS/SoftDevice own the clock domain) |
 | Companion stack | the Adafruit loop task has a 4 KiB stack (1024 words); the companion chunk/SLIP/message buffers (≈7.7 KiB worst case) live in file-scope statics in `src/main.cpp`, not on that stack |
+| Companion writes | USB CDC and Adafruit `BLEUart` writes can be short (`BLEUart` unbuffered TX sends one notification but reports full length); both transports chunk/retry with a bounded timeout so large replies (`HelloAck`, `Stats`) are never truncated |
+| BLE name | advertised name starts with `OpenMesh` (`OpenMesh T1000-E`, `OpenMesh RAK4631 solar`): the Android app's BLE scan only lists radios with that prefix |
 | SoftDevice for flash | with BLE compiled out the SoftDevice is still enabled (`OM_ENABLE_SOFTDEVICE=1` in the `*_usb` envs) because Adafruit `InternalFS` writes use `sd_flash_*` SVCs; `randomBytes()` then uses the SoftDevice RNG application API instead of the SD-owned `NRF_RNG` peripheral |
 | USB/BLE | BLE + USB coexistence is fixed by ordering: enable the SoftDevice in `setup()` and start BLE advertising from `loop()` ~5 s after boot. Starting advertising during setup overlapped the TinyUSB/SoftDevice hand-off and radio bring-up and destabilised USB on both first articles. Verified: stable USB companion + host-visible advertising + RF two-node PASS on `t1000e` and `rak4631_solar` |
 | RAM | 16 peers / 16 stored envelopes (the full 2048-entry dedup table is kept) to leave stack headroom next to S140 |
@@ -374,7 +376,8 @@ their BLE-compiled-out images (`env:t1000e_usb`, `env:rak4631_usb`). Bring-up re
 Verified on hardware 2026-11-27: build, UF2 (`0xADA52840`) and nrfutil flashing on both boards,
 boot, USB CDC enumeration, USB companion **Ping/Pong + HelloAck + Stats**, `radio=ok`, light sleep
 (uptime and companion stay live), BLE + USB coexistence on the product images (0 USB disconnects
-after boot, host scans see `Seeed SenseCAP T1000-E` / `RAK WisBlock 4631 solar`), the InternalFS
+after boot, host scans see `OpenMesh T1000-E` / `OpenMesh RAK4631 solar`), a full BLE NUS companion
+session from a host BLE client (Ping/Pong + HelloAck with node id/region/profile), the InternalFS
 write path used by first-boot identity/store writes (`env:t1000e_fswrite` wrote and read back a
 file), a full blank-board first boot with a regenerated persistent identity (`env:t1000e_fsformat`
 erase → `env:t1000e` boot), and the two-node RF test
@@ -395,8 +398,8 @@ These are tracked for v0.1.x/M1 and are worth reading before trusting the firmwa
 1. **Hardware builds and first article.** The host library/tests and the T1000-E and RAK4631
    targets build locally; both boards boot, flash and pass the USB companion + BLE + two-node RF
    checks on their product images (§8.1). The remaining two board environments (Seeed Solar Node
-   P1, Heltec Wireless Tracker) still need first-article build/boot checks; the BLE NUS companion
-   session, GNSS bauds, ADC calibration and sleep current need hardware measurement.
+   P1, Heltec Wireless Tracker) still need first-article build/boot checks; GNSS bauds, ADC
+   calibration and sleep current need hardware measurement.
 2. **Deep sleep missing for trackers.** v0.1 keeps the receiver on continuously and uses light
    sleep only (nRF52: `delay()` + FreeRTOS tickless idle); battery life is therefore days, not
    months. The power table reflects that. The scheduler and `PowerPolicy` already emit low-power
