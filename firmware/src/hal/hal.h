@@ -45,6 +45,12 @@ bool beginSoftDevice();
 // Internal: records whether the SoftDevice is enabled so randomBytes() uses the SD RNG API
 // instead of touching the SoftDevice-owned RNG peripheral.
 void setSoftDeviceEnabled(bool enabled);
+// True when the SoftDevice is currently enabled (BLE-on builds or the BLE-closed + SD-on images).
+bool softDeviceEnabled();
+// Platform reset. On nRF52 with the SoftDevice enabled this uses sd_nvic_SystemReset(); a plain
+// NVIC_SystemReset() from application code is not the supported path and was observed to leave the
+// next boot unresponsive.
+void systemReset();
 
 }  // namespace hal
 }  // namespace om

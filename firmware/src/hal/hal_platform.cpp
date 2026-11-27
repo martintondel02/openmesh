@@ -6,6 +6,8 @@
 #include <Arduino.h>
 #include <nrf.h>
 #include <nrf_gpio.h>
+#include <nrf_nvic.h>
+#include <nrf_sdm.h>
 #include <nrf_soc.h>
 #include <nrfx_rtc.h>
 #include <cstring>
@@ -88,6 +90,17 @@ void fillFromHashChain(uint8_t* out, size_t len) {
 }  // namespace
 
 void setSoftDeviceEnabled(bool enabled) { g_softdevice_enabled = enabled; }
+bool softDeviceEnabled() { return g_softdevice_enabled; }
+
+void systemReset() {
+    if (g_softdevice_enabled) {
+        // Nordic requires the application to reset through the SoftDevice while it is enabled;
+        // a direct NVIC_SystemReset() from app code led to an unresponsive next boot on hardware.
+        sd_nvic_SystemReset();
+        return;
+    }
+    NVIC_SystemReset();
+}
 
 #if defined(ARDUINO_ARCH_NRF52) || defined(NRF52_SERIES)
 
@@ -308,6 +321,8 @@ uint64_t nowMs() {
     return (uint64_t)duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count();
 }
 void setSoftDeviceEnabled(bool) {}
+bool softDeviceEnabled() { return false; }
+void systemReset() {}
 
 void randomBytes(void* ctx, uint8_t* out, size_t len) {
     (void)ctx;

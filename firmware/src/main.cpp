@@ -321,11 +321,7 @@ void handleCompanionMessage(const CompanionMsg& msg) {
         case CompanionType::Reset:
             sendEvent("boot", "reset requested");
             delay(200);
-#if defined(ARDUINO_ARCH_NRF52) || defined(NRF52_SERIES)
-            NVIC_SystemReset();
-#elif defined(ESP32)
-            ESP.restart();
-#endif
+            hal::systemReset();
             break;
         default:
             break;
@@ -499,17 +495,25 @@ void setup() {
     }
 #endif
 #if OM_ENABLE_BLE
-    // Bring the SoftDevice up before the rest of the peripherals. Two reasons: Adafruit's
-    // InternalFS writes go through SoftDevice flash SVCs and are only valid once the SoftDevice is
-    // enabled, and the TinyUSB/SoftDevice hand-off (usb_softdevice_pre_enable/post_enable) is best
-    // done before the companion link is used. This does not remove the one-time USB
-    // re-enumeration the hand-off causes; BLE-on USB stability is still under investigation.
+#if defined(ARDUINO_ARCH_NRF52) || defined(NRF52_SERIES)
+    // nRF52: enable the SoftDevice during setup, but start BLE advertising only after boot (see
+    // loop()). Advertising/connectable radio activity overlapping setup's USB hand-off and the
+    // radio bring-up made the BLE-on images unstable (T1000-E power-on resets, RAK USB
+    // re-enumeration); separating them gives stable USB + BLE on both first articles (verified
+    // 2026-11-27). The SoftDevice also has to be on for InternalFS sd_flash_* writes.
+    {
+        const bool sd_ok = hal::beginSoftDevice();
+        Serial.printf("[om] softdevice=%s (BLE advertised after boot)\n", sd_ok ? "ok" : "ERROR");
+        Serial.flush(); delay(150);
+    }
+#else
     {
         char device_name[24];
         std::snprintf(device_name, sizeof(device_name), "%s", g_board->display_name);
         const bool ble_ok = g_ble.begin(device_name);
         Serial.printf("[om] ble=%s\n", ble_ok ? "ok" : "ERROR"); Serial.flush(); delay(150);
     }
+#endif
 #endif
     hal::initUx(*g_board);
     hal::setLed(true);
@@ -560,6 +564,18 @@ void setup() {
 
 void loop() {
     const uint64_t now = millis();
+#if OM_ENABLE_BLE && (defined(ARDUINO_ARCH_NRF52) || defined(NRF52_SERIES))
+    // Start advertising once the boot-time USB hand-off and radio bring-up have settled.
+    static bool s_ble_started = false;
+    if (!s_ble_started && now >= 5000u) {
+        char device_name[24];
+        std::snprintf(device_name, sizeof(device_name), "%s", g_board->display_name);
+        const bool ble_ok = g_ble.begin(device_name);
+        s_ble_started = true;
+        Serial.printf("[om] ble=%s\n", ble_ok ? "ok" : "ERROR");
+        Serial.flush();
+    }
+#endif
     pollRadio();
     pollCompanion();
     applyRadioConfigIfChanged();

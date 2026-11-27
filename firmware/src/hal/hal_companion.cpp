@@ -59,7 +59,9 @@ namespace {
 BLEUart g_bleuart;
 }
 bool BleTransport::begin(const char* device_name) {
-    const bool sd_ok = Bluefruit.begin();
+    // The SoftDevice may already be enabled (BLE-closed "SD for flash" images, or an early-start
+    // bring-up); only initialise it once and then just configure/advertise.
+    const bool sd_ok = softDeviceEnabled() ? true : Bluefruit.begin();
     setSoftDeviceEnabled(sd_ok);
     Bluefruit.setName(device_name);
     Bluefruit.setTxPower(4);
@@ -192,18 +194,14 @@ bool BleTransport::connected() const { return false; }
 // --- SoftDevice-only bring-up (BLE compiled out) -------------------------------------------
 #if defined(ARDUINO_ARCH_NRF52) || defined(NRF52_SERIES)
 bool beginSoftDevice() {
-#if defined(OM_ENABLE_SOFTDEVICE) && (OM_ENABLE_SOFTDEVICE)
-    // BLE-compiled-out images still need the SoftDevice: Adafruit's InternalFS flash writes go
-    // through sd_flash_* SVCs, which are only valid while the SoftDevice is enabled. Product
-    // (BLE-on) builds enable it via Bluefruit.begin() in BleTransport::begin(); here we only bring
-    // the SoftDevice up and leave BLE closed. The USB/TinyUSB <-> SoftDevice hand-off therefore
-    // happens once, early in setup, in these images too.
+    // Enables the SoftDevice without starting BLE. Used by the BLE-closed images (InternalFS flash
+    // writes go through sd_flash_* SVCs, valid only with the SoftDevice on) and by the late-BLE
+    // bring-up experiment, where advertising starts after boot. The USB/TinyUSB <-> SoftDevice
+    // hand-off happens here, once.
+    if (softDeviceEnabled()) return true;
     const bool ok = Bluefruit.begin();
     setSoftDeviceEnabled(ok);
     return ok;
-#else
-    return false;  // BLE-on builds enable the SoftDevice through BleTransport::begin()
-#endif
 }
 #else
 bool beginSoftDevice() { return false; }

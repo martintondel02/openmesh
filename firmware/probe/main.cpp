@@ -64,6 +64,14 @@ static void runFsWriteTest() {
         std::snprintf(g_fs_msg, sizeof(g_fs_msg), "fs-begin-failed");
         return;
     }
+#if defined(OM_FS_FORMAT)
+    // Factory-reset probe: erase + reformat the InternalFS region so the next application boot has
+    // no identity/store files and exercises the first-boot write path for real.
+    g_fs_stage = 3;
+    InternalFS.format();
+    std::snprintf(g_fs_msg, sizeof(g_fs_msg), "formatted");
+    return;
+#else
     g_fs_stage = 3;
     Adafruit_LittleFS_Namespace::File file(InternalFS);
     if (!file.open("om_fsprobe.bin", Adafruit_LittleFS_Namespace::FILE_O_WRITE)) {
@@ -84,8 +92,9 @@ static void runFsWriteTest() {
         g_fs_stage = 5;
         std::snprintf(g_fs_msg, sizeof(g_fs_msg), "read=%d data=%s", n, buf);
     }
+#endif  // OM_FS_FORMAT
 }
-#endif
+#endif  // OM_FS_WRITE_TEST
 
 void setup() {
     pinMode(LED_BUILTIN, OUTPUT);
