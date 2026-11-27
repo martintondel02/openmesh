@@ -145,6 +145,15 @@ struct Frame {
     bool relayCopy(Frame& out) const;
 };
 
+// True when a frame carries an acknowledgement: either a dedicated Ack frame or a Data frame
+// whose plaintext payload flags carry PAYLOAD_IS_ACK (this is how the core/app encodes resource
+// window ACKs). Diagnostics/prioritisation helper only; no wire-format meaning.
+inline bool isAckFrame(const Frame& frame) {
+    if (frame.type == FrameType::Ack) return true;
+    return frame.type == FrameType::Data && frame.body_len >= 1 &&
+           (frame.body[0] & kPayloadFlagIsAck) != 0;
+}
+
 enum class DecodeError : uint8_t {
     None = 0,
     TooShort,

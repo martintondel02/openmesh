@@ -132,6 +132,7 @@ bool Radio::transmit(const uint8_t* data, size_t len) {
     auto* radio = static_cast<RadioLibRadio*>(radio_);
     if (radio == nullptr || data == nullptr || len > 255) return false;
     const int16_t state = radio->transmit(const_cast<uint8_t*>(data), len);
+    last_tx_error_ = state;
     // Always return to RX so relays keep hearing frames.
     if (!armReceiver()) markUnhealthy((uint32_t)millis());
     return state == RADIOLIB_ERR_NONE;

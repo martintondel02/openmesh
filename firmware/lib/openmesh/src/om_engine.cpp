@@ -23,7 +23,9 @@ constexpr char kStoreFileName[] = "om_store.bin";
 // resource (media) transfer and when the TX queue is already holding work, so the phone's ACKs
 // and app-forwarded frames are never delayed or dropped behind relay copies.
 constexpr uint32_t kCompanionActivityWindowMs = 10000;
-constexpr uint32_t kResourceActiveWindowMs = 10000;
+// Longer than the bridge's paced resource batch interval (~12.22 s) plus jitter: a media transfer
+// keeps relay copies deferred across the gaps between batches.
+constexpr uint32_t kResourceActiveWindowMs = 30000;
 constexpr size_t kRelayBackpressureDepth = 1;
 
 void copyName(char* dst, size_t cap, const char* src, size_t src_len) {
@@ -54,12 +56,14 @@ void u64ToText(uint64_t v, char* out, size_t cap) {
 }  // namespace
 
 // --- Outbox / EventQueue --------------------------------------------------------------------
-bool Outbox::push(const Frame& frame, bool broadcast, const NodeId& peer, bool relay) {
+bool Outbox::push(const Frame& frame, bool broadcast, const NodeId& peer, bool relay,
+                  bool app) {
     if (count_ >= kCapacity) return false;
     items_[count_].frame = frame;
     items_[count_].broadcast = broadcast;
     items_[count_].peer = peer;
     items_[count_].relay = relay;
+    items_[count_].app = app;
     ++count_;
     return true;
 }
@@ -115,6 +119,7 @@ bool Engine::begin(const Identity& identity, const EngineConfig& config, RngFn r
     seq_ = 0;
     companion_active_until_ms_ = 0;
     resource_active_until_ms_ = 0;
+    companion_link_active_ = false;
     wall_valid_ = false;
     power_ = PowerPolicy{};
     battery_ = BatteryReading{};
@@ -195,7 +200,7 @@ bool Engine::queueTx(const Frame& frame, bool broadcast, const NodeId& peer, uin
         return false;
     }
     if (!transmitBudgetOk(len, now_ms)) return false;
-    if (!outbox_.push(frame, broadcast, peer, is_relay)) {
+    if (!outbox_.push(frame, broadcast, peer, is_relay, /*app=*/false)) {
         ++stats_.dropped;
         return false;
     }
@@ -583,7 +588,7 @@ void Engine::maybeRelay(const Frame& frame, uint64_t now_ms) {
     if (!isFloodable(frame.type)) return;
     // Companion-aware best-effort relaying: while the app is active, do not let relay copies
     // compete with the phone's window-ACK frames or with a media transfer in progress.
-    if (companionActive(now_ms) &&
+    if ((companion_link_active_ || companionActive(now_ms)) &&
         (resourceActive(now_ms) || outbox_.size() >= kRelayBackpressureDepth)) {
         ++stats_.relay_deferred;
         return;
@@ -903,6 +908,7 @@ bool Engine::originateFromApp(const uint8_t* frame_bytes, size_t len, uint64_t n
     Frame frame;
     if (!decodeFrame(frame_bytes, len, frame).ok()) return false;
     ++stats_.app_tx_frames;
+    if (isAckFrame(frame)) ++stats_.app_ack_tx_frames;
     stats_.app_tx_airtime_ms += loraAirtimeMs(*config_.profile, len);
     if (frame.type == FrameType::Resource) {
         resource_active_until_ms_ = now_ms + kResourceActiveWindowMs;
@@ -924,7 +930,7 @@ bool Engine::originateFromApp(const uint8_t* frame_bytes, size_t len, uint64_t n
             return false;
         }
     }
-    if (!outbox_.push(frame, true, NodeId::zero(), /*relay=*/false)) {
+    if (!outbox_.push(frame, true, NodeId::zero(), /*relay=*/false, /*app=*/true)) {
         ++stats_.dropped;
         return false;
     }
@@ -936,6 +942,8 @@ bool Engine::originateFromApp(const uint8_t* frame_bytes, size_t len, uint64_t n
 void Engine::noteCompanionActivity(uint64_t now_ms) {
     companion_active_until_ms_ = now_ms + kCompanionActivityWindowMs;
 }
+
+void Engine::setCompanionLinkActive(bool active) { companion_link_active_ = active; }
 
 // --- Periodic -------------------------------------------------------------------------------
 void Engine::tick(uint64_t now_ms) {

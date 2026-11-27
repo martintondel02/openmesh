@@ -1198,11 +1198,12 @@ void test_relay_priority_for_companion_traffic() {
     TEST_ASSERT_EQUAL_UINT32(1, relay->engine->stats().relayed);
     TEST_ASSERT_EQUAL_UINT32(2, relay->engine->stats().relay_deferred);
 
-    // Once the companion/resource windows expire, normal relaying resumes.
+    // Once the companion/resource windows expire (the resource window now spans the bridge's
+    // paced-batch gaps), normal relaying resumes.
     auto other3 = makeNode(0x64, false, false);
     Frame announce3;
-    TEST_ASSERT_TRUE(other3->engine->buildAnnounce(30000, announce3));
-    relay->engine->onFrame(announce3, Link::Lora, -70, 4, 30000);
+    TEST_ASSERT_TRUE(other3->engine->buildAnnounce(50000, announce3));
+    relay->engine->onFrame(announce3, Link::Lora, -70, 4, 50000);
     TEST_ASSERT_EQUAL_UINT32(2, relay->engine->stats().relayed);
     TEST_ASSERT_EQUAL_UINT32(1, (unsigned)relay->engine->outbox().size());
     relay->engine->outbox().clear();
@@ -1217,7 +1218,7 @@ void test_relay_priority_for_companion_traffic() {
         ack.dst = NodeId::broadcast();
         ack.seq = 100 + i;
         ack.body_len = 0;
-        relay->engine->onFrame(ack, Link::Lora, -70, 4, 31000 + i * 100);
+        relay->engine->onFrame(ack, Link::Lora, -70, 4, 52000 + i * 100);
     }
     TEST_ASSERT_EQUAL_UINT32((unsigned)Outbox::kCapacity,
                               (unsigned)relay->engine->outbox().size());
@@ -1225,7 +1226,7 @@ void test_relay_priority_for_companion_traffic() {
     uint8_t encoded[kMtu];
     const size_t encoded_len = encodeAppAnnounceFrame(*relay, 4321, encoded, sizeof(encoded));
     TEST_ASSERT_TRUE(encoded_len > 0);
-    TEST_ASSERT_TRUE(relay->engine->originateFromApp(encoded, encoded_len, 40000));
+    TEST_ASSERT_TRUE(relay->engine->originateFromApp(encoded, encoded_len, 55000));
     TEST_ASSERT_EQUAL_UINT32((unsigned)Outbox::kCapacity,
                               (unsigned)relay->engine->outbox().size());
     TEST_ASSERT_EQUAL_UINT32(1, relay->engine->stats().relay_evicted);
@@ -1236,6 +1237,37 @@ void test_relay_priority_for_companion_traffic() {
         if (!relay->engine->outbox().at(i).relay) app_present = true;
     }
     TEST_ASSERT_TRUE(app_present);
+
+    // Sticky companion link: while an app is attached, relay copies are best-effort even between
+    // paced resource batches. With the activity window lapsed but the link active, a queued frame
+    // makes the next relay copy defer; relaying resumes once the link detaches.
+    relay->engine->outbox().clear();
+    relay->engine->setCompanionLinkActive(true);
+    Frame link_ack1;
+    link_ack1.type = FrameType::Ack;
+    link_ack1.ttl = kDefaultTtl;
+    link_ack1.src = other->id.nodeId();
+    link_ack1.dst = NodeId::broadcast();
+    link_ack1.seq = 200;
+    link_ack1.body_len = 0;
+    const uint32_t relayed_before_link = relay->engine->stats().relayed;
+    relay->engine->onFrame(link_ack1, Link::Lora, -70, 4, 60000);
+    // Outbox was empty at the relay decision: relayed normally even though the link is attached.
+    TEST_ASSERT_EQUAL_UINT32(relayed_before_link + 1, relay->engine->stats().relayed);
+    Frame link_ack2 = link_ack1;
+    link_ack2.seq = 201;
+    const uint32_t def_before = relay->engine->stats().relay_deferred;
+    relay->engine->onFrame(link_ack2, Link::Lora, -70, 4, 60010);
+    // Queue now holds a frame: with the companion link attached the next relay copy is deferred.
+    TEST_ASSERT_EQUAL_UINT32(relayed_before_link + 1, relay->engine->stats().relayed);
+    TEST_ASSERT_EQUAL_UINT32(def_before + 1, relay->engine->stats().relay_deferred);
+    relay->engine->outbox().clear();
+    relay->engine->setCompanionLinkActive(false);
+    Frame link_ack3 = link_ack1;
+    link_ack3.seq = 202;
+    relay->engine->onFrame(link_ack3, Link::Lora, -70, 4, 70000);
+    // Link detached: normal relaying resumes.
+    TEST_ASSERT_EQUAL_UINT32(relayed_before_link + 2, relay->engine->stats().relayed);
 }
 
 void test_engine_channel_position() {

@@ -94,6 +94,11 @@ uint32_t g_radio_tx_ok = 0;
 uint32_t g_radio_tx_fail = 0;
 uint32_t g_tx_encode_fail = 0;
 uint32_t g_companion_decode_fail = 0;  // app->radio companion chunks that failed CBOR/CRC decode
+// App-forwarded acknowledgement TX outcomes (ACK frames carry the phone's window ACKs; these are
+// the frames whose loss stalls media transfers). txfail_logged caps per-frame failure log lines.
+uint32_t g_app_ack_tx_ok = 0;
+uint32_t g_app_ack_tx_fail = 0;
+uint32_t g_txfail_logged = 0;
 
 // True when a companion app is attached and consuming traffic (BLE connected, or a USB host has
 // spoken companion protocol recently). Used to switch relay copies to best-effort mode.
@@ -278,6 +283,38 @@ void drainEvents() {
     }
 }
 
+#if OM_BLE_TX_DIAG
+// Symbolic names for the RadioLib status codes we expect on LoRa TX failures (RadioLib 7.8.1
+// TypeDef.h). Printed with the txfail correlation lines so the bridge log can be interpreted
+// without a lookup table: -5 = TX_TIMEOUT (radio busy / missed IRQ), -7 = CRC_MISMATCH (stale
+// IRQ/chip state rather than a normal TX failure), -2 = CHIP_NOT_FOUND (SPI/hardware).
+const char* radioTxErrorName(int16_t code) {
+    switch (code) {
+        case 0: return "NONE";
+        case -1: return "UNKNOWN";
+        case -2: return "CHIP_NOT_FOUND";
+        case -3: return "MEMORY";
+        case -4: return "PACKET_TOO_LONG";
+        case -5: return "TX_TIMEOUT";
+        case -6: return "RX_TIMEOUT";
+        case -7: return "CRC_MISMATCH";
+        case -8: return "INVALID_BANDWIDTH";
+        case -9: return "INVALID_SPREADING_FACTOR";
+        case -10: return "INVALID_CODING_RATE";
+        case -11: return "INVALID_BIT_RANGE";
+        case -12: return "INVALID_FREQUENCY";
+        case -13: return "INVALID_OUTPUT_POWER";
+        case -16: return "SPI_WRITE_FAILED";
+        case -17: return "INVALID_CURRENT_LIMIT";
+        case -18: return "INVALID_PREAMBLE_LENGTH";
+        case -20: return "WRONG_MODEM";
+        case -25: return "UNSUPPORTED";
+        case -30: return "PACKET_TOO_SHORT";
+        default: return "OTHER";
+    }
+}
+#endif
+
 void drainOutbox() {
     uint8_t encoded[kMtu];
     while (g_engine.outbox().size() > 0) {
@@ -291,6 +328,8 @@ void drainOutbox() {
             }
         }
         const OutFrame& out = g_engine.outbox().at(index);
+        const bool app_frame = out.app;
+        const bool ack_frame = app_frame && isAckFrame(out.frame);
         const size_t len = out.frame.encode(encoded, sizeof(encoded));
         if (len > 0) {
             ++g_radio_tx_attempts;
@@ -298,8 +337,32 @@ void drainOutbox() {
                 // Radio TX failure: the frame is discarded here (no retry). Counted separately from
                 // malformed RX frames so a wedged/refusing transmitter is distinguishable.
                 ++g_radio_tx_fail;
+                if (ack_frame) ++g_app_ack_tx_fail;
+#if OM_BLE_TX_DIAG
+                // Correlate with the bridge's per-frame RX/ACK logs: destination node-id prefix,
+                // seq, ACK msg_ref (body[1..4], plaintext in the sealed-body layout) and the
+                // RadioLib status code (busy/half-duplex vs hardware fault).
+                if (g_txfail_logged < 32) {
+                    ++g_txfail_logged;
+                    uint32_t ack_ref = 0;
+                    if (ack_frame && out.frame.body_len >= 5) {
+                        ack_ref = ((uint32_t)out.frame.body[1] << 24) |
+                                  ((uint32_t)out.frame.body[2] << 16) |
+                                  ((uint32_t)out.frame.body[3] << 8) | (uint32_t)out.frame.body[4];
+                    }
+                    Serial.printf(
+                        "[om] txfail dst=%02X%02X%02X%02X seq=%lu ack=%d ref=0x%08lX "
+                        "err=%d(%s) app=%d txq=%lu at=%lu\n",
+                        out.frame.dst.b[0], out.frame.dst.b[1], out.frame.dst.b[2],
+                        out.frame.dst.b[3], (unsigned long)out.frame.seq, ack_frame ? 1 : 0,
+                        (unsigned long)ack_ref, (int)g_radio.lastTxError(),
+                        radioTxErrorName(g_radio.lastTxError()), app_frame ? 1 : 0,
+                        (unsigned long)g_engine.outbox().size(), (unsigned long)millis());
+                }
+#endif
             } else {
                 ++g_radio_tx_ok;
+                if (ack_frame) ++g_app_ack_tx_ok;
                 g_radio.startReceive();
             }
         } else {
@@ -640,6 +703,11 @@ void loop() {
 #if OM_ENABLE_BLE
     // Drain companion replies/events toward the BLE app at the link's pace (burst-safe queue).
     g_ble.service();
+#endif
+    // Relay copies are best-effort while a companion app is attached (relay priority), including
+    // across the bridge's ~12 s paced-batch gaps.
+    g_engine.setCompanionLinkActive(companionTransportActive());
+#if OM_ENABLE_BLE
 #if OM_BLE_TX_DIAG
     {
         static uint32_t s_ble_stats_ms = 0;
@@ -652,7 +720,8 @@ void loop() {
                 Serial.printf(
                     "[om] ble tx mtu=%u q=%lu peak=%lu sent=%lu fail=%lu drops=%lu drop_bytes=%lu "
                     "rx=%lu fwd=%lu evdrop=%lu relayed=%lu txf=%lu txair=%lu "
-                    "txq=%lu apptx=%lu appair=%lu reldef=%lu relvict=%lu "
+                    "txq=%lu apptx=%lu acktx=%lu acktxok=%lu acktxfail=%lu appair=%lu "
+                    "reldef=%lu relvict=%lu "
                     "txatt=%lu txok=%lu txfail=%lu encfail=%lu slipdrop=%lu blerxdrop=%lu "
                     "decfail=%lu\n",
                     (unsigned)g_ble.mtu(), (unsigned long)g_ble.queuedBytes(),
@@ -667,6 +736,8 @@ void loop() {
                     (unsigned long)g_engine.stats().airtime_ms,
                     (unsigned long)g_engine.outbox().size(),
                     (unsigned long)g_engine.stats().app_tx_frames,
+                    (unsigned long)g_engine.stats().app_ack_tx_frames,
+                    (unsigned long)g_app_ack_tx_ok, (unsigned long)g_app_ack_tx_fail,
                     (unsigned long)g_engine.stats().app_tx_airtime_ms,
                     (unsigned long)g_engine.stats().relay_deferred,
                     (unsigned long)g_engine.stats().relay_evicted,

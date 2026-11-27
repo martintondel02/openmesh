@@ -38,6 +38,9 @@ public:
     uint32_t rearmCount() const { return rearm_count_; }
     uint32_t reinitCount() const { return reinit_count_; }
     void sleep();
+    // RadioLib status code of the last transmit() call (RADIOLIB_ERR_NONE == 0 on success). Lets
+    // the gated TX diagnostics distinguish "radio busy/half-duplex" from a real hardware fault.
+    int16_t lastTxError() const { return last_tx_error_; }
     bool ok() const { return ok_; }
     int16_t lastRssi() const { return last_rssi_; }
     int16_t lastSnr() const { return last_snr_; }
@@ -61,6 +64,7 @@ private:
     bool ok_ = false;
     int16_t last_rssi_ = 0;
     int16_t last_snr_ = 0;
+    int16_t last_tx_error_ = 0;
     // Cached last applied configuration so a wedged transceiver can be re-initialised.
     bool have_config_ = false;
     const LoraProfile* cfg_profile_ = nullptr;

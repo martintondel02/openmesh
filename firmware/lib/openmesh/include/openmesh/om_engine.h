@@ -103,13 +103,15 @@ struct OutFrame {
     // Best-effort managed-flooding copy. App-forwarded and engine-originated frames are not
     // "relay" copies and take priority over relay work when the queue is under pressure.
     bool relay = false;
+    // Frame supplied by the companion app (transmitted unchanged). Used for TX-path diagnostics.
+    bool app = false;
 };
 
 class Outbox {
 public:
     static constexpr size_t kCapacity = OM_OUTBOX_CAPACITY;
     bool push(const Frame& frame, bool broadcast = true, const NodeId& peer = NodeId::zero(),
-              bool relay = false);
+              bool relay = false, bool app = false);
     size_t size() const { return count_; }
     const OutFrame& at(size_t i) const { return items_[i]; }
     void popFront();
@@ -182,6 +184,9 @@ struct EngineStats {
     uint32_t budget_drops = 0;
     // Companion/app-forwarded traffic (frames supplied by the app, transmitted unchanged).
     uint32_t app_tx_frames = 0;
+    // Subset of app_tx_frames that carries an acknowledgement (direct Ack or PAYLOAD_IS_ACK data,
+    // e.g. resource-window ACKs). TX outcomes are tracked by the firmware main loop.
+    uint32_t app_ack_tx_frames = 0;
     uint32_t app_tx_airtime_ms = 0;  // estimated airtime of app frames queued for transmission
     // Relay copies not queued (deferred while companion traffic is active / queue is backed up)
     // or evicted from a full outbox to make room for an app-forwarded frame.
@@ -224,6 +229,11 @@ public:
     // app-forwarded frames and the phone's window ACKs are not starved. Relaying resumes when the
     // companion has been idle for the activity window.
     void noteCompanionActivity(uint64_t now_ms);
+    // Sticky "a companion app is attached right now" flag, refreshed by the firmware loop from the
+    // transport state. Unlike noteCompanionActivity() this does not expire between radio frames:
+    // the bridge paces resource batches ~12 s apart, which is longer than a traffic-recency window,
+    // so relay deferral must key off the attached link, not off the last frame.
+    void setCompanionLinkActive(bool active);
     // Persist the store queue when dirty (rate-limited by the caller). Returns true when saved.
     bool saveStore(uint64_t now_ms);
     // Regulatory/config state persistence (region, profile, overrides, mesh settings). Called
@@ -332,6 +342,7 @@ private:
     // Activity windows for companion-aware relay prioritisation (see noteCompanionActivity).
     uint64_t companion_active_until_ms_ = 0;
     uint64_t resource_active_until_ms_ = 0;
+    bool companion_link_active_ = false;
     RngFn rng_ = nullptr;
     void* rng_ctx_ = nullptr;
     StorageBackend* storage_ = nullptr;
