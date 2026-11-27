@@ -100,15 +100,20 @@ struct OutFrame {
     Frame frame;
     bool broadcast = true;
     NodeId peer{};  // unicast peer when broadcast == false
+    // Best-effort managed-flooding copy. App-forwarded and engine-originated frames are not
+    // "relay" copies and take priority over relay work when the queue is under pressure.
+    bool relay = false;
 };
 
 class Outbox {
 public:
     static constexpr size_t kCapacity = OM_OUTBOX_CAPACITY;
-    bool push(const Frame& frame, bool broadcast = true, const NodeId& peer = NodeId::zero());
+    bool push(const Frame& frame, bool broadcast = true, const NodeId& peer = NodeId::zero(),
+              bool relay = false);
     size_t size() const { return count_; }
     const OutFrame& at(size_t i) const { return items_[i]; }
     void popFront();
+    void removeAt(size_t index);
     void clear() { count_ = 0; }
     bool full() const { return count_ >= kCapacity; }
 
@@ -175,6 +180,13 @@ struct EngineStats {
     uint32_t store_expired = 0;
     uint32_t airtime_ms = 0;
     uint32_t budget_drops = 0;
+    // Companion/app-forwarded traffic (frames supplied by the app, transmitted unchanged).
+    uint32_t app_tx_frames = 0;
+    uint32_t app_tx_airtime_ms = 0;  // estimated airtime of app frames queued for transmission
+    // Relay copies not queued (deferred while companion traffic is active / queue is backed up)
+    // or evicted from a full outbox to make room for an app-forwarded frame.
+    uint32_t relay_deferred = 0;
+    uint32_t relay_evicted = 0;
 };
 
 class Engine {
@@ -206,6 +218,12 @@ public:
     void setBattery(const BatteryReading& reading, uint64_t now_ms);
     // GPS fix from the HAL; may originate a position message when due.
     void setGpsFix(const GpsFix& fix, uint64_t now_ms);
+    // Notes that the companion app link is currently active (frames were just forwarded to the app
+    // over BLE/USB, or the app supplied a frame). While active, relay copies are best-effort: they
+    // are deferred during resource (media) transfers or when the TX queue is backed up, so
+    // app-forwarded frames and the phone's window ACKs are not starved. Relaying resumes when the
+    // companion has been idle for the activity window.
+    void noteCompanionActivity(uint64_t now_ms);
     // Persist the store queue when dirty (rate-limited by the caller). Returns true when saved.
     bool saveStore(uint64_t now_ms);
     // Regulatory/config state persistence (region, profile, overrides, mesh settings). Called
@@ -284,7 +302,10 @@ private:
     void learnPeer(const NodeId& id, const PublicIdentity* ident, const char* name,
                    size_t name_len, NodeClass cls, uint16_t caps, uint8_t hops, int16_t rssi,
                    int16_t snr, uint64_t now_ms);
-    bool queueTx(const Frame& frame, bool broadcast, const NodeId& peer, uint64_t now_ms);
+    bool queueTx(const Frame& frame, bool broadcast, const NodeId& peer, uint64_t now_ms,
+                 bool is_relay = false);
+    bool companionActive(uint64_t now_ms) const { return now_ms < companion_active_until_ms_; }
+    bool resourceActive(uint64_t now_ms) const { return now_ms < resource_active_until_ms_; }
     bool sealAndQueue(Frame& frame, const uint8_t* plaintext, size_t plaintext_len,
                       bool include_identity, const PublicIdentity* direct_peer,
                       int channel_index, uint8_t payload_flags, uint32_t msg_ref,
@@ -308,6 +329,9 @@ private:
 
     Identity identity_{};
     EngineConfig config_{};
+    // Activity windows for companion-aware relay prioritisation (see noteCompanionActivity).
+    uint64_t companion_active_until_ms_ = 0;
+    uint64_t resource_active_until_ms_ = 0;
     RngFn rng_ = nullptr;
     void* rng_ctx_ = nullptr;
     StorageBackend* storage_ = nullptr;

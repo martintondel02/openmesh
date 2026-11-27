@@ -18,6 +18,14 @@ namespace {
 constexpr char kSeqFileName[] = "om_seq.bin";
 constexpr char kStoreFileName[] = "om_store.bin";
 
+// Companion-aware relay prioritisation. While the app link is active (frames have been forwarded
+// to the companion within this window), relay copies are best-effort: they are skipped during a
+// resource (media) transfer and when the TX queue is already holding work, so the phone's ACKs
+// and app-forwarded frames are never delayed or dropped behind relay copies.
+constexpr uint32_t kCompanionActivityWindowMs = 10000;
+constexpr uint32_t kResourceActiveWindowMs = 10000;
+constexpr size_t kRelayBackpressureDepth = 1;
+
 void copyName(char* dst, size_t cap, const char* src, size_t src_len) {
     if (src_len >= cap) src_len = cap - 1;
     if (src_len > 0) std::memcpy(dst, src, src_len);
@@ -46,11 +54,12 @@ void u64ToText(uint64_t v, char* out, size_t cap) {
 }  // namespace
 
 // --- Outbox / EventQueue --------------------------------------------------------------------
-bool Outbox::push(const Frame& frame, bool broadcast, const NodeId& peer) {
+bool Outbox::push(const Frame& frame, bool broadcast, const NodeId& peer, bool relay) {
     if (count_ >= kCapacity) return false;
     items_[count_].frame = frame;
     items_[count_].broadcast = broadcast;
     items_[count_].peer = peer;
+    items_[count_].relay = relay;
     ++count_;
     return true;
 }
@@ -58,6 +67,12 @@ bool Outbox::push(const Frame& frame, bool broadcast, const NodeId& peer) {
 void Outbox::popFront() {
     if (count_ == 0) return;
     for (size_t i = 1; i < count_; ++i) items_[i - 1] = items_[i];
+    --count_;
+}
+
+void Outbox::removeAt(size_t index) {
+    if (index >= count_) return;
+    for (size_t i = index + 1; i < count_; ++i) items_[i - 1] = items_[i];
     --count_;
 }
 
@@ -98,6 +113,8 @@ bool Engine::begin(const Identity& identity, const EngineConfig& config, RngFn r
     std::memset(app_dedup_, 0, sizeof(app_dedup_));
     app_dedup_head_ = 0;
     seq_ = 0;
+    companion_active_until_ms_ = 0;
+    resource_active_until_ms_ = 0;
     wall_valid_ = false;
     power_ = PowerPolicy{};
     battery_ = BatteryReading{};
@@ -153,7 +170,8 @@ bool Engine::transmitBudgetOk(size_t frame_len, uint64_t now_ms) {
     return true;
 }
 
-bool Engine::queueTx(const Frame& frame, bool broadcast, const NodeId& peer, uint64_t now_ms) {
+bool Engine::queueTx(const Frame& frame, bool broadcast, const NodeId& peer, uint64_t now_ms,
+                     bool is_relay) {
     if (!started_ && frame.src == identity_.nodeId()) {
         // Origination before start() is a bug; drop defensively.
         ++stats_.dropped;
@@ -170,8 +188,14 @@ bool Engine::queueTx(const Frame& frame, bool broadcast, const NodeId& peer, uin
         ++stats_.dropped;
         return false;
     }
+    // Best-effort relay copies never consume the last slot: app-forwarded frames must always have
+    // room even if the queue is momentarily full.
+    if (is_relay && outbox_.full()) {
+        ++stats_.relay_deferred;
+        return false;
+    }
     if (!transmitBudgetOk(len, now_ms)) return false;
-    if (!outbox_.push(frame, broadcast, peer)) {
+    if (!outbox_.push(frame, broadcast, peer, is_relay)) {
         ++stats_.dropped;
         return false;
     }
@@ -228,6 +252,11 @@ void Engine::onFrame(const Frame& frame, Link link, int16_t rssi, int16_t snr, u
     if (!dedup_.checkAndInsert(frame.src, frame.seq, now_ms)) {
         ++stats_.duplicates;
         return;
+    }
+    // A resource (media) frame means a transfer is in progress; while the companion app is
+    // active, relay copies are deferred so reception and ACK transmission win the airtime.
+    if (frame.type == FrameType::Resource) {
+        resource_active_until_ms_ = now_ms + kResourceActiveWindowMs;
     }
     const bool for_me = (frame.dst == identity_.nodeId());
     const bool for_my_channel = (channelIndex(frame.dst) >= 0);
@@ -552,9 +581,16 @@ void Engine::maybeRelay(const Frame& frame, uint64_t now_ms) {
     if (!config_.relay_role) return;
     if (frame.ttl == 0) return;
     if (!isFloodable(frame.type)) return;
+    // Companion-aware best-effort relaying: while the app is active, do not let relay copies
+    // compete with the phone's window-ACK frames or with a media transfer in progress.
+    if (companionActive(now_ms) &&
+        (resourceActive(now_ms) || outbox_.size() >= kRelayBackpressureDepth)) {
+        ++stats_.relay_deferred;
+        return;
+    }
     Frame relay;
     if (!frame.relayCopy(relay)) return;
-    if (queueTx(relay, true, NodeId::zero(), now_ms)) ++stats_.relayed;
+    if (queueTx(relay, true, NodeId::zero(), now_ms, /*is_relay=*/true)) ++stats_.relayed;
 }
 
 void Engine::maybeStore(const Frame& frame, uint64_t now_ms) {
@@ -866,13 +902,39 @@ bool Engine::buildStoreWant(const NodeId& to, const StoreWant& want, uint64_t no
 bool Engine::originateFromApp(const uint8_t* frame_bytes, size_t len, uint64_t now_ms) {
     Frame frame;
     if (!decodeFrame(frame_bytes, len, frame).ok()) return false;
-    if (!outbox_.push(frame, true, NodeId::zero())) {
+    ++stats_.app_tx_frames;
+    stats_.app_tx_airtime_ms += loraAirtimeMs(*config_.profile, len);
+    if (frame.type == FrameType::Resource) {
+        resource_active_until_ms_ = now_ms + kResourceActiveWindowMs;
+    }
+    // App-forwarded frames outrank relay copies: when the outbox is full, evict the oldest relay
+    // copy to make room instead of dropping the app's frame (its window ACKs must keep flowing).
+    if (outbox_.full()) {
+        bool evicted = false;
+        for (size_t i = 0; i < outbox_.size(); ++i) {
+            if (outbox_.at(i).relay) {
+                outbox_.removeAt(i);
+                ++stats_.relay_evicted;
+                evicted = true;
+                break;
+            }
+        }
+        if (!evicted) {
+            ++stats_.dropped;
+            return false;
+        }
+    }
+    if (!outbox_.push(frame, true, NodeId::zero(), /*relay=*/false)) {
         ++stats_.dropped;
         return false;
     }
     dedup_.checkAndInsert(frame.src, frame.seq, now_ms);
     ++stats_.tx_frames;
     return true;
+}
+
+void Engine::noteCompanionActivity(uint64_t now_ms) {
+    companion_active_until_ms_ = now_ms + kCompanionActivityWindowMs;
 }
 
 // --- Periodic -------------------------------------------------------------------------------

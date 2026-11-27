@@ -61,6 +61,7 @@ int main(int argc, char** argv) {
     RUN_TEST(test_engine_announce_and_peer_book);
     RUN_TEST(test_engine_direct_message_and_ack);
     RUN_TEST(test_engine_relay_decrements_ttl);
+    RUN_TEST(test_relay_priority_for_companion_traffic);
     RUN_TEST(test_engine_channel_position);
     RUN_TEST(test_engine_store_forward_handshake);
     RUN_TEST(test_engine_config_and_companion_views);

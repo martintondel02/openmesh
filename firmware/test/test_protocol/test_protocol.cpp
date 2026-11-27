@@ -216,6 +216,30 @@ size_t makeAppMessageText(uint32_t id, const char* text, uint8_t* out, size_t ca
     return encodeAppMessage(msg, out, cap);
 }
 
+// Companion Tx payload helper: a signed announce frame owned by `node` (used to exercise the app
+// priority path without touching the radio).
+size_t encodeAppAnnounceFrame(const Node& node, uint32_t seq, uint8_t* out, size_t cap) {
+    Frame frame;
+    frame.type = FrameType::Announce;
+    frame.ttl = kAnnounceTtl;
+    frame.src = node.id.nodeId();
+    frame.dst = NodeId::broadcast();
+    frame.seq = seq;
+    Announce announce;
+    announce.ident = node.id.publicIdentity();
+    uint8_t unsigned_body[kAnnounceBodyLen];
+    const size_t unsigned_len =
+        encodeAnnounceUnsigned(announce, unsigned_body, sizeof(unsigned_body));
+    uint8_t payload[kMtu];
+    const size_t payload_len = announceSignaturePayload(frame.src, frame.seq, unsigned_body,
+                                                         unsigned_len, payload, sizeof(payload));
+    uint8_t signature[kSignatureLen];
+    if (!node.id.sign(payload, payload_len, signature)) return 0;
+    frame.body_len =
+        (uint16_t)encodeAnnounceBody(announce, signature, frame.body, sizeof(frame.body));
+    return frame.encode(out, cap);
+}
+
 Frame makeStoredCandidate(const Identity& from, const NodeId& dst, uint32_t msg_ref,
                           uint32_t seq) {
     Frame frame;
@@ -1136,6 +1160,82 @@ void test_engine_relay_decrements_ttl() {
     relay->engine->onFrame(announce, Link::Lora, -70, 4, 2150);
     TEST_ASSERT_EQUAL_UINT32(1, (unsigned)relay->engine->outbox().size());
     TEST_ASSERT_EQUAL_UINT32(1, relay->engine->stats().duplicates);
+}
+
+void test_relay_priority_for_companion_traffic() {
+    auto relay = makeNode(0x61, true, false);
+    auto other = makeNode(0x62, false, false);
+
+    // Idle: managed-flooding relays still happen normally.
+    Frame announce;
+    TEST_ASSERT_TRUE(other->engine->buildAnnounce(2000, announce));
+    relay->engine->onFrame(announce, Link::Lora, -70, 4, 2100);
+    TEST_ASSERT_EQUAL_UINT32(1, relay->engine->stats().relayed);
+    TEST_ASSERT_EQUAL_UINT32(1, (unsigned)relay->engine->outbox().size());
+    TEST_ASSERT_TRUE(relay->engine->outbox().at(0).relay);
+    relay->engine->outbox().clear();
+
+    // Companion active + a resource (media) frame in flight: relay copies are deferred, so the
+    // phone's ACK TX and reception keep the airtime.
+    relay->engine->noteCompanionActivity(3000);
+    Frame resource;
+    resource.type = FrameType::Resource;
+    resource.ttl = kDefaultTtl;
+    resource.src = other->id.nodeId();
+    resource.dst = NodeId::broadcast();
+    resource.seq = 7;
+    resource.body_len = 0;
+    relay->engine->onFrame(resource, Link::Lora, -70, 4, 3000);
+    TEST_ASSERT_EQUAL_UINT32(1, relay->engine->stats().relayed);  // unchanged
+    TEST_ASSERT_EQUAL_UINT32(1, relay->engine->stats().relay_deferred);
+    TEST_ASSERT_EQUAL_UINT32(0, (unsigned)relay->engine->outbox().size());
+
+    // Any other floodable frame is also deferred while the resource window is active.
+    auto other2 = makeNode(0x63, false, false);
+    Frame announce2;
+    TEST_ASSERT_TRUE(other2->engine->buildAnnounce(3500, announce2));
+    relay->engine->onFrame(announce2, Link::Lora, -70, 4, 3500);
+    TEST_ASSERT_EQUAL_UINT32(1, relay->engine->stats().relayed);
+    TEST_ASSERT_EQUAL_UINT32(2, relay->engine->stats().relay_deferred);
+
+    // Once the companion/resource windows expire, normal relaying resumes.
+    auto other3 = makeNode(0x64, false, false);
+    Frame announce3;
+    TEST_ASSERT_TRUE(other3->engine->buildAnnounce(30000, announce3));
+    relay->engine->onFrame(announce3, Link::Lora, -70, 4, 30000);
+    TEST_ASSERT_EQUAL_UINT32(2, relay->engine->stats().relayed);
+    TEST_ASSERT_EQUAL_UINT32(1, (unsigned)relay->engine->outbox().size());
+    relay->engine->outbox().clear();
+
+    // A full outbox of relay copies must make room for an app-forwarded frame (which jumps the
+    // queue and is never dropped behind relay work).
+    for (uint32_t i = 0; i < Outbox::kCapacity + 2; ++i) {
+        Frame ack;
+        ack.type = FrameType::Ack;
+        ack.ttl = kDefaultTtl;
+        ack.src = other->id.nodeId();
+        ack.dst = NodeId::broadcast();
+        ack.seq = 100 + i;
+        ack.body_len = 0;
+        relay->engine->onFrame(ack, Link::Lora, -70, 4, 31000 + i * 100);
+    }
+    TEST_ASSERT_EQUAL_UINT32((unsigned)Outbox::kCapacity,
+                              (unsigned)relay->engine->outbox().size());
+    TEST_ASSERT_TRUE(relay->engine->stats().relay_deferred >= 2);
+    uint8_t encoded[kMtu];
+    const size_t encoded_len = encodeAppAnnounceFrame(*relay, 4321, encoded, sizeof(encoded));
+    TEST_ASSERT_TRUE(encoded_len > 0);
+    TEST_ASSERT_TRUE(relay->engine->originateFromApp(encoded, encoded_len, 40000));
+    TEST_ASSERT_EQUAL_UINT32((unsigned)Outbox::kCapacity,
+                              (unsigned)relay->engine->outbox().size());
+    TEST_ASSERT_EQUAL_UINT32(1, relay->engine->stats().relay_evicted);
+    TEST_ASSERT_EQUAL_UINT32(1, relay->engine->stats().app_tx_frames);
+    TEST_ASSERT_TRUE(relay->engine->stats().app_tx_airtime_ms > 0);
+    bool app_present = false;
+    for (size_t i = 0; i < relay->engine->outbox().size(); ++i) {
+        if (!relay->engine->outbox().at(i).relay) app_present = true;
+    }
+    TEST_ASSERT_TRUE(app_present);
 }
 
 void test_engine_channel_position() {

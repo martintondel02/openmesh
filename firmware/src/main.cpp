@@ -86,6 +86,13 @@ bool g_button_handled = false;
 uint64_t g_button_down_ms = 0;
 uint32_t g_ble_rx_events_fwd = 0;  // RxFrame events handed to the companion link (BLE+USB)
 
+// True when a companion app is attached and consuming traffic (BLE connected, or a USB host has
+// spoken companion protocol recently). Used to switch relay copies to best-effort mode.
+bool companionTransportActive() {
+    if (g_ble.enabled() && g_ble.connected()) return true;
+    return g_last_usb_ms != 0 && (millis() - g_last_usb_ms) < kCompanionTimeoutMs;
+}
+
 uint32_t deviceUniqueWord(uint32_t index) {
 #if defined(ARDUINO_ARCH_NRF52) || defined(NRF52_SERIES)
     if (index == 0) return NRF_FICR->DEVICEID[0];
@@ -237,6 +244,7 @@ void drainEvents() {
                 msg.at_ms = millis();
                 companionSend(msg);
                 ++g_ble_rx_events_fwd;
+                if (companionTransportActive()) g_engine.noteCompanionActivity(millis());
                 break;
             }
             case EventType::LowBattery:
@@ -264,7 +272,16 @@ void drainEvents() {
 void drainOutbox() {
     uint8_t encoded[kMtu];
     while (g_engine.outbox().size() > 0) {
-        const OutFrame& out = g_engine.outbox().at(0);
+        // App-forwarded frames and the radio's own control frames jump ahead of relay copies:
+        // relay work is best-effort and must never delay the phone's window ACKs.
+        size_t index = 0;
+        for (size_t i = 0; i < g_engine.outbox().size(); ++i) {
+            if (!g_engine.outbox().at(i).relay) {
+                index = i;
+                break;
+            }
+        }
+        const OutFrame& out = g_engine.outbox().at(index);
         const size_t len = out.frame.encode(encoded, sizeof(encoded));
         if (len > 0) {
             if (!g_radio.transmit(encoded, len)) {
@@ -273,7 +290,7 @@ void drainOutbox() {
                 g_radio.startReceive();
             }
         }
-        g_engine.outbox().popFront();
+        g_engine.outbox().removeAt(index);
     }
 }
 
@@ -343,6 +360,7 @@ void pollCompanion() {
         if (g_usb_slip.feed(g_companion_rx[i]) && g_usb_slip.frameValid()) {
             if (decodeCompanionChunk(g_usb_slip.chunk(), g_usb_slip.chunkLen(), g_rx_msg)) {
                 g_last_usb_ms = millis();
+                g_engine.noteCompanionActivity(g_last_usb_ms);
                 handleCompanionMessage(g_rx_msg);
             }
         }
@@ -353,6 +371,7 @@ void pollCompanion() {
             if (g_ble_slip.feed(g_companion_rx[i]) && g_ble_slip.frameValid()) {
                 if (decodeCompanionChunk(g_ble_slip.chunk(), g_ble_slip.chunkLen(), g_rx_msg)) {
                     g_last_ble_ms = millis();
+                    g_engine.noteCompanionActivity(g_last_ble_ms);
                     handleCompanionMessage(g_rx_msg);
                 }
             }
@@ -613,7 +632,8 @@ void loop() {
             if (drop_changed || g_ble.sentChunks() > 0 || g_ble.queuedBytes() > 0) {
                 Serial.printf(
                     "[om] ble tx mtu=%u q=%lu peak=%lu sent=%lu fail=%lu drops=%lu drop_bytes=%lu "
-                    "rx=%lu fwd=%lu evdrop=%lu relayed=%lu txf=%lu txair=%lu\n",
+                    "rx=%lu fwd=%lu evdrop=%lu relayed=%lu txf=%lu txair=%lu "
+                    "txq=%lu apptx=%lu appair=%lu reldef=%lu relvict=%lu\n",
                     (unsigned)g_ble.mtu(), (unsigned long)g_ble.queuedBytes(),
                     (unsigned long)g_ble.peakQueuedBytes(), (unsigned long)g_ble.sentChunks(),
                     (unsigned long)g_ble.notifyFailures(), (unsigned long)ble_drops,
@@ -623,7 +643,12 @@ void loop() {
                     (unsigned long)g_engine.stats().events_dropped,
                     (unsigned long)g_engine.stats().relayed,
                     (unsigned long)g_engine.stats().tx_frames,
-                    (unsigned long)g_engine.stats().airtime_ms);
+                    (unsigned long)g_engine.stats().airtime_ms,
+                    (unsigned long)g_engine.outbox().size(),
+                    (unsigned long)g_engine.stats().app_tx_frames,
+                    (unsigned long)g_engine.stats().app_tx_airtime_ms,
+                    (unsigned long)g_engine.stats().relay_deferred,
+                    (unsigned long)g_engine.stats().relay_evicted);
             }
             s_ble_drops_seen = ble_drops;
         }

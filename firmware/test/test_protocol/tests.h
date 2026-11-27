@@ -48,6 +48,7 @@ void test_resource_blob_roundtrip();
 void test_engine_announce_and_peer_book();
 void test_engine_direct_message_and_ack();
 void test_engine_relay_decrements_ttl();
+void test_relay_priority_for_companion_traffic();
 void test_engine_channel_position();
 void test_engine_store_forward_handshake();
 void test_engine_config_and_companion_views();
