@@ -402,9 +402,17 @@ class BleTransport(
                 setNotificationCallback(tx).with { _, data ->
                     data.value?.let(onData)
                 }
-                enableNotifications(tx).enqueue()
-                requestMtu(247).enqueue()
-                onReady()
+                // Do not raise the ATT MTU: the companion firmware advertises a 23-byte ATT MTU and
+                // caps its TX characteristic at that length, so a larger negotiated MTU makes its
+                // HelloAck/Stats notifications fail. 20-byte chunks are enough for the companion
+                // protocol (and keep transfers working; the firmware MTU can be raised later).
+                // Tell the transport we are ready only once the radio will actually receive our
+                // writes (CCCD written): sending the companion Hello before this made the radio
+                // drop its HelloAck and the app report a handshake timeout.
+                enableNotifications(tx)
+                    .with { _, _ -> onReady() }
+                    .fail { _, status -> Log.w("OpenMeshBle", "enable notifications failed status=$status") }
+                    .enqueue()
             }
 
             override fun onServicesInvalidated() {
