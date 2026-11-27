@@ -366,13 +366,16 @@ their BLE-compiled-out images (`env:t1000e_usb`, `env:rak4631_usb`). Bring-up re
 | RAK startup | **do not** add `-Wl,--defsym=__StackSize=...`: it changes the symbol the Adafruit startup stack-fill loop uses while the linker keeps `__StackLimit`, so the fill runs past the end of RAM and the chip faults before `setup()` (the former 16 KiB "fix" was the RAK blocker; the 2 KiB linker stack is ISR/SoftDevice-only) |
 | Runtime / sleep | `sleepMs()` calls `delay()` (TinyUSB CDC flush + `vTaskDelay`) instead of a busy loop, so the FreeRTOS tickless-idle low-power state is used; direct RTC1/WFE pokes remain forbidden (FreeRTOS/SoftDevice own the clock domain) |
 | Companion stack | the Adafruit loop task has a 4 KiB stack (1024 words); the companion chunk/SLIP/message buffers (≈7.7 KiB worst case) live in file-scope statics in `src/main.cpp`, not on that stack |
-| USB/BLE | **Known issue:** BLE-on images have unstable USB on both first articles. RAK4631 BLE advertising works but its USB CDC does not enumerate reliably; the T1000-E BLE-on image power-cycles this unit. The verified companion/RF images are the BLE-compiled-out envs; coexistence is still open |
+| SoftDevice for flash | with BLE compiled out the SoftDevice is still enabled (`OM_ENABLE_SOFTDEVICE=1` in the `*_usb` envs) because Adafruit `InternalFS` writes use `sd_flash_*` SVCs; `randomBytes()` then uses the SoftDevice RNG application API instead of the SD-owned `NRF_RNG` peripheral |
+| USB/BLE | **Known issue:** BLE-on images have unstable USB on both first articles. RAK4631 BLE advertising works but its USB CDC does not enumerate reliably; the T1000-E BLE-on image power-cycles this unit. The verified companion/RF images keep the SoftDevice on with BLE closed (one expected USB re-enumeration at boot from the SD hand-off, stable afterwards); coexistence is still open |
 | RAM | 16 peers / 16 stored envelopes (the full 2048-entry dedup table is kept) to leave stack headroom next to S140 |
 | Diagnostics | `[env:t1000e_probe]` (`firmware/probe/main.cpp`) is a USB-CDC + LED first-article probe; `[om]` serial markers and short settle delays in `setup()` keep the boot path observable |
 
 Verified on hardware 2026-11-27: build, UF2 (`0xADA52840`) and nrfutil flashing on both boards,
 boot, USB CDC enumeration, USB companion **Ping/Pong + HelloAck + Stats**, `radio=ok`, light sleep
-(uptime and companion stay live), and the two-node RF test
+(uptime and companion stay live), the InternalFS write path used by first-boot identity/store
+writes (`env:t1000e_fswrite` wrote and read back a file with the SoftDevice enabled), and the
+two-node RF test
 ([`tools/two_node_test.py`](tools/two_node_test.py)) passing **A->B and B->A** with advancing
 `tx_frames`/`airtime_ms`/`rx_frames` (EU868 / MEDIUM_FAST / 869525 kHz). BLE advertising works on
 the RAK4631 (host scan sees `RAK WisBlock 4631 solar`), but BLE-on images are not yet viable wired
@@ -381,8 +384,7 @@ companion nodes.
 Current board-by-board state, root causes, diagnostics and next steps are tracked in
 [hardware bring-up status, 2026-11-27](../docs/hardware/bringup-status-2026-11-27.md). Not yet
 verified: BLE/USB coexistence (open, see §4 of that file), the BLE companion handshake
-(Android/host), sleep current and deep sleep, battery calibration, first-boot storage writes on
-BLE-off images, and the other two boards.
+(Android/host), sleep current and deep sleep, battery calibration, and the other two boards.
 
 ## 9. Known issues, limitations and spec gaps
 

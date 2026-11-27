@@ -41,9 +41,9 @@ and gateways only (it needs the larger flash/queue budget and mains/solar power)
 > **First article (2026-11-26/27):** the Seeed T1000-E and RAK WisBlock 4631 now build locally with
 > PlatformIO, flash via UF2/nrfutil, boot, report `radio=ok`, answer the USB companion
 > Ping/Hello/Stats, and pass a two-node RF test in both directions on their BLE-compiled-out images
-> (`t1000e_usb`, `rak4631_usb`). Open issues: USB/BLE coexistence (BLE-on images have unstable USB;
-> BLE advertising itself works on the RAK4631), first-boot storage writes on BLE-off images need a
-> test, sleep current/deep sleep and battery calibration are unmeasured. The other two board
+> (`t1000e_usb`, `rak4631_usb`, SoftDevice on with BLE closed so first-boot flash writes work).
+> Open issues: USB/BLE coexistence (BLE-on images have unstable USB; BLE advertising itself works on
+> the RAK4631), sleep current/deep sleep and battery calibration are unmeasured. The other two board
 > targets still need first-article build/boot checks. Build fixes and the verified/not-yet-verified
 > list live in [firmware/README.md §8.1](../../firmware/README.md); the detailed hand-off state is
 > in [hardware bring-up status, 2026-11-27](bringup-status-2026-11-27.md).

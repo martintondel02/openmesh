@@ -22,8 +22,8 @@ Final verified images (all fixes in this tree):
 
 | Board | Env | Image | Flash path used |
 | --- | --- | --- | --- |
-| T1000-E | `t1000e_usb` | full app, BLE compiled out, light sleep | UF2 family `0xADA52840` copy **and** `pio run -t upload` (1200 bps touch + adafruit-nrfutil) |
-| RAK4631 | `rak4631_usb` | full app, BLE compiled out, light sleep | UF2 family `0xADA52840` copy; adafruit-nrfutil also works when the bootloader is in DFU mode |
+| T1000-E | `t1000e_usb` | full app, BLE closed, SoftDevice enabled (for flash), light sleep | UF2 family `0xADA52840` copy **and** `pio run -t upload` (1200 bps touch + adafruit-nrfutil) |
+| RAK4631 | `rak4631_usb` | full app, BLE closed, SoftDevice enabled (for flash), light sleep | UF2 family `0xADA52840` copy; adafruit-nrfutil also works when the bootloader is in DFU mode |
 
 * Both images print their boot banner and answer the USB companion protocol: `Ping -> Pong`,
   `Hello -> HelloAck`, `Stats` with advancing `uptime_s`.
@@ -131,6 +131,27 @@ UF2=/tmp/pio-core/packages/framework-arduinoadafruitnrf52/tools/uf2conv/uf2conv.
 python3 "$UF2" firmware/.pio/build/<env>/firmware.hex -c -f 0xADA52840 -o image.uf2
 ```
 
+### 2.6 First-boot flash writes — SoftDevice now enabled in the BLE-closed images (fixed)
+
+Adafruit's `InternalFS` routes flash writes through `sd_flash_*` SVCs, which are only valid while
+the SoftDevice is enabled. The previous BLE-compiled-out images left the SoftDevice off, so a
+first-boot identity/store write on a blank board could fault (the linked `SVC_Handler` is
+FreeRTOS's). The verified images now define `OM_ENABLE_SOFTDEVICE=1`: `hal::beginSoftDevice()`
+enables the SoftDevice (without starting BLE) at the top of `setup()`, before `g_storage.begin()`
+and the identity load, and `randomBytes()` switches to the SoftDevice RNG application API when the
+SoftDevice is running instead of touching the SoftDevice-owned `NRF_RNG` peripheral.
+
+Verified on hardware 2026-11-27:
+
+* `env:t1000e_fswrite` (InternalFS write probe, SoftDevice enabled, BLE closed) wrote and
+  read back a file: `FSPROBE stage=5 msg=read=19 data=fsprobe-0123456789`.
+* Both verified images enumerate USB once, take the TinyUSB ↔ SoftDevice hand-off at boot (one
+  extra USB re-enumeration during boot is expected), then stay enumerated: 0 USB disconnects after
+  boot while running the two-node test, and the companion link + RF remain healthy.
+
+A fresh board (erased identity/store) was not physically available to test the full first-boot
+path end to end, but the write mechanism it depends on is now exercised and working.
+
 ---
 
 ## 3. Flashing notes (both boards, no buttons once an app runs)
@@ -166,12 +187,9 @@ the SoftDevice up at the top of `setup()`. This did **not** fix USB coexistence:
   ~2.5 s with `RESETREAS = 0x00000000` (power-on-reset semantics, not a software/watchdog cause),
   which points at supply/brownout on this first-article unit (BLE + LR1110 TX peaks) rather than a
   firmware crash. Needs a charged battery / bench supply and a current measurement to confirm.
-* **Pre-existing hazard to fix before shipping BLE-off images on blank hardware:** in BLE-off
-  builds the SoftDevice is never enabled, but `InternalFS` still routes flash writes through
-  `sd_flash_*` SVCs; the linked `SVC_Handler` is FreeRTOS's, so a first-boot identity/store write on
-  an erased board can fault. All verified runs above used boards that already had identity/storage,
-  so this path was not exercised. Either test it explicitly (erase → flash `*_usb` → reboot twice)
-  or make BLE-on images the shipping default once coexistence is solved.
+* **Resolved in the verified images:** the flash-write hazard that came from running BLE-off images
+  with the SoftDevice disabled is fixed by `OM_ENABLE_SOFTDEVICE=1` (see §2.6). What remains open is
+  only the BLE-on USB instability above.
 
 Until §4 is closed, the **verified** companion/RF images are `t1000e_usb` and `rak4631_usb`.
 
@@ -182,11 +200,12 @@ Until §4 is closed, the **verified** companion/RF images are `t1000e_usb` and `
 | Env | Purpose | State |
 | --- | --- | --- |
 | `t1000e` | product T1000-E with BLE | builds; BLE advertising path exists; USB instability open (§4) |
-| `t1000e_usb` | full app, BLE compiled out, light sleep | **verified: companion + RF, two-node PASS** |
+| `t1000e_usb` | full app, BLE closed, SoftDevice on, light sleep | **verified: companion + RF, two-node PASS** |
 | `t1000e_probe` | USB CDC + LED probe | boots |
+| `t1000e_fswrite` | InternalFS write probe (SoftDevice on, BLE closed) | **verified: writes and reads back a file** |
 | `t1000e_bigprobe` | probe + 300 KiB flash payload (bootloader size test) | builds; superseded by the §2.1 root cause |
 | `rak4631_solar` | product RAK with BLE | builds; BLE advertises, USB unusable (§4) |
-| `rak4631_usb` | full app, BLE compiled out, light sleep | **verified: companion + RF, two-node PASS** |
+| `rak4631_usb` | full app, BLE closed, SoftDevice on, light sleep | **verified: companion + RF, two-node PASS** |
 | `rak4631_early` / `rak4631_trace` / `rak4631_setupmark` | startup diagnostics | obsolete after §2.1 but kept |
 | `rak4631_probe` | USB CDC + LED probe | boots |
 | `rak4631_bigprobe` | probe + 300 KiB flash payload | builds; not needed after §2.1 |
@@ -201,18 +220,20 @@ listed in §6).
 ## 6. Remaining work, in order
 
 1. **BLE/USB coexistence (§4).** Decide the target: (a) fix Adafruit TinyUSB + SoftDevice USB
-   hand-off on S140 6.1.1 (RAK bootloader 0.4.3) and power-cycle behaviour on T1000-E; or
-   (b) upgrade the RAK bootloader/SoftDevice to a newer S140 and re-test; or (c) ship BLE-off
-   images for wired companion use and treat BLE as a separate transport build. Measure current
-   with a charged battery/bench supply.
-2. **Flash-write hazard on BLE-off images** (§4 last bullet): erase → flash → reboot-twice test, or
-   enable the SoftDevice in BLE-off builds (lightweight "SD for flash + USB, BLE closed" mode).
-3. **Deep sleep / power budget.** Keep the receiver on continuously today; implement radio
+   hand-off on S140 6.1.1 (RAK bootloader 0.4.3) and the power/advertising behaviour on T1000-E; or
+   (b) upgrade the RAK bootloader/SoftDevice to a newer S140 and re-test; or (c) ship the verified
+   BLE-closed images for wired companion use and treat BLE as a separate transport build. Measure
+   current with a charged battery/bench supply. Hint from this session: enabling the SoftDevice
+   with BLE closed is stable on both boards (USB stays up after the one-time boot hand-off), so
+   the T1000-E BLE-on resets are likely drawn by BLE advertising/radio activity rather than by the
+   hand-off itself; starting BLE advertising *after* boot (SoftDevice already enabled) is worth
+   testing as the next coexistence experiment.
+2. **Deep sleep / power budget.** Keep the receiver on continuously today; implement radio
    RX windows and measure current. The scheduler and `PowerPolicy` already emit low-power hints.
    Battery/ADC calibration and GNSS date/time remain as before (§9 in `firmware/README.md`).
-4. **Other boards** (Seeed Solar Node P1, Heltec Wireless Tracker) still need first-article
+3. **Other boards** (Seeed Solar Node P1, Heltec Wireless Tracker) still need first-article
    build/boot checks.
-5. Android BLE companion handshake and the BLE NUS companion path on nRF52.
+4. Android BLE companion handshake and the BLE NUS companion path on nRF52.
 
 Do not release or tag until the BLE/USB question is settled and the user has reviewed the
 bring-up diff.
@@ -228,6 +249,7 @@ export PATH=/tmp/pioenv/bin:$PATH
 export PLATFORMIO_CORE_DIR=/tmp/pio-core
 pio run -d firmware -e t1000e_usb
 pio run -d firmware -e rak4631_usb
+pio run -d firmware -e t1000e_fswrite   # InternalFS write probe (diagnostic)
 pio run -d firmware -e <env> -t upload --upload-port /dev/ttyACMx   # from a running app
 python3 firmware/tools/two_node_test.py /dev/ttyACM0 /dev/ttyACM1   # needs pyserial + cbor2
 cd firmware && ./ci/host_tests.sh
