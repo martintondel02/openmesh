@@ -370,13 +370,18 @@ Phone (Android app, installed):
 2. **Radio → BLE** → connect to `OpenMesh T1000-E` (the app only lists radio names starting with
    `OpenMesh`; no pairing button is needed — the NUS characteristics are open).
 3. **Channels → Join with invite** → paste the `openmesh://channel?...` URL from the web client.
-4. **Exchange contacts (required for signed group messages).** The bridge drops signed group
-   messages from identities it does not know ("group message from unknown signer"). Import the
-   phone's contact invite into the bridge (`POST /api/contacts` with `node_id`, `name`,
-   `identity` — the app shows the invite under Contacts → My QR; the QR payload is
-   `openmesh://contact?node_id=…&name=…&identity=…`). The app learned the bridge identity from its
-   announce in the verified run; if replies are dropped, import the bridge contact into the app the
-   same way.
+4. **Exchange contacts in both directions (required for signed messages).**
+   * Phone → bridge: import the phone's contact invite into the bridge (`POST /api/contacts` with
+     `node_id`, `name`, `identity`; the app shows it under Contacts → My QR).
+   * Bridge → phone: import the bridge's contact invite into the app (Contacts → Paste link). Get
+     it from the bridge with WS `contact_qr` using the bridge's own node id, or from the web
+     contact/invite surface; the URL is `openmesh://contact?node_id=…&name=…&identity=…`.
+     Without this the app can show the PC's messages while it remembers the PC's announce, then
+     silently drop them after an app restart until the next bridge announce (the bridge announces
+     on start and on its 30 min interval). Verified 2026-11-27: after adding the bridge contact,
+     PC replies arrived after an app restart with no announce needed.
+   Note: the bridge emits `node_id=` (the app/web spelling); older `node=` links are still accepted
+   by the bridge parser.
 5. Send a message on the channel; it should appear in the web client, and a web reply should arrive
    on the phone. Expected timing is one LoRa hop (~0.5 s airtime) plus USB/bridge processing.
 

@@ -2120,7 +2120,7 @@ pub fn sync_messages(store: &Store, since_ms: u64) -> Result<Vec<StoredMessage>>
 
 pub fn contact_url(ident: &PublicIdentity, name: &str) -> String {
     format!(
-        "openmesh://contact?node={}&name={}&identity={}",
+        "openmesh://contact?node_id={}&name={}&identity={}",
         ident.node_id.to_hex(),
         url_encode(name),
         base64_url(ident.to_bytes().as_slice())
@@ -2206,10 +2206,17 @@ pub fn parse_channel_url(url: &str) -> Option<(String, [u8; 32])> {
     Some((name, psk))
 }
 
-/// Parse `openmesh://contact?node=...&identity=...&name=...`.
+/// Parse `openmesh://contact?node_id=...&identity=...&name=...`.
+///
+/// `node_id` is the canonical parameter (web client and Android app use it); the older `node=`
+/// spelling, and `id=`, are accepted for compatibility with existing links.
 pub fn parse_contact_url(url: &str) -> Option<(NodeId, Option<String>, PublicIdentity)> {
     let params = parse_url_query(url, "openmesh://contact")?;
-    let node = parse_node_id(params.get("node")?)?;
+    let node_hex = params
+        .get("node_id")
+        .or_else(|| params.get("node"))
+        .or_else(|| params.get("id"))?;
+    let node = parse_node_id(node_hex)?;
     let identity = PublicIdentity::from_bytes(&b64_decode_any(params.get("identity")?)?).ok()?;
     if identity.node_id != node {
         return None;
@@ -2462,6 +2469,7 @@ pub fn build_snapshot(input: SnapshotInput<'_>) -> Snapshot {
         name: config.name.clone(),
         class: node_class_str(config.node_class()).to_string(),
         caps: engine.config().caps,
+        public_key: Some(crate::json::identity_to_b64(&engine.public_identity())),
     };
     let radios: Vec<RadioJson> = visible_transports
         .iter()
@@ -2713,5 +2721,30 @@ mod radio_state_tests {
         ] {
             assert_eq!(summary.as_str(), expected);
         }
+    }
+}
+
+
+#[cfg(test)]
+mod contact_url_format_tests {
+    use super::*;
+
+    fn identity() -> PublicIdentity {
+        openmesh_core::Identity::from_seed(&[7u8; 32]).public()
+    }
+
+    #[test]
+    fn contact_url_uses_node_id_and_parses_aliases() {
+        let ident = identity();
+        let url = contact_url(&ident, "PC Bridge");
+        assert!(url.starts_with("openmesh://contact?node_id="), "{url}");
+        let parsed = parse_contact_url(&url).expect("canonical url parses");
+        assert_eq!(parsed.0, ident.node_id);
+        assert_eq!(parsed.1.as_deref(), Some("PC Bridge"));
+
+        // Legacy links from earlier bridge versions used `node=`; keep accepting them.
+        let legacy = url.replace("node_id=", "node=");
+        let parsed = parse_contact_url(&legacy).expect("legacy url parses");
+        assert_eq!(parsed.0, ident.node_id);
     }
 }

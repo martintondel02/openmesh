@@ -12,7 +12,7 @@ contact actually proves.
   key. It identifies you on the wire and is what peers see.
 * **Public identity** — the full public key bundle (72 bytes, base64 in JSON/QR) used by others to
   encrypt to you and verify your signatures.
-* **Contact invite** — `openmesh://contact?node=…&name=…&identity=…`; it carries only public data,
+* **Contact invite** — `openmesh://contact?node_id=…&name=…&identity=…`; it carries only public data,
   safe to share.
 * **Contact** — someone you saved with their public identity. Direct messages are sealed to that
   key, so only they can read them.

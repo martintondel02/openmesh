@@ -308,6 +308,14 @@ async fn websocket_sync_create_channel_and_send_group_message() {
     assert_eq!(hello["v"], 1);
     assert_eq!(hello["data"]["protocol"], "omp/1");
     assert!(hello["data"]["node"]["node_id"].is_string());
+    // The bridge advertises its own public identity so clients can add it as a contact.
+    assert_eq!(
+        hello["data"]["node"]["public_key"]
+            .as_str()
+            .map(str::len)
+            .unwrap_or(0),
+        96
+    );
     assert!(hello["data"]["radios"].is_array());
     assert!(
         hello["data"]["features"]
@@ -904,11 +912,16 @@ async fn ws_roundtrip(
 async fn websocket_commands_cover_documented_surface() {
     let test = start_bridge().await;
     let mut ws = ws_connect(test.addr, TEST_TOKEN).await;
+    let hello = next_json(&mut ws, Duration::from_secs(5))
+        .await
+        .expect("hello");
+    assert_eq!(hello["type"], "hello");
+    // The bridge advertises its own 72-byte public identity (base64) so clients can add it as a
+    // contact and keep verifying its signed messages across client restarts.
+    let self_id = hello["data"]["node"]["node_id"].as_str().unwrap().to_string();
     assert_eq!(
-        next_json(&mut ws, Duration::from_secs(5))
-            .await
-            .expect("hello")["type"],
-        "hello"
+        hello["data"]["node"]["public_key"].as_str().map(str::len).unwrap_or(0),
+        96
     );
 
     // Seed the sync history so mark_read/retry have real message ids.
@@ -1044,6 +1057,19 @@ async fn websocket_commands_cover_documented_surface() {
             .unwrap()
             .starts_with("openmesh://contact?")
     );
+
+    // 4.3b contact_qr for the bridge's own node returns its self invite.
+    let self_qr = ws_roundtrip(
+        &mut ws,
+        "contact_qr",
+        json!({"node_id": self_id}),
+        "qr2",
+        "contact_url",
+    )
+    .await;
+    let self_url = self_qr["data"]["url"].as_str().unwrap_or_default();
+    assert!(self_url.starts_with("openmesh://contact?"), "{self_url}");
+    assert!(self_url.contains(&self_id), "{self_url}");
 
     // 4.4 channel_invite -> openmesh:// channel URL.
     let channels = raw_http(

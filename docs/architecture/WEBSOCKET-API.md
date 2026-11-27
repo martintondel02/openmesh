@@ -284,7 +284,7 @@ The server replies with a sequence of `node`, `message`, `group_message`, `confi
 | `add_contact` | `{ "node_id": "...", "name": "Alice", "identity": "<base64 72B>", "verify_key": true }` |
 | `remove_contact` | `{ "node_id": "..." }` |
 | `get_contacts` | `{}` → replies `contacts` event `{ "contacts": [ { "node_id","name","identity","last_seen_ms" } ] }` |
-| `contact_qr` | `{ "node_id": "..." }` → `contact_url` event with `openmesh://contact?...` |
+| `contact_qr` | `{ "node_id": "..." }` → `contact_url` event with `openmesh://contact?node_id=...` |
 
 ### 4.4 Channels
 

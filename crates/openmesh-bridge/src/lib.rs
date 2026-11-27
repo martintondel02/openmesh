@@ -462,6 +462,8 @@ impl Bridge {
             name: String::new(),
             class: "client".to_string(),
             caps: 0,
+            // Lightweight summary on the handle; the live snapshot fills the real identity.
+            public_key: None,
         }
     }
 

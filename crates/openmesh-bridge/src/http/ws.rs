@@ -559,6 +559,18 @@ struct NodeIdData {
 
 async fn contact_qr_url(state: &Arc<HttpState>, node_id: &str) -> Option<String> {
     let node = parse_node_id(node_id)?;
+    // The bridge's own node is not in its own peers/contacts maps, but clients need its contact
+    // invite to add the bridge as a contact (so its signed messages survive client restarts).
+    {
+        let snapshot = state.shared.snapshot.read().await;
+        if snapshot.node.node_id == node_id {
+            if let Some(public_key) = snapshot.node.public_key.as_deref() {
+                if let Some(ident) = identity_from_b64(public_key) {
+                    return Some(runtime::contact_url(&ident, &snapshot.node.name));
+                }
+            }
+        }
+    }
     if let Ok(Some(contact)) = state.shared.store.get_contact(node) {
         if let Some(ident) = contact.ident() {
             return Some(runtime::contact_url(

@@ -292,6 +292,9 @@ pub struct NodeSelfJson {
     pub name: String,
     pub class: String,
     pub caps: u16,
+    /// The bridge's own 72-byte public identity (base64), or `null` when unavailable.
+    /// Clients use it to add the bridge as a contact (see WEBSOCKET-API.md §2 `hello`).
+    pub public_key: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
