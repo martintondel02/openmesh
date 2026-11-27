@@ -122,6 +122,15 @@ interface EngineBridge {
     /** Apply a partial config patch (FFI field names, e.g. `{"profile":"LONG_FAST"}`). */
     fun setConfig(patch: String)
 
+    /**
+     * Duty-aware resource upload pacing hint from the core (ms per chunk window). Returns null
+     * when the helper is unavailable (demo engine / older FFI); callers then keep the core default.
+     */
+    fun resourcePaceIntervalMs(profile: String, region: String, batch: Int = 2): Long? = null
+
+    /** Store the upload pacing hint on this engine instance (no-op when unsupported). */
+    fun setResourcePaceIntervalMs(ms: Long) {}
+
     /** Feed one complete OMP frame from the radio; any resulting outbound frames are emitted. */
     fun ingestFrame(frame: ByteArray, nowMs: Long = System.currentTimeMillis()): Result<Unit>
 
@@ -230,6 +239,19 @@ class UniFfiEngineBridge : EngineBridge {
 
     override fun setConfig(patch: String) {
         withNode { it.setConfig(patch) }
+    }
+
+    override fun resourcePaceIntervalMs(profile: String, region: String, batch: Int): Long? =
+        runCatching {
+            uniffi.openmesh_ffi.openmeshResourcePaceIntervalMs(
+                profile = profile,
+                region = region,
+                batch = batch.coerceIn(1, 32).toUShort(),
+            ).toLong()
+        }.getOrNull()
+
+    override fun setResourcePaceIntervalMs(ms: Long) {
+        withNode { it.setResourcePaceIntervalMs(ms.coerceAtLeast(1L).toULong()) }
     }
 
     private inline fun <T> withNode(block: (OpenMeshNode) -> T): T? {

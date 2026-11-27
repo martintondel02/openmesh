@@ -74,6 +74,10 @@ import org.openmesh.android.data.transport.RadioHealthPolicy
 import org.openmesh.android.data.transport.RadioPhase
 import org.openmesh.android.data.transport.UsbSerialTransport
 import org.openmesh.android.media.MediaMath
+import org.openmesh.android.media.OutgoingMediaPolicy
+import org.openmesh.android.media.OutgoingMediaSnapshot
+import org.openmesh.android.media.OutgoingMediaUi
+import org.openmesh.android.media.OutgoingMediaUiState
 import org.openmesh.android.ui.people.DeliveryPresentation
 import org.openmesh.android.ui.people.NamePolicy
 import org.openmesh.android.media.MediaTierLoader
@@ -151,6 +155,12 @@ class MeshRepository(
 
     private val _uiEvents = MutableSharedFlow<UiEvent>(extraBufferCapacity = 32)
     val uiEvents: SharedFlow<UiEvent> = _uiEvents.asSharedFlow()
+
+    // ---- Outgoing media upload tracking (in-memory only; progress is not persisted). ----
+    private val _outgoingMedia = MutableStateFlow<Map<Long, OutgoingMediaSnapshot>>(emptyMap())
+    val outgoingMedia: StateFlow<Map<Long, OutgoingMediaSnapshot>> = _outgoingMedia.asStateFlow()
+    private val _outgoingMediaUi = MutableStateFlow<Map<Long, OutgoingMediaUi>>(emptyMap())
+    val outgoingMediaUi: StateFlow<Map<Long, OutgoingMediaUi>> = _outgoingMediaUi.asStateFlow()
 
     val helpTopics: List<HelpTopicMeta> get() = help.topics
 
@@ -236,6 +246,13 @@ class MeshRepository(
                 if (health != current.health) _radio.value = current.copy(health = health)
             }
         }
+        // Re-evaluate upload health once a second so stalled uploads flip to "Upload stalled — retry".
+        scope.launch {
+            while (isActive) {
+                delay(1_000)
+                refreshOutgoingMediaUi()
+            }
+        }
         // Flush locally queued messages whenever a link becomes READY (connect or reconnect).
         scope.launch {
             _radio.map { it.phase }.distinctUntilChanged().collect { phase ->
@@ -273,7 +290,38 @@ class MeshRepository(
         _nodes.value = dao.nodes().map { it.toModel() }
         _messages.value = direct.groupBy { it.peerId }.mapValues { (_, list) -> list.sortedBy { it.sentAtMs } }
         _channelMessages.value = channelMsgs.groupBy { it.peerId }.mapValues { (_, list) -> list.sortedBy { it.sentAtMs } }
+        seedOutgoingMedia(direct, channelMsgs, channelIds)
         rebuildConversations()
+    }
+
+    /**
+     * After a restart the engine no longer reports progress for a transfer it lost. Seed a tracker
+     * for every outgoing attachment still marked SENT so the stall detector can surface it and the
+     * user can retry instead of watching "Sent" forever.
+     */
+    private fun seedOutgoingMedia(
+        direct: List<Message>,
+        channelMsgs: List<Message>,
+        channelIds: Set<String>,
+    ) {
+        val seeded = LinkedHashMap<Long, OutgoingMediaSnapshot>()
+        fun add(list: List<Message>, isChannel: Boolean) {
+            list.filter { it.outgoing && it.kind == MessageKind.ATTACHMENT && it.delivery == DeliveryState.SENT }
+                .forEach { message ->
+                    val attachment = message.attachment ?: return@forEach
+                    seeded[message.id] = OutgoingMediaPolicy.initial(
+                        isChannel = isChannel,
+                        mime = attachment.mime,
+                        sizeBytes = attachment.sizeBytes,
+                        sentAtMs = message.sentAtMs,
+                        expectedWindowMs = expectedMediaWindowMs(attachment.sizeBytes),
+                    )
+                }
+        }
+        add(direct.filter { it.peerId !in channelIds }, false)
+        add(channelMsgs, true)
+        _outgoingMedia.value = seeded
+        refreshOutgoingMediaUi()
     }
 
     private fun seedDemo() {
@@ -387,6 +435,7 @@ class MeshRepository(
                 delay(250)
             }
         }
+        applyResourcePaceHint()
         runCatching { engine.announce(System.currentTimeMillis()) }
         if (saved.demoMode) seedDemo()
         _engineReady.value = true
@@ -538,11 +587,12 @@ class MeshRepository(
                 sizeBytes = data.size,
                 durationMs = durationMs?.toInt(),
                 name = name,
-                progress = 1f,
+                progress = 0f,
             ),
         )
         appendMessage(peerId, message, channel)
         scope.launch { dao.upsertMessage(MessageEntity.fromModel(message)) }
+        trackOutgoingMedia(message, channel)
         if (engine.isDemo()) simulateAck(peerId, id, channel)
         // Keep the local file reference for playback/retry.
         local.absolutePath
@@ -734,7 +784,7 @@ class MeshRepository(
                 sizeBytes = queued.attachmentBytes,
                 durationMs = queued.attachmentDurationMs?.toInt(),
                 name = queued.attachmentName,
-                progress = 1f,
+                progress = 0f,
             )
         }
         // Replace the temporary negative-id bubble with the real engine-id message.
@@ -752,6 +802,7 @@ class MeshRepository(
             attachment = attachment,
         )
         appendMessage(queued.peerId, message, queued.channel)
+        trackOutgoingMedia(message, queued.channel)
         scope.launch {
             dao.deleteMessage(queued.localId)
             dao.upsertMessage(MessageEntity.fromModel(message))
@@ -836,6 +887,25 @@ class MeshRepository(
     private fun attachmentsDir(): File = File(appContext.filesDir, "attachments").apply { mkdirs() }
 
     private fun simulateAck(peerId: String, id: Long, channel: Boolean) {
+        val isAttachment = findMessageWithThread(id)?.third?.attachment != null
+        if (isAttachment) {
+            // Demo mode simulates an upload window so the progress/stall UI can be reviewed.
+            scope.launch {
+                delay(400)
+                noteOutgoingMediaActivity(id, 1, 8)
+                delay(600)
+                noteOutgoingMediaActivity(id, 3, 8)
+                delay(700)
+                noteOutgoingMediaActivity(id, 5, 8)
+                delay(600)
+                noteOutgoingMediaActivity(id, 7, 8)
+                delay(500)
+                updateDeliveryAnywhere(id, DeliveryState.DELIVERED, channel)
+                delay(1500)
+                if (!channel) updateDeliveryAnywhere(id, DeliveryState.READ, channel)
+            }
+            return
+        }
         scope.launch {
             delay(800)
             updateDeliveryAnywhere(id, DeliveryState.SENT, channel)
@@ -896,7 +966,11 @@ class MeshRepository(
     private fun updateDeliveryAnywhere(id: Long, state: DeliveryState, channel: Boolean?) {
         fun applyTo(message: Message): Message =
             if (message.id == id && DeliveryPresentation.isUpgrade(message.delivery, state)) {
-                message.copy(delivery = state)
+                val completed = state == DeliveryState.DELIVERED || state == DeliveryState.READ
+                message.copy(
+                    delivery = state,
+                    attachment = if (completed) message.attachment?.copy(progress = 1f) else message.attachment,
+                )
             } else {
                 message
             }
@@ -905,6 +979,9 @@ class MeshRepository(
         _messages.value = mapThreads(_messages.value)
         _channelMessages.value = mapThreads(_channelMessages.value)
         rebuildConversations()
+        if (state == DeliveryState.DELIVERED || state == DeliveryState.READ || state == DeliveryState.FAILED) {
+            clearOutgoingMedia(id)
+        }
         scope.launch {
             val entity = dao.messages().firstOrNull { it.id == id } ?: return@launch
             val current = runCatching { DeliveryState.valueOf(entity.delivery) }
@@ -915,6 +992,199 @@ class MeshRepository(
                 dao.updateDelivery(id, state.name, entity.read)
             }
         }
+    }
+
+    // ---------------------------------------------------------------- resource pacing
+
+    /**
+     * Ask the core for the duty-aware upload pace for the active profile/region and apply it to the
+     * engine instance. The core paces resource chunks by wall time, so this is what keeps a fast
+     * phone tick from overflowing the radio's companion path. Falls back to the core default when
+     * the helper is unavailable (demo/older FFI).
+     */
+    private fun applyResourcePaceHint() {
+        val settings = _settings.value
+        val pace = runCatching {
+            engine.resourcePaceIntervalMs(settings.profile, settings.region, batch = 2)
+        }.getOrNull()
+        if (pace != null && pace > 0L) {
+            runCatching { engine.setResourcePaceIntervalMs(pace) }
+            MeshLog.i(
+                "resource pace: profile=${settings.profile} region=${settings.region} batch=2 -> ${pace}ms",
+            )
+        } else {
+            MeshLog.i("resource pace: helper unavailable; keeping core default")
+        }
+    }
+
+    // ---------------------------------------------------------------- outgoing media uploads
+
+    private fun expectedMediaWindowMs(sizeBytes: Int): Long =
+        runCatching { estimateMedia(sizeBytes).wallClockMs }.getOrDefault(0L)
+
+    private fun trackOutgoingMedia(message: Message, channel: Boolean) {
+        val attachment = message.attachment ?: return
+        if (!message.outgoing || message.kind != MessageKind.ATTACHMENT) return
+        val existing = _outgoingMedia.value[message.id]
+        _outgoingMedia.value = _outgoingMedia.value + (
+            message.id to OutgoingMediaPolicy.initial(
+                isChannel = channel,
+                mime = attachment.mime,
+                sizeBytes = attachment.sizeBytes,
+                sentAtMs = message.sentAtMs,
+                expectedWindowMs = expectedMediaWindowMs(attachment.sizeBytes),
+            ).copy(attempts = existing?.attempts ?: 1)
+            )
+        refreshOutgoingMediaUi()
+    }
+
+    private fun noteOutgoingMediaActivity(messageId: Long, received: Int, total: Int) {
+        val snapshot = _outgoingMedia.value[messageId] ?: return
+        val progress = received.toFloat() / total.coerceAtLeast(1)
+        _outgoingMedia.value = _outgoingMedia.value + (
+            messageId to snapshot.copy(
+                progress = progress,
+                lastActivityMs = System.currentTimeMillis(),
+            )
+            )
+        refreshOutgoingMediaUi()
+    }
+
+    private fun clearOutgoingMedia(messageId: Long) {
+        if (!_outgoingMedia.value.containsKey(messageId)) return
+        _outgoingMedia.value = _outgoingMedia.value - messageId
+        refreshOutgoingMediaUi()
+    }
+
+    private fun refreshOutgoingMediaUi() {
+        val now = System.currentTimeMillis()
+        val next = _outgoingMedia.value.mapValues { (_, snapshot) ->
+            OutgoingMediaPolicy.uiState(snapshot, now)
+        }
+        if (next != _outgoingMediaUi.value) _outgoingMediaUi.value = next
+    }
+
+    /**
+     * Retry a stalled/failed outgoing attachment without duplicating its row.
+     *
+     * The core's `retry_message` only retransmits a still-pending *announcing message*; it cannot
+     * restart a stalled resource transfer. So this path re-sends the stored bytes through the normal
+     * attachment API as a new attempt and atomically replaces the old local row (delete old id +
+     * insert the new engine id) so the user still sees exactly one bubble. Message-id semantics on
+     * the wire are unchanged; only this local row's technical id moves to the new attempt.
+     */
+    fun retryUpload(messageId: Long) {
+        val found = findMessageWithThread(messageId) ?: return
+        val (peerId, channel, message) = found
+        if (!message.outgoing || message.kind != MessageKind.ATTACHMENT) return
+        if (message.delivery == DeliveryState.DELIVERED || message.delivery == DeliveryState.READ) return
+        if (shouldQueueLocally()) {
+            _uiEvents.tryEmit(UiEvent.Snackbar("Connect a radio to retry this upload."))
+            return
+        }
+        val attachment = message.attachment ?: return
+        val file = attachmentFile(attachment.id)?.takeIf { it.isFile }
+        if (file == null) {
+            _uiEvents.tryEmit(UiEvent.Snackbar("The attachment file is not on this phone, so it can't be retried."))
+            return
+        }
+        val now = System.currentTimeMillis()
+        val previous = _outgoingMedia.value[messageId]
+            ?: OutgoingMediaPolicy.initial(
+                isChannel = channel,
+                mime = attachment.mime,
+                sizeBytes = attachment.sizeBytes,
+                sentAtMs = message.sentAtMs,
+                expectedWindowMs = expectedMediaWindowMs(attachment.sizeBytes),
+            )
+        _outgoingMedia.value = _outgoingMedia.value + (
+            messageId to OutgoingMediaPolicy.retried(previous, now)
+            )
+        refreshOutgoingMediaUi()
+        updateDeliveryAnywhere(messageId, DeliveryState.SENT, channel)
+        _uiEvents.tryEmit(UiEvent.Snackbar("Retrying upload — starting a fresh attempt."))
+        scope.launch {
+            val bytes = runCatching { file.readBytes() }.getOrNull()
+            if (bytes == null) {
+                _uiEvents.tryEmit(UiEvent.Snackbar("Could not read the attachment file; retry failed."))
+                clearOutgoingMedia(messageId)
+                return@launch
+            }
+            val target = if (channel) Target.Channel(peerId) else Target.Direct(peerId)
+            engine.sendAttachment(
+                target = target,
+                mime = attachment.mime,
+                filename = attachment.name,
+                data = bytes,
+                durationMs = attachment.durationMs?.toLong(),
+            ).onSuccess { newId ->
+                replaceMessageForRetry(peerId, channel, message, bytes, newId)
+            }.onFailure { error ->
+                MeshLog.w("retry upload failed id=$messageId: ${error.message}")
+                updateDeliveryAnywhere(messageId, DeliveryState.FAILED, channel)
+                clearOutgoingMedia(messageId)
+                _uiEvents.tryEmit(UiEvent.Error("Retry failed: ${error.message ?: "radio busy"}"))
+            }
+        }
+    }
+
+    private fun replaceMessageForRetry(
+        peerId: String,
+        channel: Boolean,
+        old: Message,
+        bytes: ByteArray,
+        newId: Long,
+    ) {
+        if (newId == old.id) return
+        val now = System.currentTimeMillis()
+        val oldAttachmentId = old.attachment?.id
+        val newFile = File(attachmentsDir(), "att_$newId")
+        val written = runCatching { newFile.writeBytes(bytes) }.isSuccess
+        val attachment = old.attachment?.copy(
+            id = "att_$newId",
+            sizeBytes = bytes.size,
+            progress = 0f,
+        )
+        val replacement = old.copy(
+            id = newId,
+            sentAtMs = now,
+            delivery = DeliveryState.SENT,
+            attachment = attachment,
+        )
+        val priorAttempts = _outgoingMedia.value[old.id]?.attempts ?: 1
+        removeMessageEverywhere(old.id)
+        if (oldAttachmentId != null) runCatching { File(attachmentsDir(), oldAttachmentId).delete() }
+        appendMessage(peerId, replacement, channel)
+        if (attachment != null) {
+            _outgoingMedia.value = _outgoingMedia.value - old.id + (
+                newId to OutgoingMediaPolicy.initial(
+                    isChannel = channel,
+                    mime = attachment.mime,
+                    sizeBytes = attachment.sizeBytes,
+                    sentAtMs = now,
+                    expectedWindowMs = expectedMediaWindowMs(attachment.sizeBytes),
+                ).copy(attempts = priorAttempts + 1)
+                )
+            refreshOutgoingMediaUi()
+        }
+        scope.launch {
+            runCatching { dao.deleteMessage(old.id) }
+            runCatching { dao.upsertMessage(MessageEntity.fromModel(replacement)) }
+        }
+        MeshLog.i(
+            "outgoing media retried old_id=${old.id} new_id=$newId bytes=${bytes.size} " +
+                "written=$written channel=$channel",
+        )
+    }
+
+    private fun findMessageWithThread(id: Long): Triple<String, Boolean, Message>? {
+        _messages.value.forEach { (peerId, list) ->
+            list.firstOrNull { it.id == id }?.let { return Triple(peerId, false, it) }
+        }
+        _channelMessages.value.forEach { (peerId, list) ->
+            list.firstOrNull { it.id == id }?.let { return Triple(peerId, true, it) }
+        }
+        return null
     }
 
     private fun rebuildConversations() {
@@ -980,8 +1250,12 @@ class MeshRepository(
 
             is CoreEvent.ResourceProgress -> {
                 MeshLog.i(
-                    "rx resource progress id=${event.messageId} chunk=${event.received}/${event.total}",
+                    "resource progress id=${event.messageId} chunk=${event.received}/${event.total} " +
+                        "outgoing=${_outgoingMedia.value.containsKey(event.messageId)}",
                 )
+                if (_outgoingMedia.value.containsKey(event.messageId)) {
+                    noteOutgoingMediaActivity(event.messageId, event.received, event.total)
+                }
                 fun progress(list: List<Message>) = list.map {
                     if (it.id == event.messageId && it.attachment != null) {
                         it.copy(attachment = it.attachment.copy(progress = event.received.toFloat() / event.total.coerceAtLeast(1)))
@@ -1651,6 +1925,7 @@ class MeshRepository(
             if (radioChanged || nameChanged) {
                 companion?.let { client -> pushRadioConfig(client) }
             }
+            if (radioChanged) applyResourcePaceHint()
             if (nameChanged) {
                 // A rename should reach peers now, not at the next 30-min announce cycle.
                 MeshLog.i("display name changed: '${previous.nodeName}' -> '${updated.nodeName}'; announcing now")

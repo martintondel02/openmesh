@@ -42,6 +42,7 @@ import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Slider
@@ -72,6 +73,9 @@ import org.openmesh.android.media.AttachmentPlayer
 import org.openmesh.android.media.AttachmentUiPolicy
 import org.openmesh.android.media.AttachmentViewKind
 import org.openmesh.android.media.ImageCompressor
+import org.openmesh.android.media.OutgoingMediaPolicy
+import org.openmesh.android.media.OutgoingMediaUi
+import org.openmesh.android.media.OutgoingMediaUiState
 import org.openmesh.android.media.VoicePlaybackUiState
 import org.openmesh.android.ui.components.AirtimeEstimateDialog
 import org.openmesh.android.ui.components.AttachmentImageViewerDialog
@@ -106,6 +110,7 @@ fun ChatThreadScreen(
     val channelMessages by repository.channelMessages.collectAsState()
     val thread = if (isChannel) channelMessages[peerId].orEmpty() else directMessages[peerId].orEmpty()
     val settings by repository.settings.collectAsState()
+    val outgoingMedia by repository.outgoingMediaUi.collectAsState()
     val listState = rememberLazyListState()
 
     var draft by remember { mutableStateOf("") }
@@ -234,6 +239,7 @@ fun ChatThreadScreen(
                     onToggleVoice = { toggleVoice(it) },
                     onOpenImage = { bitmap, name -> imageViewer = bitmap to name },
                     onShowStatus = { statusMessage = it },
+                    uploadUi = outgoingMedia[message.id],
                 )
             }
             if (thread.isEmpty()) {
@@ -250,6 +256,32 @@ fun ChatThreadScreen(
 
         if (!settings.demoMode && radio.queuedMessages > 0) {
             QueuedMessagesCard(count = radio.queuedMessages, onOpenRadio = onOpenRadio)
+        }
+
+        // Thread-level hint while a media upload is running long (never shown once it stalls —
+        // the bubble itself then offers the Retry action).
+        val slowUpload = outgoingMedia.values.firstOrNull { OutgoingMediaPolicy.slowHintVisible(it) }
+        if (slowUpload != null) {
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .background(MeshTertiary.copy(alpha = 0.10f))
+                    .padding(horizontal = 16.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Icon(
+                    Icons.Filled.Info,
+                    contentDescription = null,
+                    tint = MeshTertiary,
+                    modifier = Modifier.size(16.dp),
+                )
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    OutgoingMediaPolicy.slowHintText(isChannel),
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MeshOnSurfaceVariant,
+                )
+            }
         }
 
         Row(
@@ -338,12 +370,21 @@ fun ChatThreadScreen(
     }
 
     statusMessage?.let { message ->
+        val upload = outgoingMedia[message.id]
+        val stalledUpload = upload?.takeIf {
+            it.state == OutgoingMediaUiState.STALLED && message.delivery == DeliveryState.SENT
+        }
         MessageStatusDialog(
             message = message,
             isChannel = isChannel,
             peerName = repository.displayNameFor(peerId),
+            uploadUi = upload,
             onRetry = {
-                repository.retryMessage(message.id)
+                if (stalledUpload != null) {
+                    repository.retryUpload(message.id)
+                } else {
+                    repository.retryMessage(message.id)
+                }
                 statusMessage = null
             },
             onDismiss = { statusMessage = null },
@@ -360,15 +401,25 @@ private fun MessageStatusDialog(
     message: Message,
     isChannel: Boolean,
     peerName: String,
+    uploadUi: OutgoingMediaUi?,
     onRetry: () -> Unit,
     onDismiss: () -> Unit,
 ) {
+    val uploadStalled = uploadUi?.state == OutgoingMediaUiState.STALLED &&
+        message.delivery == DeliveryState.SENT
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("Message status · ${DeliveryPresentation.label(message.delivery)}") },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text(DeliveryPresentation.explanation(message.delivery, isChannel, peerName))
+                if (uploadStalled) {
+                    Text(
+                        OutgoingMediaPolicy.stalledExplanation(isChannel),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MeshError,
+                    )
+                }
                 Text(
                     "Sent ${relativeTime(message.sentAtMs)}" +
                         if (isChannel) " · channel message" else " · direct message",
@@ -379,7 +430,7 @@ private fun MessageStatusDialog(
         },
         confirmButton = {
             Row {
-                if (message.delivery == DeliveryState.FAILED) {
+                if (message.delivery == DeliveryState.FAILED || uploadStalled) {
                     TextButton(onClick = onRetry) { Text("Retry") }
                 }
                 TextButton(onClick = onDismiss) { Text("Close") }
@@ -401,6 +452,7 @@ private fun MessageBubble(
     onToggleVoice: (Message) -> Unit,
     onOpenImage: (Bitmap, String) -> Unit,
     onShowStatus: (Message) -> Unit,
+    uploadUi: OutgoingMediaUi? = null,
 ) {
     val outgoing = message.outgoing
     val bubbleColor = if (outgoing) MeshPrimary.copy(alpha = 0.16f) else MeshSurfaceHigh
@@ -442,6 +494,7 @@ private fun MessageBubble(
                     voiceError = voiceError,
                     onToggleVoice = onToggleVoice,
                     onOpenImage = onOpenImage,
+                    uploadUi = uploadUi,
                 )
                 MessageKind.POSITION -> Column {
                     Text("Position", style = MaterialTheme.typography.titleMedium)
@@ -489,10 +542,23 @@ private fun MessageBubble(
                 )
                 if (outgoing) {
                     Spacer(Modifier.width(4.dp))
+                    val uploadStatus = if (
+                        uploadUi != null &&
+                        (message.delivery == DeliveryState.SENT || message.delivery == DeliveryState.QUEUED)
+                    ) {
+                        OutgoingMediaPolicy.statusText(uploadUi)
+                    } else {
+                        null
+                    }
                     Text(
-                        DeliveryPresentation.bubbleStatus(message.delivery),
+                        uploadStatus ?: DeliveryPresentation.bubbleStatus(message.delivery),
                         style = MaterialTheme.typography.labelSmall,
-                        color = radioToneColor(DeliveryPresentation.tone(message.delivery)),
+                        color = when {
+                            uploadStatus == null ->
+                                radioToneColor(DeliveryPresentation.tone(message.delivery))
+                            uploadUi?.state == OutgoingMediaUiState.STALLED -> MeshError
+                            else -> MeshTertiary
+                        },
                     )
                     Spacer(Modifier.width(4.dp))
                     DeliveryIcon(message.delivery)
@@ -511,8 +577,10 @@ private fun AttachmentBubble(
     voiceError: String?,
     onToggleVoice: (Message) -> Unit,
     onOpenImage: (Bitmap, String) -> Unit,
+    uploadUi: OutgoingMediaUi? = null,
 ) {
     val attachment = message.attachment ?: return
+    val outgoing = message.outgoing
     val kind = AttachmentUiPolicy.kindFor(attachment.mime)
     val name = AttachmentUiPolicy.displayName(attachment.name, attachment.mime, kind)
     val file = repository.attachmentFile(attachment.id)
@@ -603,12 +671,59 @@ private fun AttachmentBubble(
             }
         }
     }
-    if (message.delivery == DeliveryState.FAILED) {
-        Text(
-            "Transfer failed — long-press the message to retry.",
-            style = MaterialTheme.typography.labelMedium,
-            color = MeshOnSurfaceVariant,
-        )
+    if (outgoing) {
+        when {
+            message.delivery == DeliveryState.QUEUED -> {
+                Text(
+                    "Queued — it will upload when the radio link is ready.",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MeshTertiary,
+                )
+            }
+            uploadUi != null && uploadUi.state == OutgoingMediaUiState.STALLED -> {
+                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    Text(
+                        "Upload stalled — no progress for " +
+                            "${(uploadUi.stalledForMs / 1000).coerceAtLeast(1)} s.",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MeshError,
+                    )
+                    TextButton(onClick = { repository.retryUpload(message.id) }) {
+                        Text("Retry upload", color = MeshPrimary)
+                    }
+                }
+            }
+            uploadUi != null && message.delivery == DeliveryState.SENT -> {
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    if (uploadUi.progress != null) {
+                        LinearProgressIndicator(
+                            progress = { uploadUi.progress.coerceIn(0f, 1f) },
+                            modifier = Modifier.fillMaxWidth(),
+                            color = MeshPrimary,
+                        )
+                    } else {
+                        LinearProgressIndicator(modifier = Modifier.fillMaxWidth(), color = MeshPrimary)
+                    }
+                    Text(
+                        OutgoingMediaPolicy.statusText(uploadUi),
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MeshTertiary,
+                    )
+                }
+            }
+            message.delivery == DeliveryState.FAILED -> {
+                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    Text(
+                        "Transfer failed — the message was kept.",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MeshError,
+                    )
+                    TextButton(onClick = { repository.retryUpload(message.id) }) {
+                        Text("Retry upload", color = MeshPrimary)
+                    }
+                }
+            }
+        }
     }
 }
 

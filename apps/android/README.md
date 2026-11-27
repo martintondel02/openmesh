@@ -32,7 +32,7 @@ USB. No bridge, no server, no account.
 | Persistence | ✅ Room (messages, contacts, channels, node cache), DataStore (prefs, UI mode, setup, engine state, identity ciphertext); identity seed wrapped by AndroidKeyStore AES-GCM |
 | Notifications | ✅ message channel with sender/channel + text preview (never media), tap → thread, mark-read on open; persistent service notification |
 | Onboarding | ✅ 3 steps (role → country/name/privacy → secure) applying the shared `content/presets/setup.json` preset; creates a private channel + invite QR |
-| Chats + thread | ✅ direct/channel threads, announced display names, explicit delivery/read labels (tap a bubble for the plain-language status), retry, reply model, day separators, text/position/attachment bubbles |
+| Chats + thread | ✅ direct/channel threads, announced display names, explicit delivery/read labels (tap a bubble for the plain-language status), outgoing-media progress + stall detection/retry, retry, reply model, day separators, text/position/attachment bubbles |
 | Media | ✅ send: gallery/camera image → downscale+WebP loop to the profile cap with pre-send airtime estimate; voice note with `MediaRecorder` AAC-LC mono 16 kHz ~12 kbps MP4 (duration cap per profile). Receive: images decode inline (tap → full-screen viewer), voice notes play in the thread (Codec2 via FFI → `AudioTrack`, Opus/AAC via `MediaPlayer`) with play/stop state and honest format/duration/size labels |
 | QR | ✅ zxing scan for contact/channel invites; own contact QR; channel invite QR; every `openmesh://` URL validated |
 | Channels | ✅ create with invite QR, join via scan/paste, list/unread |
@@ -162,6 +162,34 @@ are a pinned contact, the phone's own radio-link summary, and a delivery/read su
 conversation (or channel semantics for group chats). Route wording is beginner-friendly: *Direct
 link (0 hops)* vs *Via N relays*. A node not heard for 5 minutes is labelled *Offline* even if an old
 RSSI value is cached.
+
+## Outgoing media reliability (v0.7.2)
+
+Attachments are the one transfer type that can stay in flight for minutes, so the thread does not
+leave the user guessing:
+
+- **Progress** — when the core reports resource progress for an outgoing attachment, the bubble
+  shows a progress bar and "Uploading… N%". Before the first chunk event it shows an indeterminate
+  bar with "Uploading…" (the FFI cannot always map a pending resource to its message yet).
+- **Slow-media hint** — while an upload has been running for more than 8 s, the thread shows
+  "Large media can take minutes on radio — it continues in the background. If it stalls you can
+  retry from the message." The hint disappears once the upload finishes or stalls (the bubble then
+  takes over).
+- **Stall detector** — a per-message tracker watches ResourceProgress and delivery events. If an
+  outgoing attachment still shows `SENT` with no activity for **2× the expected transfer window,
+  clamped to 45–180 s**, the bubble flips to "Upload stalled — no progress for N s." with a
+  **Retry upload** button (also available from the message-status dialog). `SENT` remains "handed to
+  the radio", `DELIVERED` remains "peer/bridge ACK"; a channel still has no per-recipient receipt.
+- **Retry without duplicates** — retry re-sends the stored bytes through the normal attachment path
+  as a fresh attempt and replaces the local row in place (delete old id + insert the new engine id),
+  so there is always exactly one bubble. The core's `retry_message` only retransmits a still-pending
+  announcing message, not a stalled resource, which is why the fallback exists. Queued attachments
+  show "Queued — it will upload when the radio link is ready."
+- **Duty-aware pacing hint** — the core helper `openmeshResourcePaceIntervalMs(profile, region,
+  batch)` (2 chunks per window) is applied to the node at engine start and whenever the profile or
+  region changes: `node.setResourcePaceIntervalMs(pace)`. The app logs
+  `resource pace: profile=… region=… batch=2 -> Nms` once per configuration (useful for the stability
+  test); the core default is kept if the helper is unavailable.
 
 ## Build
 
