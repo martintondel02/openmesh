@@ -36,7 +36,9 @@ thumbnail.
 2. The app compresses/encodes and shows **actual size, estimated airtime and % of the hourly duty
    budget** before sending. If the tier is too big for the current radio profile, the app
    suggests the next smaller one.
-3. Send. You will see transfer progress; the recipient can open the media once complete.
+3. Send. You will see transfer progress. On the receiving side the bubble shows **Receiving…**
+   until the transfer completes, then the image renders inline (tap it for full size) or the voice
+   note plays in the thread (tap to play, tap again to stop).
 4. If the message is marked failed, retry; the chunks are already encrypted and stored locally.
 
 ## Advanced notes
@@ -82,8 +84,12 @@ chosen so the transfer fits the profile's practical airtime.
 
 ### Cross-client notes
 
-* Web, Android and desktop can all send tiny/medium voice (the codec is pure Rust, compiled to
-  WASM for the browser and linked into the Android engine).
+* Web, Android and desktop can all send and play tiny/medium voice (Codec2 is pure Rust, compiled
+  to WASM for the browser and linked into the Android engine). Received images render inline in
+  the conversation on both clients; no external gallery or player app is needed.
+* A voice note or image that arrives without a duration or with a transfer still in progress is
+  labelled honestly ("Receiving…", duration computed from the Codec2 payload size) instead of
+  showing a fake placeholder.
 * High-quality voice from Android may be AAC/MP4 (API < 29) or OGG/Opus; the other clients play
   both.
 * If a peer's app is too old to know a MIME type, the media is stored locally and can be saved as
@@ -106,6 +112,7 @@ chosen so the transfer fits the profile's practical airtime.
 | Voice note is unintelligible | Tiny Codec2 is very low bitrate | Use Medium or High for important messages. |
 | Voice playback is silent | Missing codec support (old client) or muted media | Update the app; check media volume; sender can resend as High. |
 | Image looks blocky | Tiny/Medium downscale aggressively | Use High for details, but check the airtime estimate first. |
+| Image shows only a filename, or "not on this phone yet" | The transfer never completed, or an older client without media previews | Wait for "Receiving…" to finish and tap the image; update the app; ask the sender to reseat the message. |
 | Transfer stalls at 100% | Recipient storage/permission issue or ACK lost | Retry; check both devices' free space. |
 
 ## Related topics
