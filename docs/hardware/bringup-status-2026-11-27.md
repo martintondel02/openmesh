@@ -391,3 +391,55 @@ bridge/app announce interop needs the contact exchange above until the core anno
 
 Notes: the T1000-E can stay USB-connected to the PC for power/logs while the phone talks to it over
 BLE (coexistence verified); a device-initiated reset can renumber `/dev/ttyACM*`, so re-detect ports.
+
+
+## Evening session (2026-11-27): media receive, radio root causes, identity/link UX
+
+**Media receive is now verified end-to-end on the phone**, and the web client renders/plays media on
+both the outgoing and incoming channel paths:
+
+* Phone: inbound image `msg 4216894472` (image/webp 76 B) and later the real 6018 B photo
+  `msg 1269933995` render inline and open a full-screen viewer; inbound Codec2 voice
+  `msg 2250198969` (308 B) plays through the FFI decoder into `AudioTrack` with a visible
+  play/stop state (`/tmp/android-media/`)
+* Web: incoming channel attachment handling fixed (the bridge emits `group_message` then a later
+  `message_update` with the stored attachment), deferred attachment fetch until the transfer
+  completes, Codec2 duration derived from the payload size when metadata is missing; verified
+  headlessly against the live bridge.
+* App receive path: oversized channel messages arrive as an `application/cbor` resource envelope
+  followed by the payload resource; the app ignores the envelope (it used to render it as a bogus
+  attachment and overwrite the payload file) and merges inbound copies of a msg id additively
+  (`MessageMerge`), so order no longer matters.
+
+**Radio root causes fixed today** (all verified on hardware):
+
+* T1000-E "goes deaf while the MCU/BLE stays alive": the live-retune path (`ConfigSet`
+  profile/region/power/frequency from the app) re-ran RadioLib begin(), leaving the LR1110 in
+  STANDBY without re-arming RX. Fixed by re-arming after retune plus a 5 s radio health watchdog
+  (LR1110 GET_STATUS, radio-only recovery, `radio_recovered` companion event).
+* BLE companion dropped bursts at MTU 23 with bounded-retry TX: replaced with a 16 KiB burst TX
+  ring and a 247-byte ATT-MTU ceiling (app requests 247); verified `mtu=247`, `drops=0`,
+  `evdrop=0`, `fwd==rx`.
+* Large attachments stalled at ~6/34 chunks: the resource sender used an 8-chunk window (progress
+  gated by ACK round-trips) and the receiver ACKed every second (ACK airtime itself exceeded the
+  10 % budget). Window widened to 24, receiver ack delay 1 s -> 5 s, RTO does not fire mid-paced
+  window, retransmissions capped per RTO. A 6018 B image now completes 34/34 in ~3m21s at 10 %
+  duty (`Protocol.md §9.3`).
+* Relaying competes with companion traffic: with relaying ON the same 6018 B transfer stalled at
+  1/34 because the radio's duty budget went to forwarding flooded resource frames, starving the
+  phone's ACK TX; with relaying OFF it completed. New persisted `mesh.relay` config key (default
+  on) lets a companion-attached radio keep its airtime for app traffic. Follow-up: prioritise
+  app/companion TX over relay copies when the outbound queue backs up, so relay-on also works.
+
+**UX added**
+
+* Display name: set once in Settings, announced to peers (immediate announce on save) while the
+  node id stays the permanent unique address; consistent name+short-id display with fallbacks.
+* Delivery clarity: explicit labels and a message-details dialog; READ state on Android (read
+  receipts were already supported in the core); channel vs direct semantics spelled out.
+* Peer link stability: peer card (chat header / node details) with quality label, hops, RSSI/SNR,
+  last heard, contact pin state and per-peer delivery summary; help topics updated.
+
+**Known follow-ups**: relay-priority fix so large media also works with relaying on; phone-origin
+media to the web client verification; core message-id persistence (`msg_counter` export) so a
+first message after restart cannot reuse an id; peer/thread UX polish.
