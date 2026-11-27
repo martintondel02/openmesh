@@ -8,8 +8,8 @@
 use std::collections::VecDeque;
 
 use openmesh_core::{
-    Ack, AckKind, Engine, EngineConfig, Event, Frame, LinkInfo, NodeId, Position, Processed,
-    ResourceKind, Target, Telemetry, engine_from_seed,
+    Ack, AckKind, Engine, EngineConfig, Event, Frame, FrameType, LinkInfo, NodeId, Position,
+    Processed, ResourceKind, Target, Telemetry, engine_from_seed,
 };
 
 // ---------------------------------------------------------------------------------------------
@@ -1546,4 +1546,308 @@ fn regulatory_override_public_api_is_stable() {
     assert_eq!(util::region("EU433").unwrap().freq_khz, 433_920);
     assert!(frequency_supported(869_525));
     assert!(!frequency_supported(100_000));
+}
+
+// ---------------------------------------------------------------------------------------------
+// Duty-cycle pacing: a 34-chunk image over a 6 s/frame shared channel
+// ---------------------------------------------------------------------------------------------
+
+/// A shared half-duplex channel where every frame occupies `pace_ms` of wall time.
+///
+/// This models the live failure: under EU868 10 % duty cycle a 240 B MEDIUM_FAST frame takes
+/// ~6 s of wall time, and the bridge ticks its engine timers at 1 Hz. Acks and retransmissions
+/// compete for the same channel, so the whole ARQ (not just the data frames) is paced.
+struct PacedMesh {
+    engines: Vec<Engine>,
+    queue: VecDeque<(u64, usize, Frame)>,
+    next_free_ms: u64,
+    pace_ms: u64,
+    ack_latency_ms: u64,
+    now_ms: u64,
+    events: Vec<(usize, Event)>,
+    transmissions: u64,
+    /// Drop the first transmission of this resource chunk index (models a lost paced frame).
+    drop_chunk_index: Option<u16>,
+    dropped_chunk: bool,
+}
+
+impl PacedMesh {
+    fn new(pace_ms: u64) -> Self {
+        let mut a = client(41, "alice");
+        let mut b = client(42, "bob");
+        a.add_contact(b.public_identity(), Some("bob".into()));
+        b.add_contact(a.public_identity(), Some("alice".into()));
+        Self {
+            engines: vec![a, b],
+            queue: VecDeque::new(),
+            next_free_ms: 0,
+            pace_ms,
+            // A window ack is only emitted after the receiver has seen a whole 8-chunk window,
+            // so model the ack as arriving after that full window has been paced out.
+            ack_latency_ms: pace_ms.saturating_mul(8),
+            now_ms: 0,
+            events: Vec::new(),
+            transmissions: 0,
+            drop_chunk_index: None,
+            dropped_chunk: false,
+        }
+    }
+
+    fn drop_first_chunk(&mut self, index: u16) {
+        self.drop_chunk_index = Some(index);
+    }
+
+    fn enqueue(&mut self, from: usize, processed: Processed) {
+        self.events
+            .extend(processed.events.into_iter().map(|event| (from, event)));
+        for outbound in processed.outbound {
+            let due = self.next_free_ms.max(self.now_ms);
+            self.next_free_ms = due + self.pace_ms;
+            self.queue.push_back((due, from, outbound.frame));
+        }
+    }
+
+    /// ACK frames do not contend for the channel in this model: the receiver answers after the
+    /// paced window with a fixed extra latency, as described by the ARQ contract.
+    fn enqueue_with_latency(&mut self, from: usize, processed: Processed) {
+        self.events
+            .extend(processed.events.into_iter().map(|event| (from, event)));
+        for outbound in processed.outbound {
+            let due = if outbound.frame.typ == FrameType::Ack {
+                self.now_ms + self.ack_latency_ms
+            } else {
+                let due = self.next_free_ms.max(self.now_ms);
+                self.next_free_ms = due + self.pace_ms;
+                due
+            };
+            // Keep the channel queue ordered by due time: acks use their own latency and may
+            // otherwise sit behind data frames that are paced far into the future.
+            let pos = self
+                .queue
+                .iter()
+                .position(|(queued_ms, _, _)| *queued_ms > due)
+                .unwrap_or(self.queue.len());
+            self.queue.insert(pos, (due, from, outbound.frame));
+        }
+    }
+
+    /// Run 1 Hz engine ticks and deliver frames in channel order until `done` or `deadline_ms`.
+    fn advance_until(&mut self, deadline_ms: u64, mut done: impl FnMut(&Self) -> bool) -> bool {
+        while self.now_ms < deadline_ms {
+            self.now_ms += 1_000;
+            while let Some((due, _, _)) = self.queue.front() {
+                let due = *due;
+                if due > self.now_ms {
+                    break;
+                }
+                let (_, from, frame) = self.queue.pop_front().expect("checked above");
+                if let Some(target) = self.drop_chunk_index {
+                    if !self.dropped_chunk
+                        && frame.typ == FrameType::Resource
+                        && frame.body.len() >= 11
+                        && u16::from_be_bytes([frame.body[9], frame.body[10]]) == target
+                    {
+                        self.dropped_chunk = true;
+                        continue;
+                    }
+                }
+                let Ok(bytes) = frame.encode() else { continue };
+                let to = 1 - from;
+                let link = LinkInfo {
+                    link: 0,
+                    peer: Some(self.engines[from].node_id()),
+                    rssi: Some(-90),
+                    snr: Some(6.5),
+                };
+                let processed = self.engines[to].ingest(&bytes, Some(link), self.now_ms);
+                self.transmissions += 1;
+                self.enqueue_with_latency(to, processed);
+            }
+            for index in 0..self.engines.len() {
+                let processed = self.engines[index].tick(self.now_ms);
+                self.enqueue_with_latency(index, processed);
+            }
+            if done(self) {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn events_for(&self, index: usize) -> impl Iterator<Item = &Event> {
+        self.events
+            .iter()
+            .filter(move |(node, _)| *node == index)
+            .map(|(_, event)| event)
+    }
+
+    fn has_error(&self, index: usize) -> bool {
+        self.events_for(index)
+            .any(|event| matches!(event, Event::Error(_)))
+    }
+}
+
+#[test]
+fn duty_cycle_paced_transfer_does_not_give_up_before_the_first_acks() {
+    // 6 s per frame models EU868 10 % duty cycle at MEDIUM_FAST (611 ms airtime per 240 B frame);
+    // window acks are emitted after a whole paced burst and travel back with channel latency.
+    // The old sender gave up after six 3 s retries (~190 s) before the first paced ack could
+    // arrive; the time-based budget keeps the transfer alive until progress resumes.
+    let mut mesh = PacedMesh::new(6_000);
+    let (a, b) = (0usize, 1usize);
+    let b_id = mesh.engines[b].node_id();
+    let image: Vec<u8> = (0..6_018u32).map(|i| ((i * 29 + 7) % 251) as u8).collect();
+
+    let sent = mesh.engines[a]
+        .send_resource(
+            Target::Direct(b_id),
+            0x5151_5151,
+            0x6161_6161,
+            ResourceKind::Attachment,
+            "image/webp",
+            &image,
+            0,
+        )
+        .unwrap();
+    assert_eq!(
+        sent.outbound.len(),
+        3,
+        "only the manifest and the first paced emission batch may leave in one burst"
+    );
+    mesh.enqueue(a, sent);
+
+    let advanced = mesh.advance_until(300_000, |mesh| {
+        mesh.events_for(b)
+            .filter_map(|event| match event {
+                Event::ResourceProgress { received, .. } => Some(*received),
+                _ => None,
+            })
+            .max()
+            .is_some_and(|received| received >= 8)
+    });
+    assert!(
+        advanced,
+        "the receiver must make progress while the first paced windows are in flight"
+    );
+    assert!(
+        !mesh.has_error(a) && !mesh.has_error(b),
+        "the sender must not abandon a paced resource before its ack arrives"
+    );
+}
+
+#[test]
+fn paced_three_chunk_channel_resource_retransmits_missing_last_chunk() {
+    // Same regression over a channel target (the live envelope is a channel resource).
+    let mut mesh = PacedMesh::new(6_000);
+    mesh.drop_first_chunk(2);
+    let (a, b) = (0usize, 1usize);
+    let psk = [7u8; 32];
+    let channel = mesh.engines[a].add_channel("e2e test", &psk);
+    mesh.engines[b].add_channel("e2e test", &psk);
+    let payload: Vec<u8> = (0..400u32).map(|i| (i % 251) as u8).collect();
+    let sent = mesh.engines[a]
+        .send_resource(
+            Target::Channel(channel),
+            0x5151_5151,
+            0x6161_6161,
+            ResourceKind::Attachment,
+            "image/webp",
+            &payload,
+            0,
+        )
+        .unwrap();
+    assert_eq!(
+        sent.outbound.len(),
+        3,
+        "manifest + first paced batch of 2 chunks"
+    );
+    mesh.enqueue(a, sent);
+    let complete = mesh.advance_until(180_000, |mesh| {
+        mesh.events_for(b)
+            .any(|event| matches!(event, Event::ResourceReceived { .. }))
+    });
+    assert!(mesh.dropped_chunk);
+    assert!(
+        complete,
+        "3-chunk channel resource must complete after ack repair"
+    );
+    assert!(!mesh.has_error(a) && !mesh.has_error(b));
+}
+
+#[test]
+fn paced_three_chunk_resource_retransmits_missing_last_chunk() {
+    // Regression for the live small-resource stall: the initial paced batch is manifest + 2 of
+    // 3 chunks. If the last chunk is lost, the ack for 2/3 must release it again immediately
+    // instead of waiting for a full RTO (or never).
+    let mut mesh = PacedMesh::new(6_000);
+    mesh.drop_first_chunk(2);
+    let (a, b) = (0usize, 1usize);
+    let b_id = mesh.engines[b].node_id();
+    let payload: Vec<u8> = (0..400u32).map(|i| (i % 251) as u8).collect();
+    let sent = mesh.engines[a]
+        .send_resource(
+            Target::Direct(b_id),
+            0x1010_1010,
+            0x2020_2020,
+            ResourceKind::Attachment,
+            "image/webp",
+            &payload,
+            0,
+        )
+        .unwrap();
+    assert_eq!(
+        sent.outbound.len(),
+        3,
+        "manifest + first paced batch of 2 chunks"
+    );
+    mesh.enqueue(a, sent);
+    let complete = mesh.advance_until(180_000, |mesh| {
+        mesh.events_for(b)
+            .any(|event| matches!(event, Event::ResourceReceived { .. }))
+    });
+    assert!(
+        mesh.dropped_chunk,
+        "the test must actually drop the last chunk once"
+    );
+    assert!(
+        complete,
+        "3-chunk resource must complete after the ack for 2/3 releases the missing chunk"
+    );
+    assert!(!mesh.has_error(a) && !mesh.has_error(b));
+}
+
+#[test]
+fn paced_two_chunk_resource_completes_after_ack() {
+    let mut mesh = PacedMesh::new(6_000);
+    mesh.drop_first_chunk(1);
+    let (a, b) = (0usize, 1usize);
+    let b_id = mesh.engines[b].node_id();
+    let payload: Vec<u8> = (0..250u32).map(|i| (i % 241) as u8).collect();
+    let sent = mesh.engines[a]
+        .send_resource(
+            Target::Direct(b_id),
+            0x3030_3030,
+            0x4040_4040,
+            ResourceKind::Attachment,
+            "audio/c2-1300",
+            &payload,
+            0,
+        )
+        .unwrap();
+    assert_eq!(
+        sent.outbound.len(),
+        3,
+        "manifest + both chunks (2-chunk resource)"
+    );
+    mesh.enqueue(a, sent);
+    let complete = mesh.advance_until(180_000, |mesh| {
+        mesh.events_for(b)
+            .any(|event| matches!(event, Event::ResourceReceived { .. }))
+    });
+    assert!(mesh.dropped_chunk);
+    assert!(
+        complete,
+        "2-chunk resource must complete after the ack releases the missing chunk"
+    );
+    assert!(!mesh.has_error(a) && !mesh.has_error(b));
 }

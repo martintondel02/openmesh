@@ -14,8 +14,9 @@ use crate::fragment::Reassembler;
 
 /// Default number of chunks in flight.
 pub const DEFAULT_WINDOW: u16 = 8;
-/// Maximum retransmissions of the same window before the transfer is abandoned.
-pub const MAX_RETRIES: u8 = 6;
+/// Hard ceiling on consecutive retransmissions of the same window (safety only; the primary
+/// give-up condition is the no-progress time budget in [`ResourceSender::schedule_retry`]).
+pub const MAX_RETRIES: u8 = 32;
 /// Default chunk payload size in bytes (PROTOCOL.md §9.2).
 pub const DEFAULT_CHUNK_BYTES: u16 = 180;
 /// Maximum chunk payload that fits in one frame body after the resource header.
@@ -97,6 +98,10 @@ pub struct ResourceSender {
     pub acked: Vec<bool>,
     /// Absolute time (ms) at which the next retransmission is due.
     pub deadline_ms: u64,
+    /// Wall time (ms) of the last ack that advanced the transfer (retry budget anchor).
+    pub last_progress_ms: u64,
+    /// Wall time (ms) at which the resource was armed.
+    pub started_ms: u64,
 }
 
 impl ResourceSender {
@@ -112,6 +117,8 @@ impl ResourceSender {
             sent_mask: vec![false; total_chunks as usize],
             acked: vec![false; total_chunks as usize],
             deadline_ms: 0,
+            last_progress_ms: 0,
+            started_ms: 0,
         }
     }
 
@@ -139,10 +146,11 @@ impl ResourceSender {
         out
     }
 
-    /// Chunks that have never been sent and are not yet acked, up to the window size.
+    /// Chunks that have never been sent and are not yet acked, up to `limit` and the window size.
     ///
-    /// Marks them as sent and advances [`ResourceSender::next_unsent`].
-    pub fn take_unsent(&mut self) -> Vec<u16> {
+    /// Marks them as sent and advances [`ResourceSender::next_unsent`]. The engine passes a small
+    /// limit for paced emission so a whole window never leaves in one burst.
+    pub fn take_unsent(&mut self, limit: usize) -> Vec<u16> {
         // Never exceed the window of chunks in flight: count those sent but not yet acked.
         let in_flight = self
             .sent_mask
@@ -150,7 +158,9 @@ impl ResourceSender {
             .zip(self.acked.iter())
             .filter(|(sent, acked)| **sent && !**acked)
             .count();
-        let room = (self.window as usize).saturating_sub(in_flight);
+        let room = (self.window as usize)
+            .saturating_sub(in_flight)
+            .min(limit.max(1));
         let mut out = Vec::new();
         let mut i = self.next_unsent;
         while i < self.total_chunks && out.len() < room {
@@ -201,9 +211,18 @@ impl ResourceSender {
         Ok(self.is_complete())
     }
 
+    /// Arm the retransmission timer before the first transmission.
+    pub fn arm(&mut self, now_ms: u64, rto_ms: u64) {
+        self.started_ms = now_ms;
+        self.last_progress_ms = now_ms;
+        self.deadline_ms = now_ms.saturating_add(rto_ms);
+    }
+
     /// Apply an ack and reschedule the retransmission timer.
     ///
-    /// Returns `true` when complete. `rto_ms` is the base retransmission timeout.
+    /// Returns `true` when complete. `rto_ms` is the base retransmission timeout. An ack that
+    /// advances the transfer resets the retry budget anchor, so a slow but progressing link is
+    /// never abandoned.
     pub fn on_ack(
         &mut self,
         next_expected: u16,
@@ -211,26 +230,44 @@ impl ResourceSender {
         now_ms: u64,
         rto_ms: u64,
     ) -> Result<bool> {
+        let before = self.acked_count();
         let complete = self.apply_ack(next_expected, bitmap)?;
-        self.deadline_ms = if complete {
-            0
-        } else {
-            now_ms.saturating_add(rto_ms)
-        };
-        Ok(complete)
+        let after = self.acked_count();
+        if complete {
+            self.deadline_ms = 0;
+            self.last_progress_ms = now_ms;
+            return Ok(true);
+        }
+        if after > before {
+            self.last_progress_ms = now_ms;
+        }
+        self.deadline_ms = now_ms.saturating_add(rto_ms);
+        Ok(false)
     }
 
     /// Schedule a retransmission after an RTO fired.
     ///
-    /// Returns the new deadline, or `None` when [`MAX_RETRIES`] is exhausted (give up).
-    /// Backoff doubles the base timeout for every retry.
-    pub fn schedule_retry(&mut self, now_ms: u64, rto_ms: u64) -> Option<u64> {
+    /// Returns the new deadline, or `None` when the transfer is abandoned. Give-up is
+    /// **time-based**: after `no_progress_budget_ms` wall time without an acknowledged chunk.
+    /// This is what lets a duty-cycle-paced transfer survive: its first ack can take longer than
+    /// any fixed retry count would allow. Backoff doubles the base timeout for every retry and is
+    /// capped at `max_backoff_ms`, so a lost link is still probed occasionally without flooding.
+    pub fn schedule_retry(
+        &mut self,
+        now_ms: u64,
+        rto_ms: u64,
+        no_progress_budget_ms: u64,
+        max_backoff_ms: u64,
+    ) -> Option<u64> {
+        if now_ms.saturating_sub(self.last_progress_ms) > no_progress_budget_ms {
+            return None;
+        }
         if self.retries >= MAX_RETRIES {
             return None;
         }
         self.retries += 1;
         let shift = self.retries.saturating_sub(1).min(6) as u32;
-        let backoff = rto_ms.saturating_mul(1u64 << shift);
+        let backoff = rto_ms.saturating_mul(1u64 << shift).min(max_backoff_ms);
         let deadline = now_ms.saturating_add(backoff);
         self.deadline_ms = deadline;
         Some(deadline)
@@ -305,11 +342,12 @@ mod tests {
     #[test]
     fn sender_streams_a_window_then_acks() {
         let mut s = ResourceSender::new(1, 20, 180);
-        assert_eq!(s.take_unsent(), vec![0, 1, 2, 3, 4, 5, 6, 7]);
-        assert_eq!(s.take_unsent(), Vec::<u16>::new());
+        let window = s.window as usize;
+        assert_eq!(s.take_unsent(window), vec![0, 1, 2, 3, 4, 5, 6, 7]);
+        assert_eq!(s.take_unsent(window), Vec::<u16>::new());
         // Ack the first window (next expected = 8, no extra bitmap bits).
         assert!(!s.apply_ack(8, 0).unwrap());
-        assert_eq!(s.take_unsent(), vec![8, 9, 10, 11, 12, 13, 14, 15]);
+        assert_eq!(s.take_unsent(window), vec![8, 9, 10, 11, 12, 13, 14, 15]);
         assert!(!s.is_complete());
         assert_eq!(s.acked_count(), 8);
     }
@@ -317,7 +355,7 @@ mod tests {
     #[test]
     fn bitmap_marks_out_of_order_receipts() {
         let mut s = ResourceSender::new(1, 20, 180);
-        let _ = s.take_unsent();
+        let _ = s.take_unsent(8);
         // Receiver has 0,1,2 and 4..8 (chunk 3 missing): next = 3, bits for 4..8.
         let mut bitmap = 0u32;
         for idx in 4..=8u16 {
@@ -332,20 +370,40 @@ mod tests {
     #[test]
     fn retries_back_off_and_give_up() {
         let mut s = ResourceSender::new(1, 8, 180);
+        const BUDGET: u64 = 600_000;
+        const MAX_BACKOFF: u64 = 60_000;
+        s.arm(0, 3_000);
         assert!(!s.on_ack(0, 0, 0, 3_000).unwrap());
         assert_eq!(s.deadline_ms, 3_000);
-        assert_eq!(s.schedule_retry(0, 3_000), Some(3_000));
+        assert_eq!(s.schedule_retry(0, 3_000, BUDGET, MAX_BACKOFF), Some(3_000));
         assert_eq!(s.retries, 1);
-        assert_eq!(s.schedule_retry(0, 3_000), Some(6_000));
-        assert_eq!(s.schedule_retry(0, 3_000), Some(12_000));
-        assert_eq!(s.schedule_retry(0, 3_000), Some(24_000));
-        assert_eq!(s.schedule_retry(0, 3_000), Some(48_000));
-        assert_eq!(s.schedule_retry(0, 3_000), Some(96_000));
-        // MAX_RETRIES = 6: the seventh schedule gives up.
-        assert_eq!(s.schedule_retry(0, 3_000), None);
-        // A successful ack resets the retry counter.
+        assert_eq!(s.schedule_retry(0, 3_000, BUDGET, MAX_BACKOFF), Some(6_000));
+        assert_eq!(
+            s.schedule_retry(0, 3_000, BUDGET, MAX_BACKOFF),
+            Some(12_000)
+        );
+        assert_eq!(
+            s.schedule_retry(0, 3_000, BUDGET, MAX_BACKOFF),
+            Some(24_000)
+        );
+        assert_eq!(
+            s.schedule_retry(0, 3_000, BUDGET, MAX_BACKOFF),
+            Some(48_000)
+        );
+        // Backoff is capped, so later retries stay at the 60 s ceiling.
+        assert_eq!(
+            s.schedule_retry(0, 3_000, BUDGET, MAX_BACKOFF),
+            Some(60_000)
+        );
+        // A successful ack resets the retry counter and the budget anchor.
         s.apply_ack(1, 0).unwrap();
         assert_eq!(s.retries, 0);
+        assert_eq!(s.last_progress_ms, 0);
+        // Without any progress the transfer is abandoned after the budget, not after 6 retries.
+        assert_eq!(
+            s.schedule_retry(BUDGET + 1, 3_000, BUDGET, MAX_BACKOFF),
+            None
+        );
     }
 
     #[test]
@@ -365,6 +423,14 @@ mod tests {
         assert_eq!(r.ack_window(), (4, 0));
         assert!(!r.is_complete());
         assert_eq!(r.received(), 4);
+    }
+
+    #[test]
+    fn paced_emission_limits_each_release() {
+        let mut s = ResourceSender::new(1, 20, 180);
+        s.arm(0, 3_000);
+        assert_eq!(s.take_unsent(2), vec![0, 1]);
+        assert_eq!(s.take_unsent(2), vec![2, 3]);
     }
 
     #[test]

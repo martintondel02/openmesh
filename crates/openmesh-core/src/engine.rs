@@ -67,7 +67,18 @@ pub const MAX_MSG_RETRIES: u8 = 3;
 pub const RESOURCE_WINDOW: u16 = 8;
 /// Base resource retransmission timeout.
 pub const RESOURCE_RTO_MS: u64 = 3_000;
-/// Maximum resource retransmissions before giving up.
+/// Give up on an outgoing resource after this long without acknowledged chunk progress.
+///
+/// Under duty-cycle pacing a single window can take tens of seconds of wall time before its ack
+/// arrives; the old fixed "6 retries x 3 s" budget abandoned such transfers before the first ack.
+pub const RESOURCE_RETRY_BUDGET_MS: u64 = 900_000;
+/// Cap for the exponential retry backoff, so a lost link is probed occasionally without flooding.
+pub const RESOURCE_MAX_RETRY_BACKOFF_MS: u64 = 60_000;
+/// Chunks released per engine tick / ack. A duty-cycle-paced companion TX path drops a whole
+/// window emitted in one burst, so chunks leave the engine a couple at a time instead.
+pub const RESOURCE_TX_BATCH: u16 = 2;
+/// Maximum resource retransmissions between progress (hard safety ceiling; the time budget is the
+/// primary give-up condition).
 pub const RESOURCE_MAX_RETRIES: u8 = MAX_RESOURCE_RETRIES;
 /// How long a completed resource stays cached to answer duplicate acks.
 pub const RESOURCE_KEEP_MS: u64 = 600_000;
@@ -1440,7 +1451,7 @@ impl Engine {
         let manifest_plaintext = cbor_bytes(&manifest);
         let mut sender = ResourceSender::new(res_id, count, chunk_bytes as usize);
         sender.window = RESOURCE_WINDOW;
-        sender.deadline_ms = now_ms.saturating_add(RESOURCE_RTO_MS);
+        sender.arm(now_ms, RESOURCE_RTO_MS);
 
         let include_identity = match &key {
             TransferKey::Peer(peer) => !self.peer_knows_us.contains(&peer.node_id),
@@ -1513,7 +1524,9 @@ impl Engine {
                 sender,
                 started_ms: now_ms,
             };
-            let first = resource.sender.take_unsent();
+            // Release only the first paced batch: the rest of the window follows on later ticks
+            // instead of hitting the transport as one burst.
+            let first = resource.sender.take_unsent(RESOURCE_TX_BATCH as usize);
             self.outgoing.insert(res_id, resource);
             first
         };
@@ -2366,11 +2379,29 @@ impl Engine {
                         .on_ack(next_expected, bitmap, now_ms, RESOURCE_RTO_MS)
                     {
                         Ok(true) => (true, Vec::new(), None),
-                        Ok(false) => (
-                            false,
-                            resource.sender.take_unsent(),
-                            Some((resource.sender.acked_count(), resource.sender.total_chunks)),
-                        ),
+                        Ok(false) => {
+                            // Release the next paced batch of never-sent chunks, and also repair
+                            // any sent-but-unacked chunks the peer reported as missing. This is what
+                            // completes small resources: if the last chunk was lost (or emitted in a
+                            // burst that the companion radio dropped), the ack for N-1 chunks is the
+                            // signal to release it again on a paced link.
+                            let batch = usize::from(RESOURCE_TX_BATCH).max(1);
+                            let mut release = resource.sender.take_unsent(batch);
+                            if release.len() < batch {
+                                let pending = resource.sender.pending_window();
+                                release.extend(
+                                    pending
+                                        .into_iter()
+                                        .filter(|index| !resource.sender.acked[*index as usize])
+                                        .take(batch - release.len()),
+                                );
+                            }
+                            (
+                                false,
+                                release,
+                                Some((resource.sender.acked_count(), resource.sender.total_chunks)),
+                            )
+                        }
                         Err(_) => return,
                     }
                 };
@@ -2917,6 +2948,15 @@ impl Engine {
                 )));
                 continue;
             }
+            // Paced emission: release at most `RESOURCE_TX_BATCH` never-sent chunks per tick. The
+            // bridge ticks at 1 Hz, so a duty-cycle-paced companion TX path is not flooded by the
+            // whole window in one burst (the live photo failure).
+            let unsent = match self.outgoing.get_mut(&res_id) {
+                Some(resource) => resource.sender.take_unsent(RESOURCE_TX_BATCH as usize),
+                None => continue,
+            };
+            self.emit_resource_chunks(res_id, &unsent, out);
+
             if now_ms < snapshot.deadline_ms {
                 continue;
             }
@@ -2945,14 +2985,19 @@ impl Engine {
             let retry_ok = match self.outgoing.get_mut(&res_id) {
                 Some(resource) => resource
                     .sender
-                    .schedule_retry(now_ms, RESOURCE_RTO_MS)
+                    .schedule_retry(
+                        now_ms,
+                        RESOURCE_RTO_MS,
+                        RESOURCE_RETRY_BUDGET_MS,
+                        RESOURCE_MAX_RETRY_BACKOFF_MS,
+                    )
                     .is_some(),
                 None => false,
             };
             if !retry_ok {
                 self.outgoing.remove(&res_id);
                 out.events.push(Event::Error(format!(
-                    "resource {res_id} failed after {RESOURCE_MAX_RETRIES} retries"
+                    "resource {res_id} failed after {RESOURCE_MAX_RETRIES} retries without acknowledged progress"
                 )));
                 continue;
             }

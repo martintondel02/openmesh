@@ -394,8 +394,19 @@ future fields). Senders MUST ensure `chunk_count = ceil(total_len / chunk_bytes)
 * Window: 8 chunks in flight by default.
 * Receiver sends `Ack{kind: resource_window}` every `RESOURCE_ACK_EVERY` (default 8) chunks or
   immediately after detecting a hole / end of burst, with `next_expected` + 32-bit bitmap.
-* Sender retransmits missing chunks after `RESOURCE_RTO_MS` (default 3× expected ack time,
-  min 1500 ms) with exponential backoff, max `MAX_RESOURCE_RETRIES` (6).
+* Sender retransmits missing chunks after `RESOURCE_RTO_MS` (default 3 s) with exponential
+  backoff capped at `RESOURCE_MAX_RETRY_BACKOFF_MS` (60 s). Give-up is **time-based**: an outgoing
+  resource is abandoned only after `RESOURCE_RETRY_BUDGET_MS` (15 min) without acknowledged chunk
+  progress (a hard ceiling of `MAX_RESOURCE_RETRIES` = 32 consecutive retries also applies). Fixed
+  retry counts are not used: under duty-cycle pacing a single window can take tens of seconds of
+  wall time before its ack arrives.
+* Senders SHOULD pace chunk emission: the bridge/reference engine releases at most
+  `RESOURCE_TX_BATCH` (2) new chunks per engine tick (1 Hz) instead of putting the whole window on
+  the air at once. A companion radio under duty-cycle pacing drops a whole-window burst before its
+  chunks reach air, which made multi-chunk attachments fail while 2-3-chunk envelope resources
+  succeeded. Pacing is a transport-timing concern only — the frames are unchanged.
+* These timings are implementation defaults, not wire-format fields: `protocol/vectors/` does not
+  cover them and no frame layout changes.
 * Transfer completes when all chunks are acked; sender MAY keep the blob for
   `RESOURCE_KEEP_MS` to serve retransmits, then frees it.
 * Receiver emits `ResourceReceived` only after `sha256` verification and successful decryption.
