@@ -66,7 +66,10 @@ bool UsbTransport::connected() const { return false; }
 // --- BLE NUS: nRF52 (Adafruit Bluefruit) ----------------------------------------------------
 #if (defined(ARDUINO_ARCH_NRF52) || defined(NRF52_SERIES)) && defined(OM_ENABLE_BLE)
 namespace {
-BLEUart g_bleuart;
+// The default BLEUart RX FIFO is 256 bytes: an app that writes a whole companion frame
+// (SLIP + OM chunk, up to ~300 B) in a burst could overflow it while the firmware was busy
+// queueing a reply, silently losing the frame. 1 KiB keeps a full frame plus slack.
+BLEUart g_bleuart(1024);
 }
 bool BleTransport::begin(const char* device_name) {
     // The SoftDevice may already be enabled (BLE-closed "SD for flash" images, or an early-start
@@ -128,7 +131,7 @@ size_t BleTransport::write(const uint8_t* data, size_t len) {
         if (n > chunk) n = chunk;
         const size_t w = (size_t)g_bleuart.write(data + sent, n);
         if (w == 0) {
-            if (millis() - start > 4000u) break;  // link stalled: give up rather than hang the loop
+            if (millis() - start > 500u) break;  // link stalled: drop the rest, never hang the loop
             delay(2);
             continue;
         }
