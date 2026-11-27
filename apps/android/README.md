@@ -33,7 +33,7 @@ USB. No bridge, no server, no account.
 | Notifications | ✅ message channel with sender/channel + text preview (never media), tap → thread, mark-read on open; persistent service notification |
 | Onboarding | ✅ 3 steps (role → country/name/privacy → secure) applying the shared `content/presets/setup.json` preset; creates a private channel + invite QR |
 | Chats + thread | ✅ direct/channel threads, delivery ticks, retry, reply model, day separators, text/position/attachment bubbles |
-| Media | ✅ gallery/camera image → downscale+JPEG loop to the profile cap with pre-send airtime estimate; voice note with `MediaRecorder` AAC-LC mono 16 kHz ~12 kbps MP4 (duration cap per profile), playback |
+| Media | ✅ send: gallery/camera image → downscale+WebP loop to the profile cap with pre-send airtime estimate; voice note with `MediaRecorder` AAC-LC mono 16 kHz ~12 kbps MP4 (duration cap per profile). Receive: images decode inline (tap → full-screen viewer), voice notes play in the thread (Codec2 via FFI → `AudioTrack`, Opus/AAC via `MediaPlayer`) with play/stop state and honest format/duration/size labels |
 | QR | ✅ zxing scan for contact/channel invites; own contact QR; channel invite QR; every `openmesh://` URL validated |
 | Channels | ✅ create with invite QR, join via scan/paste, list/unread |
 | Nodes / map | ✅ node list (role, hops, RSSI/SNR, battery, last seen); osmdroid map with node markers |
@@ -118,8 +118,13 @@ by Gradle and parsed by `MediaTiers.kt` (JVM parity test against the real reposi
   and encode through the Rust Codec2 FFI (`openmeshVoiceEncode`); the effective duration cap is
   `min(tier max, profile cap / tier bytes-per-second)` and the same bytes+airtime preview is shown
   before sending. High uses the platform recorder (OGG/Opus on API 29+, AAC/MP4 fallback).
+* **Received images**: stored attachments are decoded off the UI thread with `BitmapFactory`
+  (downsampled to a safe edge for the bubble), shown as an inline thumbnail and opened full-screen
+  on tap; missing/corrupt files show plain-language fallback copy instead of a dead end.
 * **Playback**: Codec2 attachments are decoded through `openmeshVoiceDecode` and played with
-  `AudioTrack` (8 kHz mono); Opus/AAC use `MediaPlayer`. Bubbles label format, duration and size.
+  `AudioTrack` (8 kHz mono); Opus/AAC use `MediaPlayer`. One player per thread, so notes never
+  overlap; bubbles show Loading/Playing/error state, format, duration (from metadata or the Codec2
+  payload size) and size.
 * **Settings**: default image and voice tier are persisted in DataStore (defaults from
   `media.json`: medium image, tiny voice) and used by the composer/recorder.
 * Wire format is unchanged: attachments carry MIME + bytes as before; Codec2 payloads are raw

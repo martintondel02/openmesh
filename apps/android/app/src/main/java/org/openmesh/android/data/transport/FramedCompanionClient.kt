@@ -89,6 +89,12 @@ class FramedCompanionClient(
     private var helloAck = CompletableDeferred<HelloAck>()
     private var pingNonce = 1L
 
+    // RX instrumentation: proves whether radio notifications carrying OMP frames reach the app at
+    // all (e.g. a chunked bridge->phone attachment) or are dropped below the companion client.
+    private var rxChunkCount = 0L
+    private var rxByteCount = 0L
+    private var lastRxSummaryMs = 0L
+
     /** Start the read/handshake loop in [scope]; idempotent. */
     fun start(scope: CoroutineScope) {
         if (job?.isActive == true) return
@@ -107,6 +113,19 @@ class FramedCompanionClient(
             }
             launch {
                 transport.incoming.collect { chunk ->
+                    rxChunkCount += 1
+                    rxByteCount += chunk.size
+                    val now = System.currentTimeMillis()
+                    if (lastRxSummaryMs == 0L) lastRxSummaryMs = now
+                    if (now - lastRxSummaryMs >= 2_000L) {
+                        MeshLog.i(
+                            "companion rx chunks=$rxChunkCount bytes=$rxByteCount window=${now - lastRxSummaryMs}ms " +
+                                "connected=${_session.value.connected} ready=${_session.value.ready}",
+                        )
+                        rxChunkCount = 0
+                        rxByteCount = 0
+                        lastRxSummaryMs = now
+                    }
                     for (frame in decoder.feed(chunk)) {
                         handleFrame(frame)
                     }
@@ -187,8 +206,13 @@ class FramedCompanionClient(
 
     private fun handleFrame(frame: ByteArray) {
         val parsed = SlipFraming.parse(frame) ?: run {
+            MeshLog.w("companion rx bad frame (CRC/size) bytes=${frame.size}")
             _session.value = _session.value.copy(lastError = "bad companion frame (CRC/size)")
             return
+        }
+        // type 7 = RX (an OMP frame the radio heard); resource transfers arrive as many of these.
+        if (parsed.type == Type.RX) {
+            MeshLog.i("companion rx frame type=RX payload=${parsed.payload.size}")
         }
         val map = try {
             CborCodec.decodeMap(parsed.payload)

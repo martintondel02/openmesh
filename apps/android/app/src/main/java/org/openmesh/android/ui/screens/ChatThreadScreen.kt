@@ -1,6 +1,7 @@
 package org.openmesh.android.ui.screens
 
 import android.content.Context
+import android.graphics.Bitmap
 import android.net.Uri
 import android.provider.OpenableColumns
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -34,6 +35,7 @@ import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.PhotoCamera
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Send
+import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -43,6 +45,7 @@ import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -62,11 +65,19 @@ import org.openmesh.android.data.model.Message
 import org.openmesh.android.data.model.MessageKind
 import org.openmesh.android.data.repository.MediaKind
 import org.openmesh.android.data.repository.MeshRepository
+import org.openmesh.android.media.AttachmentPlayer
+import org.openmesh.android.media.AttachmentUiPolicy
+import org.openmesh.android.media.AttachmentViewKind
 import org.openmesh.android.media.ImageCompressor
+import org.openmesh.android.media.VoicePlaybackUiState
 import org.openmesh.android.ui.components.AirtimeEstimateDialog
+import org.openmesh.android.ui.components.AttachmentImageViewerDialog
+import org.openmesh.android.ui.components.AttachmentThumbnail
 import org.openmesh.android.ui.components.DeliveryIcon
+import org.openmesh.android.ui.components.FileAttachmentRow
 import org.openmesh.android.ui.components.formatDuration
 import org.openmesh.android.ui.components.relativeTime
+import org.openmesh.android.ui.theme.MeshError
 import org.openmesh.android.ui.theme.MeshOnSurfaceVariant
 import org.openmesh.android.ui.theme.MeshOutline
 import org.openmesh.android.ui.theme.MeshPrimary
@@ -93,6 +104,56 @@ fun ChatThreadScreen(
     var draft by remember { mutableStateOf("") }
     var pickedImage by remember { mutableStateOf<Uri?>(null) }
     var showVoiceDialog by remember { mutableStateOf(false) }
+
+    // One player per thread so voice notes never overlap; playback state is shown on the bubble.
+    val attachmentPlayer = remember { AttachmentPlayer(context) }
+    var playingMessageId by remember { mutableStateOf<Long?>(null) }
+    var voiceState by remember { mutableStateOf(VoicePlaybackUiState.IDLE) }
+    var voiceError by remember { mutableStateOf<String?>(null) }
+    var imageViewer by remember { mutableStateOf<Pair<Bitmap, String>?>(null) }
+
+    DisposableEffect(Unit) {
+        onDispose { attachmentPlayer.stop() }
+    }
+
+    fun toggleVoice(message: Message) {
+        val attachment = message.attachment ?: return
+        if (playingMessageId == message.id) {
+            attachmentPlayer.stop()
+            playingMessageId = null
+            voiceState = VoicePlaybackUiState.IDLE
+            voiceError = null
+            return
+        }
+        val file = repository.attachmentFile(attachment.id)
+        playingMessageId = message.id
+        voiceError = null
+        if (file == null) {
+            voiceState = VoicePlaybackUiState.ERROR
+            voiceError = AttachmentUiPolicy.voiceFallbackText(fileExists = false)
+            return
+        }
+        voiceState = VoicePlaybackUiState.LOADING
+        attachmentPlayer.play(
+            file = file,
+            mime = attachment.mime,
+            onStarted = {
+                if (playingMessageId == message.id) voiceState = VoicePlaybackUiState.PLAYING
+            },
+            onDone = {
+                if (playingMessageId == message.id) {
+                    playingMessageId = null
+                    voiceState = VoicePlaybackUiState.IDLE
+                }
+            },
+            onError = { detail ->
+                if (playingMessageId == message.id) {
+                    voiceState = VoicePlaybackUiState.ERROR
+                    voiceError = detail
+                }
+            },
+        )
+    }
 
     LaunchedEffect(thread.size) {
         if (thread.isNotEmpty()) listState.animateScrollToItem(thread.lastIndex)
@@ -142,7 +203,18 @@ fun ChatThreadScreen(
             contentPadding = androidx.compose.foundation.layout.PaddingValues(12.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            items(thread, key = { it.id }) { message -> MessageBubble(message, isChannel, repository) }
+            items(thread, key = { it.id }) { message ->
+                MessageBubble(
+                    message = message,
+                    isChannel = isChannel,
+                    repository = repository,
+                    playingMessageId = playingMessageId,
+                    voiceState = voiceState,
+                    voiceError = voiceError,
+                    onToggleVoice = { toggleVoice(it) },
+                    onOpenImage = { bitmap, name -> imageViewer = bitmap to name },
+                )
+            }
             if (thread.isEmpty()) {
                 item {
                     Text(
@@ -226,11 +298,28 @@ fun ChatThreadScreen(
             onDismiss = { showVoiceDialog = false },
         )
     }
+
+    imageViewer?.let { (bitmap, name) ->
+        AttachmentImageViewerDialog(
+            bitmap = bitmap,
+            contentDescription = "Attachment image: $name",
+            onDismiss = { imageViewer = null },
+        )
+    }
 }
 
 
 @Composable
-private fun MessageBubble(message: Message, isChannel: Boolean, repository: MeshRepository) {
+private fun MessageBubble(
+    message: Message,
+    isChannel: Boolean,
+    repository: MeshRepository,
+    playingMessageId: Long?,
+    voiceState: VoicePlaybackUiState,
+    voiceError: String?,
+    onToggleVoice: (Message) -> Unit,
+    onOpenImage: (Bitmap, String) -> Unit,
+) {
     val outgoing = message.outgoing
     val bubbleColor = if (outgoing) MeshPrimary.copy(alpha = 0.16f) else MeshSurfaceHigh
     Row(
@@ -252,7 +341,15 @@ private fun MessageBubble(message: Message, isChannel: Boolean, repository: Mesh
                 )
             }
             when (message.kind) {
-                MessageKind.ATTACHMENT -> AttachmentBubble(message, repository)
+                MessageKind.ATTACHMENT -> AttachmentBubble(
+                    message = message,
+                    repository = repository,
+                    playingMessageId = playingMessageId,
+                    voiceState = voiceState,
+                    voiceError = voiceError,
+                    onToggleVoice = onToggleVoice,
+                    onOpenImage = onOpenImage,
+                )
                 MessageKind.POSITION -> Column {
                     Text("Position", style = MaterialTheme.typography.titleMedium)
                     message.position?.let {
@@ -311,64 +408,104 @@ private fun MessageBubble(message: Message, isChannel: Boolean, repository: Mesh
 }
 
 @Composable
-private fun AttachmentBubble(message: Message, repository: MeshRepository) {
+private fun AttachmentBubble(
+    message: Message,
+    repository: MeshRepository,
+    playingMessageId: Long?,
+    voiceState: VoicePlaybackUiState,
+    voiceError: String?,
+    onToggleVoice: (Message) -> Unit,
+    onOpenImage: (Bitmap, String) -> Unit,
+) {
     val attachment = message.attachment ?: return
-    val context = androidx.compose.ui.platform.LocalContext.current
-    val player = remember { org.openmesh.android.media.AttachmentPlayer(context) }
-    var playing by remember { mutableStateOf(false) }
-    val isAudio = attachment.mime.startsWith("audio/")
-    Row(
-        verticalAlignment = Alignment.CenterVertically,
-        modifier = Modifier
-            .fillMaxWidth()
-            .then(
-                if (isAudio) {
-                    Modifier.clickable {
-                        val file = repository.attachmentFile(attachment.id)
-                        if (file != null) {
-                            playing = !playing
-                            if (playing) {
-                                player.play(file, attachment.mime) { playing = false }
-                            } else {
-                                player.stop()
-                            }
-                        }
-                    }
-                } else {
-                    Modifier
-                },
-            ),
-    ) {
-        Box(
-            Modifier
-                .size(44.dp)
-                .clip(RoundedCornerShape(10.dp))
-                .background(MeshOutline.copy(alpha = 0.5f)),
-            contentAlignment = Alignment.Center,
-        ) {
-            Icon(
-                if (attachment.mime.startsWith("audio")) Icons.Filled.PlayArrow else Icons.Filled.Image,
-                contentDescription = null,
-                tint = MeshPrimary,
+    val kind = AttachmentUiPolicy.kindFor(attachment.mime)
+    val name = AttachmentUiPolicy.displayName(attachment.name, attachment.mime, kind)
+    val file = repository.attachmentFile(attachment.id)
+    // Prefer the bytes actually on disk: a legacy row (or a re-delivery reusing a message id) can
+    // carry stale size metadata while the file holds the real payload.
+    val sizeBytes = file?.takeIf { it.isFile }?.length()?.toInt() ?: attachment.sizeBytes
+    val detail = AttachmentUiPolicy.attachmentLabel(attachment.mime, attachment.durationMs, sizeBytes)
+    when (kind) {
+        AttachmentViewKind.IMAGE -> Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            // Inline thumbnail decoded from the stored bytes; tap opens the full-screen viewer.
+            AttachmentThumbnail(
+                file = file,
+                contentDescription = "Attachment image: $name",
+                onOpen = { bitmap -> onOpenImage(bitmap, name) },
             )
-        }
-        Spacer(Modifier.width(10.dp))
-        Column(Modifier.weight(1f)) {
             Text(
-                attachment.name ?: message.text ?: "Attachment",
-                style = MaterialTheme.typography.titleMedium,
+                name,
+                style = MaterialTheme.typography.titleSmall,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
             Text(
-                org.openmesh.android.media.MediaTierPolicy.attachmentLabel(
-                    attachment.mime,
-                    attachment.durationMs,
-                    attachment.sizeBytes,
-                ) + if (playing) " · playing…" else "",
+                detail,
                 style = MaterialTheme.typography.labelMedium,
-                color = if (isAudio) MeshPrimary else MeshOnSurfaceVariant,
+                color = MeshOnSurfaceVariant,
             )
+        }
+
+        AttachmentViewKind.VOICE -> {
+            val state = if (playingMessageId == message.id) voiceState else VoicePlaybackUiState.IDLE
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { onToggleVoice(message) },
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Box(
+                    Modifier
+                        .size(44.dp)
+                        .clip(CircleShape)
+                        .background(MeshPrimary.copy(alpha = 0.16f)),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(
+                        if (state == VoicePlaybackUiState.PLAYING) Icons.Filled.Stop else Icons.Filled.PlayArrow,
+                        contentDescription = if (state == VoicePlaybackUiState.PLAYING) {
+                            "Stop voice note"
+                        } else {
+                            "Play voice note"
+                        },
+                        tint = MeshPrimary,
+                    )
+                }
+                Spacer(Modifier.width(10.dp))
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        name,
+                        style = MaterialTheme.typography.titleMedium,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Text(
+                        detail,
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MeshOnSurfaceVariant,
+                    )
+                    Text(
+                        AttachmentUiPolicy.voiceStateText(state, voiceError),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = when (state) {
+                            VoicePlaybackUiState.ERROR -> MeshError
+                            VoicePlaybackUiState.PLAYING -> MeshTertiary
+                            else -> MeshPrimary
+                        },
+                    )
+                }
+            }
+        }
+
+        AttachmentViewKind.FILE -> Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            FileAttachmentRow(name = name, detail = detail)
+            if (file == null) {
+                Text(
+                    "The file is not on this phone yet.",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MeshOnSurfaceVariant,
+                )
+            }
         }
     }
     if (message.delivery == DeliveryState.FAILED) {

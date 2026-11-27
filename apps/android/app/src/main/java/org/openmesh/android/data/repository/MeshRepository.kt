@@ -833,12 +833,41 @@ class MeshRepository(
         }
     }
 
+    /**
+     * Merge a newly received copy of a message into the in-memory threads and Room.
+     *
+     * Inbound attachments arrive as several events for one message id (text/GroupMessage event,
+     * oversized-envelope resource, attachment-payload resource) in unspecified order; see
+     * [MessageMerge]. Only used for inbound events — locally sent messages replace their row.
+     */
+    private fun upsertReceivedMessage(peerId: String, incoming: Message, channel: Boolean): Message {
+        val existing = findMessageAnywhere(peerId, incoming.id)
+        val merged = MessageMerge.merge(existing, incoming)
+
+        fun upsert(list: List<Message>): List<Message> =
+            (list.filterNot { it.id == merged.id } + merged).sortedBy { it.sentAtMs }
+        if (channel) {
+            val thread = _channelMessages.value[peerId].orEmpty()
+            _channelMessages.value = _channelMessages.value + (peerId to upsert(thread))
+        } else {
+            val thread = _messages.value[peerId].orEmpty()
+            _messages.value = _messages.value + (peerId to upsert(thread))
+            rebuildConversations()
+        }
+        scope.launch { dao.upsertMessage(MessageEntity.fromModel(merged)) }
+        return merged
+    }
+
+    private fun findMessageAnywhere(peerId: String, id: Long): Message? =
+        _channelMessages.value[peerId]?.firstOrNull { it.id == id }
+            ?: _messages.value[peerId]?.firstOrNull { it.id == id }
+
     private fun appendMessage(peerId: String, message: Message, channel: Boolean) {
         // Upsert by message id: an own frame can be echoed back through the mesh (relay/loopback)
         // and re-delivered as an inbound event, and the UI keys messages by id. Appending blindly
         // produced duplicate ids which crashed the Compose LazyColumn ("Key ... was already used").
         fun upsert(list: List<Message>): List<Message> =
-            list.filterNot { it.id == message.id } + message
+            (list.filterNot { it.id == message.id } + message).sortedBy { it.sentAtMs }
         if (channel) {
             val thread = _channelMessages.value[peerId].orEmpty()
             _channelMessages.value = _channelMessages.value + (peerId to upsert(thread))
@@ -881,23 +910,32 @@ class MeshRepository(
     private fun handleCoreEvent(event: CoreEvent) {
         when (event) {
             is CoreEvent.MessageReceived -> {
-                val channel = event.message.peerId in _channels.value.map { it.id }
-                val peerId = event.message.peerId
-                if (!event.message.outgoing) {
-                    appendMessage(peerId, event.message, channel)
-                    scope.launch { dao.upsertMessage(MessageEntity.fromModel(event.message)) }
+                val incoming = event.message
+                if (incoming.outgoing) return
+                val channel = incoming.peerId in _channels.value.map { it.id }
+                val firstEventForMessage = findMessageAnywhere(incoming.peerId, incoming.id) == null
+                val merged = upsertReceivedMessage(incoming.peerId, incoming, channel)
+                MeshLog.i(
+                    "rx message id=${incoming.id} channel=$channel first=$firstEventForMessage " +
+                        "kind=${merged.kind} attachment=${merged.attachment?.mime} text=${merged.text?.take(32)}",
+                )
+                if (firstEventForMessage) {
                     if (channel) {
                         _channels.value = _channels.value.map {
-                            if (it.id == peerId) it.copy(unreadCount = it.unreadCount + 1) else it
+                            if (it.id == incoming.peerId) it.copy(unreadCount = it.unreadCount + 1) else it
                         }
                     }
                     if (_settings.value.notificationsEnabled) {
-                        MeshLog.i("notification: new message peer=$peerId channel=$channel")
+                        val body = when {
+                            merged.attachment?.mime?.startsWith("image/") == true -> "📷 Photo"
+                            merged.attachment?.mime?.startsWith("audio/") == true -> "🎤 Voice note"
+                            else -> merged.text ?: "New message"
+                        }
                         Notifications.showMessage(
                             appContext,
-                            peerId = peerId,
-                            sender = if (channel) displayNameFor(peerId) else displayNameFor(event.message.fromId),
-                            body = event.message.text ?: "New message",
+                            peerId = incoming.peerId,
+                            sender = if (channel) displayNameFor(incoming.peerId) else displayNameFor(incoming.fromId),
+                            body = body,
                             isChannel = channel,
                         )
                     }
@@ -914,6 +952,9 @@ class MeshRepository(
             }
 
             is CoreEvent.ResourceProgress -> {
+                MeshLog.i(
+                    "rx resource progress id=${event.messageId} chunk=${event.received}/${event.total}",
+                )
                 fun progress(list: List<Message>) = list.map {
                     if (it.id == event.messageId && it.attachment != null) {
                         it.copy(attachment = it.attachment.copy(progress = event.received.toFloat() / event.total.coerceAtLeast(1)))
@@ -926,17 +967,34 @@ class MeshRepository(
             }
 
             is CoreEvent.ResourceReceived -> {
-                val file = File(attachmentsDir(), "att_${event.messageId}").apply { writeBytes(event.data) }
-                val text = if (event.mime.startsWith("text/")) String(event.data, Charsets.UTF_8) else event.filename ?: "Attachment"
                 val channel = event.channelId != null && event.channelId in _channels.value.map { it.id }
                 val peerId = event.channelId ?: event.peerId
-                val message = Message(
+                MeshLog.i(
+                    "rx resource id=${event.messageId} mime=${event.mime} bytes=${event.data.size} " +
+                        "filename=${event.filename} duration=${event.durationMs} channel=$channel",
+                )
+                // Oversized group-message envelopes arrive as a LongText resource with this mime.
+                // They are transport artifacts, not user attachments: both this envelope and the
+                // real payload use files/attachments/att_<msgId>, so persisting the envelope would
+                // overwrite the payload (the old bug) and create a bogus CBOR "attachment" row.
+                // The GroupMessage event carries the message text; the payload resource carries
+                // the real mime/size. Ordering-independent thanks to MessageMerge.
+                if (event.mime.startsWith("application/cbor", ignoreCase = true)) {
+                    MeshLog.i("rx resource: ignoring cbor envelope id=${event.messageId} bytes=${event.data.size}")
+                    return
+                }
+                val existing = findMessageAnywhere(peerId, event.messageId)
+                val file = File(attachmentsDir(), "att_${event.messageId}")
+                if (runCatching { file.writeBytes(event.data) }.isFailure) {
+                    MeshLog.w("rx resource: could not store id=${event.messageId} bytes=${event.data.size}")
+                }
+                val incoming = Message(
                     id = event.messageId,
                     peerId = peerId,
                     fromId = event.peerId,
                     toId = peerId,
                     kind = MessageKind.ATTACHMENT,
-                    text = text,
+                    text = event.filename,
                     sentAtMs = System.currentTimeMillis(),
                     receivedAtMs = System.currentTimeMillis(),
                     outgoing = false,
@@ -946,18 +1004,22 @@ class MeshRepository(
                         mime = event.mime,
                         sizeBytes = event.data.size,
                         durationMs = event.durationMs?.toInt(),
-                        name = event.filename ?: file.name,
+                        name = event.filename,
                         progress = 1f,
                     ),
                 )
-                appendMessage(peerId, message, channel)
-                scope.launch { dao.upsertMessage(MessageEntity.fromModel(message)) }
-                if (_settings.value.notificationsEnabled) {
+                val merged = upsertReceivedMessage(peerId, incoming, channel)
+                MeshLog.i(
+                    "rx attachment stored id=${event.messageId} file=${file.name} " +
+                        "merged_kind=${merged.kind} mime=${merged.attachment?.mime} size=${merged.attachment?.sizeBytes}",
+                )
+                if (existing == null && _settings.value.notificationsEnabled) {
+                    val body = if (event.mime.startsWith("image/")) "📷 Photo" else if (event.mime.startsWith("audio/")) "🎤 Voice note" else "Attachment"
                     Notifications.showMessage(
                         appContext,
                         peerId = peerId,
                         sender = if (channel) displayNameFor(peerId) else displayNameFor(event.peerId),
-                        body = if (event.mime.startsWith("image/")) "📷 Photo" else if (event.mime.startsWith("audio/")) "🎤 Voice note" else text,
+                        body = body,
                         isChannel = channel,
                     )
                 }
@@ -967,7 +1029,10 @@ class MeshRepository(
                 UiEvent.Snackbar("${displayNameFor(event.relayId)} holds ${event.count} message(s) for you"),
             )
 
-            is CoreEvent.CoreError -> _uiEvents.tryEmit(UiEvent.Snackbar(event.message))
+            is CoreEvent.CoreError -> {
+                MeshLog.w("core error: ${event.message}")
+                _uiEvents.tryEmit(UiEvent.Snackbar(event.message))
+            }
         }
     }
 
@@ -1141,8 +1206,12 @@ class MeshRepository(
     private fun handleCompanionEvent(event: FramedCompanionClient.CompanionEvent) {
         markRadioReply()
         when (event) {
-            is FramedCompanionClient.CompanionEvent.Rx ->
-                engine.ingestFrame(event.frame, System.currentTimeMillis())
+            is FramedCompanionClient.CompanionEvent.Rx -> {
+                val ingested = engine.ingestFrame(event.frame, System.currentTimeMillis())
+                if (ingested.isFailure) {
+                    MeshLog.w("engine ingest failed bytes=${event.frame.size}: ${ingested.exceptionOrNull()?.message}")
+                }
+            }
 
             is FramedCompanionClient.CompanionEvent.Stats -> updateRadio {
                 it.copy(
