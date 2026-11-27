@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Check, Image as ImageIcon, Loader2, SendHorizontal, TriangleAlert } from 'lucide-react';
+import { Check, Clock, Image as ImageIcon, Loader2, SendHorizontal, TriangleAlert } from 'lucide-react';
 import { useAppStore } from '../../store/app';
 import type { ActiveThread } from '../../store/app';
 import {
@@ -18,6 +18,7 @@ import {
   type ImageTierId,
 } from '../../lib/media-tiers';
 import { formatBytes, formatSeconds, cn } from '../../lib/utils';
+import { SLOW_MEDIA_WALL_CLOCK_MS, formatMediaExpectation, mediaWallClockMs } from '../../lib/media-transfer';
 import { Badge, Button } from '../../components/ui/primitives';
 import { Modal } from '../../components/ui/overlay';
 import { Field, TextInput } from '../../components/ui/forms';
@@ -145,6 +146,15 @@ export function ImageComposerModal({ open, file, thread, onClose }: ImageCompose
     [effectiveBytes, profileId, regionId],
   );
   const budgetPct = budgetMs ? (estimate.airtimeMs / budgetMs) * 100 : null;
+  const effectiveDuty = config?.radio.duty_cycle_pct ?? region.dutyCyclePct;
+  const backgroundHint = useMemo(() => {
+    const wallClockMs = mediaWallClockMs(estimate, effectiveDuty);
+    if (wallClockMs < SLOW_MEDIA_WALL_CLOCK_MS) return null;
+    const expectation = formatMediaExpectation(wallClockMs);
+    if (!expectation) return null;
+    const dutyText = effectiveDuty ? `the ${effectiveDuty} % legal duty cycle` : 'the radio\u2019s pacing';
+    return `At ${dutyText} this takes ${expectation} of wall-clock time. It keeps sending in the background after you press Send — you can close this dialog.`;
+  }, [estimate, effectiveDuty]);
   const overCap = effectiveBytes > cap;
   const originalBlocked = tier === 'original' && (!policy.originalAllowed || !originalConfirmed);
   const canSend = Boolean(compressed) && !busy && !error && !overCap && !originalBlocked;
@@ -342,6 +352,12 @@ export function ImageComposerModal({ open, file, thread, onClose }: ImageCompose
                   <>{region.notes} The image occupies {estimate.percentOfCap.toFixed(0)} % of the profile attachment cap.</>
                 )}
               </p>
+              {backgroundHint ? (
+                <p className="mt-1.5 flex items-start gap-1 text-3xs leading-relaxed text-slate-500">
+                  <Clock className="mt-0.5 h-3 w-3 shrink-0" aria-hidden="true" />
+                  <span>{backgroundHint}</span>
+                </p>
+              ) : null}
             </div>
             {tier === 'original' && policy.originalAllowed ? (
               <label className="flex items-start gap-2 rounded-lg border border-amber-400/25 bg-amber-400/[0.06] px-2.5 py-2 text-2xs text-amber-200">

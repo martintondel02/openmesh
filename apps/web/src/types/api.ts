@@ -386,6 +386,11 @@ export interface ChatMessage extends MessageData {
   waveform?: number[];
   /** Local error explanation for failed sends. */
   error?: string;
+  /**
+   * Local-only: epoch ms of the last outgoing-media activity (send, bridge echo,
+   * radio progress or completion ack). Drives the stalled-upload detector.
+   */
+  mediaActivityAtMs?: number;
   /** True for demo/seed data, so the UI can label it as illustrative. */
   seeded?: boolean;
 }
@@ -395,6 +400,8 @@ export interface ChatGroupMessage extends GroupMessageData {
   localUrl?: string;
   waveform?: number[];
   error?: string;
+  /** Local-only: epoch ms of the last outgoing-media activity (stall detection). */
+  mediaActivityAtMs?: number;
   seeded?: boolean;
 }
 

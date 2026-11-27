@@ -315,9 +315,9 @@ export function Composer({ thread }: { thread: ActiveThread }) {
           <>
             <span className="hidden items-center gap-1.5 sm:flex">
               <ImagePlus className="h-3 w-3" aria-hidden="true" />
-              Images are downscaled and compressed locally before they touch the mesh
+              Images are compressed locally · large media can take minutes and keeps sending in the background
             </span>
-            <span className="text-slate-600 sm:hidden">Images compressed locally · airtime shown before send</span>
+            <span className="text-slate-600 sm:hidden">Images compressed locally · slow media keeps sending in the background</span>
             <span className="ml-auto hidden items-center gap-2 sm:flex">
               <SignalBars rssi={node?.rssi ?? null} />
               <span className="text-slate-600">{profile.label}</span>

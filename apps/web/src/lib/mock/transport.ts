@@ -80,6 +80,7 @@ export class MockTransport implements MeshTransport {
   private readonly statusListeners = new Set<(status: TransportStatus) => void>();
   private timers = new Set<ReturnType<typeof setTimeout>>();
   private objectUrls = new Map<string, string>();
+  private uploadedMeta = new Map<string, { size: number; mime: string; name: string | null }>();
   private connected = false;
   private disposed = false;
   private nextMsgId: number;
@@ -564,7 +565,7 @@ export class MockTransport implements MeshTransport {
         from: this.dataset.ownNodeId,
         to,
         kind: attachmentId ? 'attachment' : 'text',
-        text: attachmentId ? null : text,
+        text: text || null,
         sent_at_ms: Date.now(),
         received_at_ms: Date.now(),
         outgoing: true,
@@ -572,23 +573,73 @@ export class MockTransport implements MeshTransport {
         read: false,
         reply_to: replyTo,
         thread: null,
-        attachment: attachmentId
-          ? {
-              id: attachmentId,
-              mime: 'application/octet-stream',
-              size: 0,
-              sha256: '',
-              duration_ms: null,
-              name: null,
-              progress: 1,
-            }
-          : null,
+        attachment: this.mockAttachment(attachmentId),
         position: null,
       };
       this.emit('message', message as unknown as Record<string, unknown>);
-      this.later(() => this.emit('ack', { msg_id: msgId, peer: to, kind: 'delivered', at_ms: Date.now() }), 1_400);
-      this.later(() => this.emit('ack', { msg_id: msgId, peer: to, kind: 'read', at_ms: Date.now() }), 3_600);
+      if (message.attachment) {
+        this.simulateOutgoingMedia(msgId, to, message.attachment, false);
+      } else {
+        this.later(() => this.emit('ack', { msg_id: msgId, peer: to, kind: 'delivered', at_ms: Date.now() }), 1_400);
+        this.later(() => this.emit('ack', { msg_id: msgId, peer: to, kind: 'read', at_ms: Date.now() }), 3_600);
+      }
     }, 260);
+  }
+
+  /** Demo attachment metadata for an upload, with the radio transfer starting at 0 %. */
+  private mockAttachment(attachmentId: string | null): MessageData['attachment'] {
+    if (!attachmentId) return null;
+    const meta = this.uploadedMeta.get(attachmentId);
+    return {
+      id: attachmentId,
+      mime: meta?.mime ?? 'application/octet-stream',
+      size: meta?.size ?? 0,
+      sha256: '',
+      duration_ms: null,
+      name: meta?.name ?? null,
+      progress: 0,
+    };
+  }
+
+  /**
+   * Demo-mode radio progress: emit the same `resource_progress` events the bridge
+   * sends for an outgoing transfer, so the web progress/stall/retry UI can be
+   * reviewed without hardware. Direct messages finish with a delivered update;
+   * channel attachments stay "sent to channel" (broadcast, no receipt).
+   */
+  private simulateOutgoingMedia(
+    msgId: number,
+    peer: string,
+    attachment: NonNullable<MessageData['attachment']>,
+    group: boolean,
+  ): void {
+    const steps = [25, 50, 75, 100];
+    const resId = Number.parseInt(attachment.id.replace(/\D/g, '').slice(-8) || '1', 16) || 1;
+    steps.forEach((received, index) => {
+      this.later(
+        () =>
+          this.emit('resource_progress', {
+            peer,
+            msg_id: msgId,
+            res_id: resId,
+            received,
+            total: 100,
+            direction: 'out',
+          }),
+        400 + index * 1_200,
+      );
+    });
+    if (!group) {
+      this.later(
+        () =>
+          this.emit('message_update', {
+            msg_id: msgId,
+            delivered: true,
+            attachment: { ...attachment, progress: 1 },
+          }),
+        400 + steps.length * 1_200 + 300,
+      );
+    }
   }
 
   private handleSendGroupMessage(commandId: string, data: Record<string, unknown>): void {
@@ -605,14 +656,15 @@ export class MockTransport implements MeshTransport {
         from_name: this.ownName,
         sender_key: this.dataset.identities[this.dataset.ownNodeId]!,
         kind: typeof data.attachment_id === 'string' ? 'attachment' : 'text',
-        text: typeof data.text === 'string' ? data.text : null,
+        text: (typeof data.text === 'string' && data.text) || null,
         sent_at_ms: Date.now(),
         outgoing: true,
         signature_valid: true,
-        attachment: null,
+        attachment: this.mockAttachment(typeof data.attachment_id === 'string' ? data.attachment_id : null),
         position: null,
       };
       this.emit('group_message', message as unknown as Record<string, unknown>);
+      if (message.attachment) this.simulateOutgoingMedia(msgId, channelId, message.attachment, true);
     }, 280);
   }
 
@@ -813,8 +865,12 @@ export class MockTransport implements MeshTransport {
     const id = `att_${bytesToHex(crypto.getRandomValues(new Uint8Array(6)))}`;
     const url = URL.createObjectURL(blob);
     this.objectUrls.set(id, url);
+    this.uploadedMeta.set(id, {
+      size: blob.size,
+      mime: blob.type || 'application/octet-stream',
+      name: filename ?? null,
+    });
     const digest = await digestBytes(blob).catch(() => '');
-    void filename;
     return { id, size: blob.size, sha256: digest };
   }
 

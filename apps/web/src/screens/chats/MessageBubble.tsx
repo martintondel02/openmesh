@@ -5,6 +5,7 @@ import {
   CornerUpLeft,
   Download,
   Info,
+  Loader2,
   MapPin,
   Pause,
   Play,
@@ -16,6 +17,9 @@ import type { ChatGroupMessage, ChatMessage, DeliveryState, Position } from '../
 import { useAppStore } from '../../store/app';
 import { formatClockTime, cn, formatDuration, truncateGraphemes } from '../../lib/utils';
 import { deliveryPresentation, displayName } from '../../lib/display';
+import { DEFAULT_PROFILE_ID, DEFAULT_REGION_ID, estimateAttachment } from '../../lib/airtime';
+import { describeOutgoingMedia, mediaWallClockMs } from '../../lib/media-transfer';
+import type { OutgoingMediaState } from '../../lib/media-transfer';
 import { speechWaveform } from '../../lib/audio';
 import { Avatar, IconButton } from '../../components/ui/primitives';
 import { DeliveryStatus, SignalBars } from '../../components/ui/signals';
@@ -95,7 +99,7 @@ export function useAttachmentSrc(message: Pick<AnyChatMessage, 'localUrl' | 'att
 /* Image                                                              */
 /* ------------------------------------------------------------------ */
 
-function ImageAttachment({ message }: { message: AnyChatMessage }) {
+function ImageAttachment({ message, own = false }: { message: AnyChatMessage; own?: boolean }) {
   const { src, loading, error } = useAttachmentSrc(message);
   const [open, setOpen] = useState(false);
   const attachment = message.attachment;
@@ -121,10 +125,11 @@ function ImageAttachment({ message }: { message: AnyChatMessage }) {
           />
         ) : (
           <div className="grid h-40 w-full place-items-center bg-ink-900/70 text-2xs text-slate-500">
-            {error ? 'Image unavailable' : loading || transferring ? 'Receiving image…' : 'No preview'}
+            {error ? 'Image unavailable' : loading || transferring ? (own ? 'Sending image…' : 'Receiving image…') : 'No preview'}
           </div>
         )}
-        {transferring ? (
+        {/* Outgoing media progress is shown by the transfer line under the bubble, with radio wording. */}
+        {transferring && !own ? (
           <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-ink-950/90 to-transparent p-2.5 pt-8">
             <div className="flex items-center justify-between text-3xs text-slate-300">
               <span>Receiving…</span>
@@ -434,6 +439,86 @@ function senderColor(name: string): string {
 }
 
 /* ------------------------------------------------------------------ */
+/* Outgoing media transfer line                                       */
+/* ------------------------------------------------------------------ */
+
+/**
+ * A slow clock for outgoing-media bubbles: it flips a silent transfer into the
+ * stalled state even when no store event arrives to re-render the row.
+ */
+function useMediaClock(active: boolean, intervalMs = 5_000): number {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!active) return;
+    setNow(Date.now());
+    const timer = setInterval(() => setNow(Date.now()), intervalMs);
+    return () => clearInterval(timer);
+  }, [active, intervalMs]);
+  return now;
+}
+
+function MediaTransferLine({
+  media,
+  onRetry,
+}: {
+  media: OutgoingMediaState;
+  onRetry: () => void;
+}) {
+  if (media.phase !== 'preparing' && media.phase !== 'transferring' && media.phase !== 'stalled') return null;
+  const percent = media.progress === null ? null : Math.round(media.progress * 100);
+
+  if (media.phase === 'stalled') {
+    return (
+      <div className="mt-1 w-full max-w-[21rem] pr-1 text-3xs text-amber-300">
+        <div className="flex flex-wrap items-center gap-1.5">
+          <AlertTriangle className="h-3 w-3 shrink-0" aria-hidden="true" />
+          <span>{media.label}</span>
+          {media.canRetry ? (
+            <button
+              type="button"
+              onClick={onRetry}
+              className="focus-ring inline-flex items-center gap-1 rounded px-1 py-0.5 font-medium text-amber-200 hover:bg-amber-400/10"
+            >
+              <RefreshCw className="h-2.5 w-2.5" aria-hidden="true" />
+              Retry
+            </button>
+          ) : null}
+        </div>
+        {media.hint ? <p className="mt-1 leading-relaxed text-amber-200/75">{media.hint}</p> : null}
+      </div>
+    );
+  }
+
+  return (
+    <div className="mt-1 w-full max-w-[21rem] pr-1 text-3xs text-slate-500">
+      <div className="flex items-center justify-between gap-2">
+        <span className="flex items-center gap-1">
+          {media.phase === 'transferring' ? <Loader2 className="h-2.5 w-2.5 animate-spin" aria-hidden="true" /> : null}
+          {media.label}
+        </span>
+        {percent !== null ? <span className="font-mono tabular-nums">{percent}%</span> : null}
+      </div>
+      {percent !== null ? (
+        <div
+          role="progressbar"
+          aria-label="Media transfer progress"
+          aria-valuemin={0}
+          aria-valuemax={100}
+          aria-valuenow={percent}
+          className="mt-1 h-1 overflow-hidden rounded-full bg-white/[0.08]"
+        >
+          <div
+            className={cn('h-full rounded-full transition-[width]', media.slow ? 'bg-amber-400' : 'bg-emerald-400')}
+            style={{ width: `${percent}%` }}
+          />
+        </div>
+      ) : null}
+      {media.hint ? <p className="mt-1 leading-relaxed">{media.hint}</p> : null}
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
 /* Message bubble                                                     */
 /* ------------------------------------------------------------------ */
 
@@ -480,6 +565,51 @@ export function MessageBubble({ message, peerName, showAvatar, showSender, resol
     peerName: peerName ?? senderName,
     error: message.error,
   });
+  const config = useAppStore((state) => state.config);
+  const ownAttachment = own && message.kind === 'attachment' && Boolean(message.attachment);
+  const mediaClock = useMediaClock(
+    ownAttachment &&
+      delivery !== 'delivered' &&
+      delivery !== 'read' &&
+      !message.error &&
+      (message.attachment?.progress ?? 0) < 1,
+  );
+  const outgoingMedia = useMemo<OutgoingMediaState | null>(() => {
+    if (!own || !message.attachment) return null;
+    const size = message.attachment.size ?? 0;
+    const estimate =
+      size > 0
+        ? estimateAttachment(
+            size,
+            config?.radio.profile ?? DEFAULT_PROFILE_ID,
+            config?.radio.region ?? DEFAULT_REGION_ID,
+          )
+        : null;
+    return describeOutgoingMedia({
+      attachment: message.attachment,
+      delivery,
+      error: message.error,
+      msgId: message.msg_id,
+      group,
+      sentAtMs: message.sent_at_ms,
+      activityAtMs: message.mediaActivityAtMs ?? null,
+      nowMs: mediaClock,
+      wallClockMs: estimate ? mediaWallClockMs(estimate, config?.radio.duty_cycle_pct) : null,
+    });
+  }, [
+    own,
+    message.attachment,
+    message.msg_id,
+    message.sent_at_ms,
+    message.mediaActivityAtMs,
+    message.error,
+    delivery,
+    group,
+    mediaClock,
+    config?.radio.profile,
+    config?.radio.region,
+    config?.radio.duty_cycle_pct,
+  ]);
   const detailsRows: Array<{ label: string; value: string }> = [
     { label: 'Direction', value: own ? `You → ${group ? `#${message.channel_name}` : peerName ?? 'peer'}` : `${senderName} → You` },
     { label: 'Sent', value: `${formatClockTime(message.sent_at_ms)} · ${new Date(message.sent_at_ms).toLocaleString()}` },
@@ -496,6 +626,12 @@ export function MessageBubble({ message, peerName, showAvatar, showSender, resol
     detailsRows.push({
       label: 'Attachment',
       value: `${message.attachment.mime} · ${Math.max(1, Math.round(message.attachment.size / 1024))} KiB · ${Math.round((message.attachment.progress ?? 1) * 100)}%`,
+    });
+  }
+  if (outgoingMedia) {
+    detailsRows.push({
+      label: 'Media transfer',
+      value: `${outgoingMedia.label}${outgoingMedia.progress !== null ? ` · ${Math.round(outgoingMedia.progress * 100)} %` : ''}`,
     });
   }
   if (replyToId !== null) detailsRows.push({ label: 'Reply to', value: `#${replyToId}` });
@@ -558,7 +694,7 @@ export function MessageBubble({ message, peerName, showAvatar, showSender, resol
 
             {message.kind === 'attachment' && message.attachment?.mime.startsWith('image/') ? (
               <>
-                <ImageAttachment message={message} />
+                <ImageAttachment message={message} own={own} />
                 {message.text ? <p className="mt-1.5 whitespace-pre-wrap break-words">{message.text}</p> : null}
               </>
             ) : null}
@@ -610,6 +746,10 @@ export function MessageBubble({ message, peerName, showAvatar, showSender, resol
           ) : null}
         </div>
 
+        {own && outgoingMedia ? (
+          <MediaTransferLine media={outgoingMedia} onRetry={() => onRetry(message.msg_id)} />
+        ) : null}
+
         {failed ? (
           <div className="mt-1 flex items-center gap-1.5 pr-1 text-3xs text-rose-300">
             <AlertTriangle className="h-3 w-3" aria-hidden="true" />
@@ -627,7 +767,7 @@ export function MessageBubble({ message, peerName, showAvatar, showSender, resol
           </div>
         ) : null}
 
-        {pending && isRecent ? (
+        {pending && isRecent && !outgoingMedia ? (
           <span className="mt-1 pr-1 text-3xs text-slate-500">Sending over LoRa…</span>
         ) : null}
 

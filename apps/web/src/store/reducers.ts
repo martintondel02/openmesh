@@ -49,6 +49,7 @@ function normalizeMessage(input: MessageData, existing?: ChatMessage): ChatMessa
     ...(existing?.tempId ? { tempId: existing.tempId } : {}),
     ...(existing?.localUrl ? { localUrl: existing.localUrl } : {}),
     ...(existing?.waveform ? { waveform: existing.waveform } : {}),
+    ...(typeof existing?.mediaActivityAtMs === 'number' ? { mediaActivityAtMs: existing.mediaActivityAtMs } : {}),
     ...(existing?.error ? { error: existing.error } : {}),
     ...(existing?.seeded ? { seeded: true } : {}),
   };
@@ -118,19 +119,41 @@ export function resourceProgressFraction(received: number, total: number): numbe
 
 /**
  * Bump an attachment's transfer progress for `msg_id` in a direct or channel message list.
+ * `atMs` also records when progress was last seen, so the bubble can detect a stalled
+ * radio transfer instead of hanging silently.
  * Returns the original array when nothing matched (keeps React re-renders cheap).
  */
-export function applyResourceProgress<T extends { msg_id: number; attachment: { progress: number } | null }>(
+export function applyResourceProgress<T extends { msg_id: number; attachment: { progress: number } | null; mediaActivityAtMs?: number }>(
   items: T[],
   msgId: number,
   progress: number,
+  atMs?: number,
 ): T[] {
   const bounded = Math.min(1, Math.max(0, progress));
   let changed = false;
   const next = items.map((item) => {
     if (item.msg_id !== msgId || !item.attachment) return item;
     changed = true;
-    return { ...item, attachment: { ...item.attachment, progress: bounded } };
+    return {
+      ...item,
+      attachment: { ...item.attachment, progress: bounded },
+      ...(typeof atMs === 'number' ? { mediaActivityAtMs: atMs } : {}),
+    };
+  });
+  return changed ? next : items;
+}
+
+/** Mark media activity (bridge echo / update) for `msg_id`, used by the stall detector. */
+export function markMediaActivity<T extends { msg_id: number; mediaActivityAtMs?: number }>(
+  items: T[],
+  msgId: number,
+  atMs: number,
+): T[] {
+  let changed = false;
+  const next = items.map((item) => {
+    if (item.msg_id !== msgId) return item;
+    changed = true;
+    return { ...item, mediaActivityAtMs: atMs };
   });
   return changed ? next : items;
 }
@@ -197,6 +220,7 @@ export function upsertGroupMessage(messages: ChatGroupMessage[], incoming: Group
       ...(existing.tempId ? { tempId: existing.tempId } : {}),
       ...(existing.localUrl ? { localUrl: existing.localUrl } : {}),
       ...(existing.waveform ? { waveform: existing.waveform } : {}),
+      ...(typeof existing.mediaActivityAtMs === 'number' ? { mediaActivityAtMs: existing.mediaActivityAtMs } : {}),
       ...(existing.seeded ? { seeded: true } : {}),
     };
     return next;

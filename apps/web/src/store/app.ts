@@ -66,7 +66,7 @@ import {
 } from '../lib/regulatory';
 import { ConfigApiError, patchBridgeConfig } from '../lib/config-api';
 import type { ConfigPatch } from './reducers';
-import { deriveDelivery, mergeConfig, removeContact as removeContactReducer, upsertChannel, upsertGroupMessage, upsertMessage, upsertNode, applyAck, applyMessageUpdate, applyGroupMessageUpdate, applyResourceProgress, resourceProgressFraction, appendPositionHistory } from './reducers';
+import { deriveDelivery, mergeConfig, removeContact as removeContactReducer, upsertChannel, upsertGroupMessage, upsertMessage, upsertNode, applyAck, applyMessageUpdate, applyGroupMessageUpdate, applyResourceProgress, markMediaActivity, resourceProgressFraction, appendPositionHistory } from './reducers';
 import type { MeshTransport, TransportStatus } from '../lib/transport';
 import { LiveTransport, buildHttpBaseUrl } from '../lib/ws';
 import { MockTransport } from '../lib/mock/transport';
@@ -1133,6 +1133,7 @@ export const useAppStore = create<AppState>()((set, get) => ({
         tempId,
         localUrl: draft.localUrl,
         waveform: draft.waveform,
+        mediaActivityAtMs: now,
       };
       set({ messages: [...state.messages, optimistic].sort((a, b) => a.sent_at_ms - b.sent_at_ms) });
     } else {
@@ -1154,6 +1155,7 @@ export const useAppStore = create<AppState>()((set, get) => ({
         tempId,
         localUrl: draft.localUrl,
         waveform: draft.waveform,
+        mediaActivityAtMs: now,
       };
       set({
         groupMessages: [...state.groupMessages, optimistic].sort((a, b) => a.sent_at_ms - b.sent_at_ms),
@@ -1162,19 +1164,26 @@ export const useAppStore = create<AppState>()((set, get) => ({
 
     const updateAttachmentProgress = (patch: Partial<typeof attachment>) => {
       const current = get();
+      const atMs = Date.now();
       set({
         messages: current.messages.map((m) =>
-          m.tempId === tempId ? { ...m, attachment: { ...attachment, ...m.attachment, ...patch } } : m,
+          m.tempId === tempId
+            ? { ...m, attachment: { ...attachment, ...m.attachment, ...patch }, mediaActivityAtMs: atMs }
+            : m,
         ),
         groupMessages: current.groupMessages.map((m) =>
-          m.tempId === tempId ? { ...m, attachment: { ...attachment, ...m.attachment, ...patch } } : m,
+          m.tempId === tempId
+            ? { ...m, attachment: { ...attachment, ...m.attachment, ...patch }, mediaActivityAtMs: atMs }
+            : m,
         ),
       });
     };
 
     try {
       const uploaded = await transport.uploadAttachment(draft.blob, draft.filename);
-      updateAttachmentProgress({ id: uploaded.id, size: uploaded.size, sha256: uploaded.sha256, progress: 1 });
+      // The bridge has the bytes now; the radio transfer has not started yet, so the
+      // bubble must not read 100 % until the bridge reports chunk progress/completion.
+      updateAttachmentProgress({ id: uploaded.id, size: uploaded.size, sha256: uploaded.sha256, progress: 0 });
       const commandId =
         thread.kind === 'direct'
           ? transport.send('send_message', {
@@ -1210,15 +1219,50 @@ export const useAppStore = create<AppState>()((set, get) => ({
     const state = get();
     const target = state.messages.find((m) => m.msg_id === msgId) ?? state.groupMessages.find((m) => m.msg_id === msgId);
     if (!target || !target.outgoing || !transport) return;
+    const atMs = Date.now();
+    const isMedia = Boolean(target.attachment);
+    const previousTimer = pendingRetries.get(msgId);
+    if (previousTimer) {
+      clearTimeout(previousTimer);
+      pendingRetries.delete(msgId);
+    }
+    // Media retries restart the radio transfer from the copy already stored on the bridge:
+    // reset the progress + stall clock but keep the same message row and id. Media stays
+    // "sent to bridge" while it transfers; the radio progress line owns the state from here.
     set({
       messages: state.messages.map((m) =>
-        m.msg_id === msgId ? { ...m, delivery: 'pending', error: undefined } : m,
+        m.msg_id === msgId
+          ? {
+              ...m,
+              delivery: isMedia ? 'sent' : 'pending',
+              error: undefined,
+              mediaActivityAtMs: atMs,
+              ...(m.attachment ? { attachment: { ...m.attachment, progress: 0 } } : {}),
+            }
+          : m,
       ),
       groupMessages: state.groupMessages.map((m) =>
-        m.msg_id === msgId ? { ...m, error: undefined } : m,
+        m.msg_id === msgId
+          ? {
+              ...m,
+              error: undefined,
+              mediaActivityAtMs: atMs,
+              ...(m.attachment ? { attachment: { ...m.attachment, progress: 0 } } : {}),
+            }
+          : m,
       ),
     });
     transport.send('retry', { msg_id: msgId });
+    if (isMedia) {
+      // Media completion can legitimately take minutes at 10 % duty; the stall detector
+      // watches radio progress instead of a fixed acknowledgement timer.
+      get().pushToast({
+        kind: 'info',
+        title: 'Retrying upload',
+        message: 'Asking the bridge to send the saved copy again — it can take minutes on the radio.',
+      });
+      return;
+    }
     const timer = setTimeout(() => {
       if (!pendingRetries.has(msgId)) return;
       pendingRetries.delete(msgId);
@@ -2309,7 +2353,10 @@ export const useAppStore = create<AppState>()((set, get) => ({
       case 'message': {
         const data = event.data as MessageData;
         const optimistic = findOptimisticDirect(state.messages, data);
-        const messages = upsertMessage(state.messages, data, optimistic?.tempId);
+        const upserted = upsertMessage(state.messages, data, optimistic?.tempId);
+        // The echo of our own attachment starts the radio transfer: restart the stall clock.
+        const messages =
+          data.outgoing && data.attachment ? markMediaActivity(upserted, data.msg_id, Date.now()) : upserted;
         let next = {
           messages: messages.sort((a, b) => a.sent_at_ms - b.sent_at_ms),
           groupMessages: state.groupMessages,
@@ -2327,18 +2374,26 @@ export const useAppStore = create<AppState>()((set, get) => ({
       }
       case 'message_update': {
         const data = event.data as MessageUpdateData;
+        const atMs = Date.now();
+        const touchesMedia = data.attachment !== undefined;
         set({
-          messages: applyMessageUpdate(state.messages, data),
+          messages: touchesMedia
+            ? markMediaActivity(applyMessageUpdate(state.messages, data), data.msg_id, atMs)
+            : applyMessageUpdate(state.messages, data),
           // Channel attachments arrive through `message_update` (the group_message event has no
           // attachment yet), so merge into both message lists.
-          groupMessages: applyGroupMessageUpdate(state.groupMessages, data),
+          groupMessages: touchesMedia
+            ? markMediaActivity(applyGroupMessageUpdate(state.groupMessages, data), data.msg_id, atMs)
+            : applyGroupMessageUpdate(state.groupMessages, data),
         });
         break;
       }
       case 'group_message': {
         const data = event.data as GroupMessageData;
         const optimistic = findOptimisticGroup(state.groupMessages, data);
-        const groupMessages = upsertGroupMessage(state.groupMessages, data, optimistic?.tempId);
+        const upserted = upsertGroupMessage(state.groupMessages, data, optimistic?.tempId);
+        const groupMessages =
+          data.outgoing && data.attachment ? markMediaActivity(upserted, data.msg_id, Date.now()) : upserted;
         const openGroup = state.activeThread?.kind === 'group' && state.activeThread.id === data.channel_id;
         set({
           groupMessages: groupMessages.sort((a, b) => a.sent_at_ms - b.sent_at_ms),
@@ -2407,9 +2462,10 @@ export const useAppStore = create<AppState>()((set, get) => ({
       case 'resource_progress': {
         const data = event.data as ResourceProgressData;
         const progress = resourceProgressFraction(data.received, data.total);
+        const atMs = Date.now();
         set({
-          messages: applyResourceProgress(state.messages, data.msg_id, progress),
-          groupMessages: applyResourceProgress(state.groupMessages, data.msg_id, progress),
+          messages: applyResourceProgress(state.messages, data.msg_id, progress, atMs),
+          groupMessages: applyResourceProgress(state.groupMessages, data.msg_id, progress, atMs),
         });
         break;
       }
@@ -2495,7 +2551,15 @@ export const useAppStore = create<AppState>()((set, get) => ({
       }
       case 'messages': {
         const data = event.data as { messages: MessageData[] };
-        set({ messages: upsertAllMessages(state.messages, data.messages ?? []) });
+        const atMs = Date.now();
+        // A sync snapshot of an in-flight outgoing attachment is current bridge state:
+        // treat it as fresh media activity so a page reload does not fake a stall.
+        const incoming = (data.messages ?? []).map((message) => {
+          const attachment = message.attachment as { progress?: number } | null | undefined;
+          const inFlight = message.outgoing && attachment && !message.delivered && (attachment.progress ?? 1) < 1;
+          return inFlight ? { ...message, mediaActivityAtMs: atMs } : message;
+        });
+        set({ messages: upsertAllMessages(state.messages, incoming) });
         break;
       }
       case 'contacts': {
@@ -2541,12 +2605,13 @@ export const useAppStore = create<AppState>()((set, get) => ({
         const pending = event.id ? pendingSends.get(event.id) : undefined;
         if (event.id && pending) {
           pendingSends.delete(event.id);
+          const atMs = Date.now();
           if (pending.kind === 'direct') {
             set({
               messages: state.messages
                 .map((m) =>
                   m.tempId === pending.tempId
-                    ? { ...m, msg_id: data.msg_id, delivery: 'sent' as const, tempId: undefined }
+                    ? { ...m, msg_id: data.msg_id, delivery: 'sent' as const, tempId: undefined, mediaActivityAtMs: atMs }
                     : m,
                 )
                 .sort((a, b) => a.sent_at_ms - b.sent_at_ms),
@@ -2554,7 +2619,11 @@ export const useAppStore = create<AppState>()((set, get) => ({
           } else {
             set({
               groupMessages: state.groupMessages
-                .map((m) => (m.tempId === pending.tempId ? { ...m, msg_id: data.msg_id, tempId: undefined } : m))
+                .map((m) =>
+                  m.tempId === pending.tempId
+                    ? { ...m, msg_id: data.msg_id, tempId: undefined, mediaActivityAtMs: atMs }
+                    : m,
+                )
                 .sort((a, b) => a.sent_at_ms - b.sent_at_ms),
             });
           }

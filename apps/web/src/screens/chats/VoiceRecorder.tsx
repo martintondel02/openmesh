@@ -4,6 +4,7 @@ import { useAppStore } from '../../store/app';
 import { formatDuration, formatBytes, formatSeconds, cn } from '../../lib/utils';
 import { downsampleWaveform, pickVoiceMimeType, speechWaveform, waveformFromAnalyser } from '../../lib/audio';
 import { estimateAttachment } from '../../lib/airtime';
+import { SLOW_MEDIA_WALL_CLOCK_MS, formatMediaExpectation, mediaWallClockMs } from '../../lib/media-transfer';
 import {
   DEFAULT_VOICE_TIER,
   VOICE_TIERS,
@@ -374,6 +375,10 @@ export function VoiceRecorder({
     () => (recorded ? estimateAttachment(recorded.blob.size, profile, region) : null),
     [recorded, profile, region],
   );
+  const slowExpectation =
+    estimate && mediaWallClockMs(estimate, config?.radio.duty_cycle_pct) >= SLOW_MEDIA_WALL_CLOCK_MS
+      ? formatMediaExpectation(mediaWallClockMs(estimate, config?.radio.duty_cycle_pct))
+      : null;
   const estimatedFullTierBytes = estimateVoiceTierBytes(maxDurationMs, tier);
   const tierCost = tierAirtimeSummary(Math.max(1, estimatedFullTierBytes), profile, region);
   const remaining = Math.max(0, maxDurationMs - elapsedMs);
@@ -540,6 +545,12 @@ export function VoiceRecorder({
           <span>{voiceAttachmentLabel(recorded.mime, recorded.durationMs, recorded.blob.size)}</span>
           {isCodec2Mime(recorded.mime) ? <span className="text-sky-300/80">Codec2 raw · 8 kHz mono</span> : <span>Opus/OGG</span>}
           {estimate.withinCap ? null : <span className="text-amber-300">Over the {Math.round(estimate.capBytes / 1024)} KiB profile cap</span>}
+          {slowExpectation ? (
+            <span className="w-full text-slate-500">
+              At the radio&rsquo;s duty cycle this takes {slowExpectation}; it keeps sending in the background after you press
+              Send.
+            </span>
+          ) : null}
         </div>
       ) : null}
     </div>

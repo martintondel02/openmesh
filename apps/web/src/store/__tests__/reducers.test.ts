@@ -5,6 +5,7 @@ import {
   applyGroupMessageUpdate,
   applyMessageUpdate,
   applyResourceProgress,
+  markMediaActivity,
   resourceProgressFraction,
   buildConversations,
   deriveDelivery,
@@ -383,6 +384,9 @@ describe('reducers: group messages', () => {
     expect(merged[0]!.localUrl).toBe('blob:preview');
     // The optimistic row itself (msg_id 0) can still be reconciled by tempId via upsertGroupMessage.
     expect(upsertGroupMessage([optimistic], echoed, 'local_1')).toHaveLength(1);
+    expect(optimistic.mediaActivityAtMs).toBeUndefined();
+    const stamped = { ...optimistic, mediaActivityAtMs: 4321 };
+    expect(upsertGroupMessage([stamped], echoed, 'local_1')[0]!.mediaActivityAtMs).toBe(4321);
   });
 });
 
@@ -409,5 +413,39 @@ describe('reducers: resource progress', () => {
     expect(applyResourceProgress(messages, 999, 0.5)).toBe(messages);
     const textOnly = [direct({ msg_id: 5, peer: 'peer' })];
     expect(applyResourceProgress(textOnly, 5, 0.5)).toBe(textOnly);
+  });
+
+  it('records when progress was last seen for the stalled-upload detector', () => {
+    const dm = direct({ msg_id: 3, peer: 'peer', attachment: attachment({ id: 'att_dm', progress: 0 }) });
+    const next = applyResourceProgress([dm], 3, 0.25, 1_700_000_000_000);
+    expect(next[0]!.attachment?.progress).toBe(0.25);
+    expect(next[0]!.mediaActivityAtMs).toBe(1_700_000_000_000);
+    // Without a timestamp the field is left untouched.
+    expect(applyResourceProgress([dm], 3, 0.5)[0]!.mediaActivityAtMs).toBeUndefined();
+  });
+
+  it('marks media activity by msg_id only', () => {
+    const a = direct({ msg_id: 3, peer: 'peer', mediaActivityAtMs: 10 });
+    const b = direct({ msg_id: 4, peer: 'other', mediaActivityAtMs: 10 });
+    const next = markMediaActivity([a, b], 3, 99);
+    expect(next[0]!.mediaActivityAtMs).toBe(99);
+    expect(next[1]!.mediaActivityAtMs).toBe(10);
+    expect(markMediaActivity([a, b], 999, 99)).toEqual([a, b]);
+  });
+
+  it('keeps the stall clock across bridge echo and update merges', () => {
+    const optimistic = direct({
+      msg_id: 0,
+      peer: 'peer',
+      outgoing: true,
+      tempId: 'local_1',
+      attachment: attachment({ id: '', progress: 0 }),
+      mediaActivityAtMs: 1234,
+      delivery: 'pending',
+    });
+    const echoed = upsertMessage([optimistic], direct({ msg_id: 9, peer: 'peer', outgoing: true }), 'local_1');
+    expect(echoed[0]!.mediaActivityAtMs).toBe(1234);
+    const updated = applyMessageUpdate(echoed, { msg_id: 9, attachment: attachment({ progress: 0.4 }) });
+    expect(updated[0]!.mediaActivityAtMs).toBe(1234);
   });
 });
