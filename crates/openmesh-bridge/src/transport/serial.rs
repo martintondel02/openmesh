@@ -35,7 +35,7 @@ use tokio::sync::{mpsc, watch};
 use openmesh_core::companion::{self, CompanionMsg};
 use openmesh_core::{HEADER_LEN, LinkId, LinkInfo, MTU};
 
-use super::{Inbound, LinkStats, TransportFrame, TransportHandle, make_link_stats};
+use super::{Inbound, LinkStats, RadioState, TransportFrame, TransportHandle, make_link_stats};
 
 /// SLIP end-of-frame delimiter.
 pub const SLIP_END: u8 = 0xC0;
@@ -536,6 +536,8 @@ impl SerialWorker {
                 None => match open_serial(&self.config) {
                     Ok(port) => port,
                     Err(err) => {
+                        // Still between sessions: expose the retry state to the API.
+                        self.stats.set_state(RadioState::Reconnecting);
                         tracing::warn!(
                             error = %err,
                             port = %self.config.port,
@@ -553,9 +555,12 @@ impl SerialWorker {
             match self.run_session(port) {
                 LinkOutcome::Shutdown => break,
                 LinkOutcome::Disconnected(reason) => {
+                    self.stats.set_state(RadioState::Reconnecting);
+                    let attempts = self.stats.note_reconnect();
                     tracing::warn!(
                         port = %self.config.port,
                         reason,
+                        attempts,
                         retry_in_ms = self.backoff.as_millis(),
                         "serial radio link lost; reconnecting"
                     );
@@ -566,6 +571,7 @@ impl SerialWorker {
                 }
             }
         }
+        self.stats.set_state(RadioState::Stopped);
         tracing::info!(port = %self.config.port, "serial transport stopped");
     }
 
@@ -577,10 +583,14 @@ impl SerialWorker {
             Ok(Some((info, pending))) => {
                 log_companion_ready(&info, &self.config);
                 self.backoff = RECONNECT_MIN;
+                self.stats.set_state(RadioState::Connected);
+                self.stats.set_reconnect_attempts(0);
                 self.run_companion(port, &info, pending, decoder)
             }
             Ok(None) => {
                 self.backoff = RECONNECT_MIN;
+                self.stats.set_state(RadioState::Connected);
+                self.stats.set_reconnect_attempts(0);
                 let buffered = decoder.take_buffered();
                 self.run_raw(port, buffered)
             }
@@ -840,6 +850,9 @@ pub fn spawn(
     let port = open_serial(&config)?;
     let (tx, outbound) = mpsc::channel::<TransportFrame>(OUTBOUND_QUEUE);
     let stats = make_link_stats();
+    // Exposed as `status.radio.state`/`hello.radios[].state`: the tty is open but the companion
+    // handshake has not finished yet.
+    stats.set_state(RadioState::Connecting);
     let stats_task = stats.clone();
     let label = format!("Serial {} @{}", config.port, config.baud);
     std::thread::Builder::new()
@@ -1185,20 +1198,54 @@ mod tests {
         }
     }
 
+    /// Block until the radio link state reaches `expected` (used by the state-transition tests).
+    #[cfg(unix)]
+    fn wait_for_radio_state(
+        handle: &TransportHandle,
+        expected: RadioState,
+        timeout: Duration,
+    ) -> bool {
+        let deadline = Instant::now() + timeout;
+        loop {
+            if handle.stats.state() == expected {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
     /// Drive one complete companion session: Hello -> HelloAck -> Tx -> Rx.
+    ///
+    /// `expected_before_ack` is the radio link state while the bridge waits for the handshake:
+    /// `Connecting` on first attach, `Reconnecting` after a recovered link loss.
     #[cfg(unix)]
     fn run_session_round_trip(
         radio: &mut FakeRadio,
         handle: &TransportHandle,
         inbound_rx: &mut mpsc::Receiver<Inbound>,
         label: &str,
+        expected_before_ack: RadioState,
     ) {
         radio
             .wait_for(Duration::from_secs(5), |msg| {
                 matches!(msg, CompanionMsg::Hello { proto: 1, .. })
             })
             .unwrap_or_else(|| panic!("{label}: bridge sent companion Hello"));
+        assert!(
+            wait_for_radio_state(handle, expected_before_ack, Duration::from_secs(2)),
+            "{label}: expected state {:?}, got {:?} before HelloAck",
+            expected_before_ack,
+            handle.stats.state()
+        );
         radio.write_msg(&hello_ack());
+        assert!(
+            wait_for_radio_state(handle, RadioState::Connected, Duration::from_secs(2)),
+            "{label}: link did not become Connected after HelloAck (got {:?})",
+            handle.stats.state()
+        );
         // Give the worker a moment to leave the handshake loop and enter companion mode.
         std::thread::sleep(Duration::from_millis(100));
 
@@ -1244,13 +1291,22 @@ mod tests {
             .expect("spawn serial transport");
         let mut radio = FakeRadio::new(radio_port);
 
-        run_session_round_trip(&mut radio, &handle, &mut inbound_rx, "initial");
+        run_session_round_trip(
+            &mut radio,
+            &handle,
+            &mut inbound_rx,
+            "initial",
+            RadioState::Connecting,
+        );
         // The 20 s keepalive does not fire in this short test; Tx/Rx mapping is already covered.
         assert_eq!(handle.stats.rx(), 1);
         assert_eq!(handle.stats.tx(), 1);
+        assert_eq!(handle.stats.state(), RadioState::Connected);
+        assert_eq!(handle.stats.reconnect_attempts(), 0);
 
         shutdown_tx.send(true).expect("request shutdown");
         wait_for_worker_exit(&handle);
+        assert_eq!(handle.stats.state(), RadioState::Stopped);
     }
 
     #[cfg(unix)]
@@ -1267,26 +1323,56 @@ mod tests {
             .expect("spawn serial transport");
         let mut radio1 = FakeRadio::new(radio1_port);
 
-        run_session_round_trip(&mut radio1, &handle, &mut inbound_rx, "before reconnect");
+        run_session_round_trip(
+            &mut radio1,
+            &handle,
+            &mut inbound_rx,
+            "before reconnect",
+            RadioState::Connecting,
+        );
         assert_eq!(handle.stats.rx(), 1);
+        assert_eq!(handle.stats.state(), RadioState::Connected);
 
-        // "Unplug" the radio: point the path at a second fake radio, then close the first PTY.
-        // The worker sees EOF/error, reopens the path and re-runs the companion handshake.
+        // "Unplug" the radio: closing the PTY master gives the worker EOF/error, so it must switch
+        // to Reconnecting and count one reconnect attempt while it reopens the path with backoff.
+        drop(radio1);
+        assert!(
+            wait_for_radio_state(&handle, RadioState::Reconnecting, Duration::from_secs(3)),
+            "loss must set state Reconnecting (got {:?})",
+            handle.stats.state()
+        );
+        assert!(
+            handle.stats.reconnect_attempts() >= 1,
+            "a lost link must bump reconnect_attempts"
+        );
+
+        // Point the path at a second fake radio; the worker reopens, re-handshakes and reattaches.
         let (radio2_port, slave2) = serialport::TTYPort::pair().expect("create pty pair 2");
         point_symlink_at(&dir, &slave2.name().expect("slave 2 path"));
         drop(slave2);
-        drop(radio1);
 
         let mut radio2 = FakeRadio::new(radio2_port);
-        run_session_round_trip(&mut radio2, &handle, &mut inbound_rx, "after reconnect");
+        run_session_round_trip(
+            &mut radio2,
+            &handle,
+            &mut inbound_rx,
+            "after reconnect",
+            RadioState::Reconnecting,
+        );
         assert_eq!(
             handle.stats.rx(),
             2,
             "both sessions delivered one Rx frame each"
         );
+        assert_eq!(
+            handle.stats.reconnect_attempts(),
+            0,
+            "attempts reset on attach"
+        );
 
         shutdown_tx.send(true).expect("request shutdown");
         wait_for_worker_exit(&handle);
+        assert_eq!(handle.stats.state(), RadioState::Stopped);
     }
 
     /// A write that blocks because the radio is busy must not be treated as a dead link: the
@@ -1340,6 +1426,16 @@ mod tests {
             }
             std::thread::sleep(Duration::from_millis(5));
         }
+        assert!(
+            wait_for_radio_state(&handle, RadioState::Connected, Duration::from_secs(2)),
+            "write backpressure must leave the link Connected (got {:?})",
+            handle.stats.state()
+        );
+        assert_eq!(
+            handle.stats.reconnect_attempts(),
+            0,
+            "write backpressure must not count a reconnect"
+        );
         let tx_count = frames
             .iter()
             .filter(|msg| matches!(msg, CompanionMsg::Tx { .. }))

@@ -334,7 +334,31 @@
         "type": "object",
         "properties": {
           "connected": {
-            "type": "boolean"
+            "type": "boolean",
+            "description": "Derived from `state`: true for `connected` and `virtual`."
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "connected",
+              "connecting",
+              "reconnecting",
+              "disconnected",
+              "virtual"
+            ],
+            "description": "Radio link state. Serial (`--serial`) links report connecting/connected/reconnecting/disconnected; simulator, UDP/TCP LAN and backbone transports report `virtual` (treated as connected)."
+          },
+          "last_rx_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Epoch milliseconds of the last frame received from the radio; null until the first frame arrives."
+          },
+          "reconnect_attempts": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Link losses since the last successful radio attach; reset to 0 on attach."
           },
           "tx_queue": {
             "type": "integer",
@@ -451,6 +475,9 @@
           "uptime_s": 3600,
           "radio": {
             "connected": true,
+            "state": "connected",
+            "last_rx_ms": 1760000001234,
+            "reconnect_attempts": 0,
             "tx_queue": 0,
             "airtime_used_pct": 0.4,
             "rssi": -88,

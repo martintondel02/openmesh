@@ -76,11 +76,14 @@ Sent once when the connection is accepted.
   "node": { "node_id": "ab12…", "name": "martin-phone", "class": "client", "caps": 81,
             "public_key": null },
   "radios": [ { "id": "sim0", "kind": "sim", "label": "Simulator", "connected": true,
-                "profile": "MEDIUM_FAST", "region": "EU868" } ],
+                "state": "virtual", "profile": "MEDIUM_FAST", "region": "EU868" } ],
   "features": ["images","voice","map","groups","store_forward"],
   "store": { "messages": 0, "contacts": 0, "channels": 0 }
 } }
 ```
+
+Each `radios[]` entry carries a `state` string using the same values as `status.radio.state`
+below; its `connected` flag is derived from that state (a `virtual` transport stays connected).
 
 ### 3.2 `status`
 
@@ -89,13 +92,30 @@ Periodic (1 Hz) bridge/radio status.
 ```json
 { "v":1, "type":"status", "data": {
   "uptime_s": 1234,
-  "radio": { "connected": true, "tx_queue": 0, "airtime_used_pct": 0.4,
+  "radio": { "connected": true, "state": "connected", "last_rx_ms": 1760000001234,
+             "reconnect_attempts": 0, "tx_queue": 0, "airtime_used_pct": 0.4,
              "rssi": -87, "snr": 6.5, "frequency_mhz": 869.525, "tx_power_dbm": 14 },
   "mesh": { "tx_frames": 120, "rx_frames": 240, "forwarded": 31, "dropped": 4,
             "known_nodes": 12, "stored_envelopes": 3, "duty_cycle_pct": 0.4 },
   "storage": { "used_bytes": 1048576, "db_path": "~/.local/share/openmesh/openmesh.redb" }
 } }
 ```
+
+`radio.state` is the real link state of the bridge's radio transport:
+
+| state | meaning |
+| --- | --- |
+| `connected` | The serial radio finished its companion handshake; frames can flow. |
+| `connecting` | The bridge opened the serial port and is waiting for the radio handshake. |
+| `reconnecting` | The link was lost (cable, power, radio reset) and the bridge is reopening it with backoff. |
+| `disconnected` | The serial transport is stopped or no radio is attached. |
+| `virtual` | No local radio: the simulator, UDP/TCP LAN or backbone transport carries frames (demo/sim behaviour). |
+
+`radio.connected` is `true` for `connected` and `virtual` and `false` otherwise.
+`radio.last_rx_ms` is the epoch-millisecond timestamp of the most recent frame received from the
+radio (`null` until the first frame arrives), and `radio.reconnect_attempts` counts link losses
+since the last successful attach (reset to 0 on attach). The same `state` string is exposed per
+link in `hello.radios[]`.
 
 ### 3.3 `node`
 

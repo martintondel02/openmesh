@@ -300,6 +300,8 @@ pub struct RadioJson {
     pub kind: String,
     pub label: String,
     pub connected: bool,
+    /// Link state: `connected`, `connecting`, `reconnecting`, `disconnected` or `virtual`.
+    pub state: String,
     pub profile: String,
     pub region: String,
 }
@@ -324,6 +326,12 @@ pub struct HelloJson {
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct RadioStatusJson {
     pub connected: bool,
+    /// Link state: `connected`, `connecting`, `reconnecting`, `disconnected` or `virtual`.
+    pub state: String,
+    /// Epoch milliseconds of the last frame received from the radio (`null` until one arrives).
+    pub last_rx_ms: Option<u64>,
+    /// Reconnect attempts since the last successful radio attach.
+    pub reconnect_attempts: u32,
     pub tx_queue: u64,
     pub airtime_used_pct: f64,
     pub rssi: Option<i16>,

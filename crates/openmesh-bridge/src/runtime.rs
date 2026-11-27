@@ -28,7 +28,7 @@ use crate::store::{
     ChannelRecord, ContactRecord, Store, StoredAttachment, StoredMessage, identity_b64,
 };
 use crate::transport::backbone::BackboneManager;
-use crate::transport::{Inbound, TransportFrame, TransportHandle};
+use crate::transport::{Inbound, RadioState, TransportFrame, TransportHandle};
 
 /// Features advertised in `hello` (documented list, extended when store-forward is enabled).
 pub const FEATURES: &[&str] = &["images", "voice", "map", "groups", "store_forward"];
@@ -2263,6 +2263,107 @@ pub fn restore_engine_state(engine: &mut Engine, store: &Store) -> Result<()> {
     Ok(())
 }
 
+/// Aggregated radio link state reported by `status.radio.state`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LinkSummaryState {
+    Connected,
+    Connecting,
+    Reconnecting,
+    Disconnected,
+    /// No local radio link: simulator, UDP/TCP LAN or backbone transport only.
+    Virtual,
+}
+
+impl LinkSummaryState {
+    /// Stable API string (also used by `hello.radios[].state`).
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Connected => "connected",
+            Self::Connecting => "connecting",
+            Self::Reconnecting => "reconnecting",
+            Self::Disconnected => "disconnected",
+            Self::Virtual => "virtual",
+        }
+    }
+
+    /// Whether the aggregate should report `connected: true` (virtual transports keep the old
+    /// demo/sim behaviour and count as connected).
+    fn is_connected(self) -> bool {
+        matches!(self, Self::Connected | Self::Virtual)
+    }
+}
+
+/// Summarise the radio link from the bridge's visible transports: `(state, last_rx_ms, attempts)`.
+///
+/// Serial (`--serial`) transports drive the state: connected if any is connected, else reconnecting
+/// if any is, else connecting, else disconnected. `last_rx_ms` is the newest receive timestamp
+/// across those links and `reconnect_attempts` the worst counter. A bridge without a serial link
+/// reports `virtual` when it has any other visible transport (sim/UDP/TCP/backbone), preserving the
+/// pre-existing demo/sim behaviour, and `disconnected` when it has no transports at all.
+fn summarize_radio_link(transports: &[&TransportHandle]) -> (LinkSummaryState, Option<u64>, u32) {
+    let serials: Vec<&&TransportHandle> =
+        transports.iter().filter(|t| t.kind == "serial").collect();
+    if serials.is_empty() {
+        let state = if transports.is_empty() {
+            LinkSummaryState::Disconnected
+        } else {
+            LinkSummaryState::Virtual
+        };
+        return (state, None, 0);
+    }
+    let states: Vec<RadioState> = serials.iter().map(|t| t.stats.state()).collect();
+    let state = if states.contains(&RadioState::Connected) {
+        LinkSummaryState::Connected
+    } else if states.contains(&RadioState::Reconnecting) {
+        LinkSummaryState::Reconnecting
+    } else if states.contains(&RadioState::Connecting) {
+        LinkSummaryState::Connecting
+    } else {
+        LinkSummaryState::Disconnected
+    };
+    let last_rx_ms = serials.iter().filter_map(|t| t.stats.last_rx_ms()).max();
+    let reconnect_attempts = serials
+        .iter()
+        .map(|t| t.stats.reconnect_attempts())
+        .max()
+        .unwrap_or(0);
+    (state, last_rx_ms, reconnect_attempts)
+}
+
+/// Build one `hello.radios[]` entry. Serial transports report their live link state; backbone
+/// entries keep the existing `backbone_running` flag; virtual transports stay `connected: true`.
+fn radio_json_for(
+    transport: &TransportHandle,
+    profile: &str,
+    region: &str,
+    backbone_running: bool,
+) -> RadioJson {
+    let (state, connected) = match transport.kind {
+        "serial" => {
+            let state = transport.stats.state();
+            (state.as_str().to_string(), state == RadioState::Connected)
+        }
+        "backbone" => (
+            if backbone_running {
+                "connected".to_string()
+            } else {
+                "disconnected".to_string()
+            },
+            backbone_running,
+        ),
+        _ => ("virtual".to_string(), true),
+    };
+    RadioJson {
+        id: format!("{}", transport.id),
+        kind: transport.kind.to_string(),
+        label: transport.label.clone(),
+        connected,
+        state,
+        profile: profile.to_string(),
+        region: region.to_string(),
+    }
+}
+
 /// Inputs for building an API snapshot without owning the engine task.
 pub struct SnapshotInput<'a> {
     pub engine: &'a Engine,
@@ -2314,8 +2415,17 @@ pub fn build_snapshot(input: SnapshotInput<'_>) -> Snapshot {
     let effective_frequency = override_json.effective_frequency_khz(region);
     let effective_duty = override_json.effective_duty_pct(region);
     let legal = LegalRegionJson::for_region(region);
+    // Radio link state: real serial link state drives it; demo/sim stays "virtual"/connected.
+    let visible_transports: Vec<&TransportHandle> = transports
+        .iter()
+        .filter(|t| t.kind != "backbone" || backbone_configured)
+        .collect();
+    let (radio_state, last_rx_ms, reconnect_attempts) = summarize_radio_link(&visible_transports);
     let radio_status = RadioStatusJson {
-        connected: !transports.is_empty(),
+        connected: radio_state.is_connected(),
+        state: radio_state.as_str().to_string(),
+        last_rx_ms,
+        reconnect_attempts,
         tx_queue: 0,
         airtime_used_pct: round2(airtime_pct),
         rssi: last_rssi,
@@ -2353,23 +2463,15 @@ pub fn build_snapshot(input: SnapshotInput<'_>) -> Snapshot {
         class: node_class_str(config.node_class()).to_string(),
         caps: engine.config().caps,
     };
-    let visible_transports: Vec<&TransportHandle> = transports
-        .iter()
-        .filter(|t| t.kind != "backbone" || backbone_configured)
-        .collect();
     let radios: Vec<RadioJson> = visible_transports
         .iter()
-        .map(|t| RadioJson {
-            id: format!("{}", t.id),
-            kind: t.kind.to_string(),
-            label: t.label.clone(),
-            connected: if t.kind == "backbone" {
-                backbone_running
-            } else {
-                true
-            },
-            profile: config.profile().name.to_string(),
-            region: config.region().name.to_string(),
+        .map(|t| {
+            radio_json_for(
+                t,
+                config.profile().name,
+                config.region().name,
+                backbone_running,
+            )
         })
         .collect();
     let links: Vec<LinkJson> = visible_transports
@@ -2480,5 +2582,136 @@ pub fn build_snapshot(input: SnapshotInput<'_>) -> Snapshot {
         config: config_json,
         nodes,
         links,
+    }
+}
+
+#[cfg(test)]
+mod radio_state_tests {
+    use super::*;
+    use crate::transport::make_link_stats;
+    use tokio::sync::mpsc;
+
+    fn handle(kind: &'static str, state: RadioState) -> TransportHandle {
+        let stats = make_link_stats();
+        stats.set_state(state);
+        TransportHandle {
+            id: 1,
+            kind,
+            label: format!("{kind} test"),
+            tx: mpsc::channel(1).0,
+            stats,
+        }
+    }
+
+    #[test]
+    fn serial_link_states_map_to_api_state() {
+        let connected = handle("serial", RadioState::Connected);
+        assert_eq!(
+            summarize_radio_link(&[&connected]),
+            (LinkSummaryState::Connected, None, 0)
+        );
+
+        let reconnecting = handle("serial", RadioState::Reconnecting);
+        reconnecting.stats.note_reconnect();
+        reconnecting.stats.note_reconnect();
+        let (state, last_rx, attempts) = summarize_radio_link(&[&reconnecting]);
+        assert_eq!(state, LinkSummaryState::Reconnecting);
+        assert!(!state.is_connected());
+        assert_eq!(last_rx, None);
+        assert_eq!(attempts, 2);
+
+        let connecting = handle("serial", RadioState::Connecting);
+        assert_eq!(
+            summarize_radio_link(&[&connecting]).0,
+            LinkSummaryState::Connecting
+        );
+
+        let stopped = handle("serial", RadioState::Stopped);
+        assert_eq!(
+            summarize_radio_link(&[&stopped]).0,
+            LinkSummaryState::Disconnected
+        );
+    }
+
+    #[test]
+    fn last_rx_ms_comes_from_serial_receives() {
+        let serial = handle("serial", RadioState::Connected);
+        serial.stats.record_rx(Some(-70), Some(2.0));
+        let (state, last_rx, _) = summarize_radio_link(&[&serial]);
+        assert_eq!(state, LinkSummaryState::Connected);
+        assert!(last_rx.expect("receive timestamp") > 0);
+    }
+
+    #[test]
+    fn any_connected_serial_wins_aggregation() {
+        let reconnecting = handle("serial", RadioState::Reconnecting);
+        let connected = handle("serial", RadioState::Connected);
+        assert_eq!(
+            summarize_radio_link(&[&reconnecting, &connected]).0,
+            LinkSummaryState::Connected
+        );
+    }
+
+    #[test]
+    fn no_transports_is_disconnected_and_non_radio_is_virtual() {
+        assert_eq!(
+            summarize_radio_link(&[]),
+            (LinkSummaryState::Disconnected, None, 0)
+        );
+        let sim = handle("sim", RadioState::Connected);
+        assert_eq!(
+            summarize_radio_link(&[&sim]),
+            (LinkSummaryState::Virtual, None, 0)
+        );
+        let udp = handle("udp", RadioState::Connected);
+        assert_eq!(summarize_radio_link(&[&udp]).0, LinkSummaryState::Virtual);
+    }
+
+    #[test]
+    fn hello_radios_serial_entry_uses_live_state() {
+        let reconnecting = handle("serial", RadioState::Reconnecting);
+        reconnecting.stats.note_reconnect();
+        let json = radio_json_for(&reconnecting, "MEDIUM_FAST", "EU868", false);
+        assert_eq!(json.kind, "serial");
+        assert_eq!(json.state, "reconnecting");
+        assert!(!json.connected);
+
+        let connected = handle("serial", RadioState::Connected);
+        let json = radio_json_for(&connected, "MEDIUM_FAST", "EU868", false);
+        assert_eq!(json.state, "connected");
+        assert!(json.connected);
+    }
+
+    #[test]
+    fn hello_radios_virtual_and_backbone_entries() {
+        let sim = handle("sim", RadioState::Connected);
+        let json = radio_json_for(&sim, "MEDIUM_FAST", "EU868", false);
+        assert_eq!(json.state, "virtual");
+        assert!(json.connected);
+
+        let backbone = handle("backbone", RadioState::Connected);
+        let stopped = radio_json_for(&backbone, "MEDIUM_FAST", "EU868", false);
+        assert_eq!(
+            (stopped.state.as_str(), stopped.connected),
+            ("disconnected", false)
+        );
+        let running = radio_json_for(&backbone, "MEDIUM_FAST", "EU868", true);
+        assert_eq!(
+            (running.state.as_str(), running.connected),
+            ("connected", true)
+        );
+    }
+
+    #[test]
+    fn status_radio_state_strings_are_the_documented_enum() {
+        for (summary, expected) in [
+            (LinkSummaryState::Connected, "connected"),
+            (LinkSummaryState::Connecting, "connecting"),
+            (LinkSummaryState::Reconnecting, "reconnecting"),
+            (LinkSummaryState::Disconnected, "disconnected"),
+            (LinkSummaryState::Virtual, "virtual"),
+        ] {
+            assert_eq!(summary.as_str(), expected);
+        }
     }
 }
