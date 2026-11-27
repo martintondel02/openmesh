@@ -46,6 +46,11 @@ Final verified images (all fixes in this tree):
   `HelloAck {proto:1, fw_version:"0.7.1", node_id:7fe558cfc94d9c60, caps:101, region:"EU868",
   profile:"MEDIUM_FAST"}`. This is the same session the Android app performs, so the app-side
   handshake path is exercised end to end. See §2.7 for the BLE write bug this uncovered.
+* **End-to-end Android app ↔ radio ↔ bridge ↔ web GUI verified (2026-11-27)**: after the BLE fixes
+  above and an app-side contact exchange, a channel message sent from the phone reached the bridge
+  (`/api/messages/channel/...` shows it as incoming from `68102c09d9c0aeca`, "phone to%web final")
+  and a web-GUI reply arrived in the app database (`DELIVERED`, from node `6d2dfb7be7948c4b`,
+  "reply from the web GUI"). See §8 for the full setup and the known rough edges.
 * PC side verified (2026-11-27): the bridge's `--serial` radio link now auto-detects and speaks the
   firmware's companion protocol (`Hello`/`HelloAck`, `Tx`/`Rx`, 20 s `Ping` keepalive, raw-frame
   fallback with a warning). Injected companion `Tx` from the T1000-E → bridge `mesh.rx_frames`
@@ -200,6 +205,12 @@ Verified after the fix: host BLE client → `Ping/Pong` and `Hello/HelloAck` bot
 correctly at MTU 23 (the worst case); companion frames are ≤ ~1 KiB and BLE chunk sizes scale with
 the negotiated MTU (Android's Nordic BLE library requests a larger MTU).
 
+A second BLE issue surfaced when the Android app sent whole channel-message frames: the default
+`BLEUart` RX FIFO is 256 bytes and was occasionally read exactly full (`n=256`), losing part of a
+SLIP frame while the firmware was busy queueing replies. The FIFO is now 1 KiB and BLE write retries
+are bounded to 500 ms so a stalled notify queue can never starve `pollCompanion()`. After this fix
+the app's companion `Tx` frames decode (`type=6`) and reach the radio.
+
 ---
 
 ## 3. Flashing notes (both boards, no buttons once an app runs)
@@ -278,12 +289,15 @@ listed in §6).
 
 ## 6. Remaining work, in order
 
-1. **Android app end-to-end.** The BLE NUS session is verified from a host BLE client (Ping/Pong +
-   HelloAck), the app builds/installs/l launches on the test phone, the bridge now speaks the
-   companion protocol over `--serial` (both directions verified with the real radios), and the web
-   client is built/served with its token flow verified. The only remaining verification is the
-   user-facing tap-through: phone app -> BLE radio -> LoRa -> second radio -> bridge -> web GUI,
-   including pasting the shared channel invite (§8).
+1. **Android app end-to-end.** Verified once end-to-end on 2026-11-27 (phone channel message
+   reached the bridge; web reply reached the app; see §1 and §8). Remaining rough edges found during
+   that run: (a) the bridge rejects a phone's signed group message as "unknown signer" until the
+   phone's contact invite is imported into the bridge (the bridge's announce decoder also reported
+   "unknown node class" for one app announce — an announce interop bug to fix in core); (b) the BLE
+   companion link can wedge after a firmware reflash or a long session — the app then needs the
+   radio reconnected (or the radio reset), which is a robustness follow-up; (c) the app marks
+   outgoing messages `SENT` even when no radio is linked, which misleads users (should be QUEUED).
+   These three are tracked for the next session; the setup in §8 otherwise works.
 2. **Deep sleep / power budget.** The receiver stays on continuously today; implement radio RX
    windows and measure current (light sleep via `delay()` + FreeRTOS tickless idle is in place).
    Battery/ADC calibration and GNSS date/time remain as before (§9 in `firmware/README.md`).
@@ -356,8 +370,19 @@ Phone (Android app, installed):
 2. **Radio → BLE** → connect to `OpenMesh T1000-E` (the app only lists radio names starting with
    `OpenMesh`; no pairing button is needed — the NUS characteristics are open).
 3. **Channels → Join with invite** → paste the `openmesh://channel?...` URL from the web client.
-4. Send a message on the channel; it should appear in the web client, and a web reply should arrive
+4. **Exchange contacts (required for signed group messages).** The bridge drops signed group
+   messages from identities it does not know ("group message from unknown signer"). Import the
+   phone's contact invite into the bridge (`POST /api/contacts` with `node_id`, `name`,
+   `identity` — the app shows the invite under Contacts → My QR; the QR payload is
+   `openmesh://contact?node_id=…&name=…&identity=…`). The app learned the bridge identity from its
+   announce in the verified run; if replies are dropped, import the bridge contact into the app the
+   same way.
+5. Send a message on the channel; it should appear in the web client, and a web reply should arrive
    on the phone. Expected timing is one LoRa hop (~0.5 s airtime) plus USB/bridge processing.
+
+Known rough edges from the first successful run: the BLE companion can need a radio reconnect after
+a firmware reflash; the app shows `SENT` for messages queued while no radio is linked; and the
+bridge/app announce interop needs the contact exchange above until the core announce bug is fixed.
 
 Notes: the T1000-E can stay USB-connected to the PC for power/logs while the phone talks to it over
 BLE (coexistence verified); a device-initiated reset can renumber `/dev/ttyACM*`, so re-detect ports.
