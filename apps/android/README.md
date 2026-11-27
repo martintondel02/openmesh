@@ -242,6 +242,31 @@ exist, a signed release APK. Keystores are decoded to `$RUNNER_TEMP` only.
 
 ---
 
+## Radio connection UX
+
+The radio screen is state-driven rather than a single "connected" flag:
+
+* Phases: **scanning → connecting → handshaking → ready**, each with plain-language text, a
+  step rail, an elapsed counter and a Cancel action; the spinner is never the only indicator
+  (screen readers get a state description).
+* BLE scans for ~5 s and connects to the strongest OpenMesh radio, showing how many it found and
+  which device it is connecting to (name, address, signal).
+* Failures are typed and persistent: Bluetooth off, permissions, no radio found, scan/GATT failure,
+  missing companion service, handshake timeout, link lost, USB device/permission/port. Each shows
+  one or two beginner hints (and Help → Troubleshooting) plus Try again / USB / BLE.
+* A ready link keeps a health check: if the radio stops answering its 15 s keep-alive for 30 s it is
+  marked "not answering" with a Reconnect action; losing the link shows a "Lost connection to the
+  radio" card instead of silently looking connected.
+* Messages sent while the link is not ready are stored as **queued** (bubble label + inline card +
+  banner chip) and sent automatically when the radio becomes ready; queued messages survive an app
+  restart. The queue is capped at 50 with a clear error.
+* Demo mode is shown as "Demo mode · virtual mesh" — never as a radio error or a connect prompt.
+
+The copy rules live in `docs/design/ux-help-system.md` §6.1; the pure presentation/error logic is in
+`ui/radio/RadioPresentation.kt` + `data/transport/LinkProgress.kt` and unit-tested on the JVM.
+
+---
+
 ## Data, identity and security
 
 * The 32-byte identity seed is generated on the device, wrapped with an AES-GCM key in

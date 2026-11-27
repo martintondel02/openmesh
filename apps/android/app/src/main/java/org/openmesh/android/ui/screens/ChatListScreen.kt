@@ -48,7 +48,9 @@ import org.openmesh.android.ui.components.EmptyState
 import org.openmesh.android.ui.components.RadioBanner
 import org.openmesh.android.ui.components.SectionTitle
 import org.openmesh.android.ui.components.relativeTime
+import org.openmesh.android.ui.radio.RadioPresentation
 import org.openmesh.android.ui.theme.MeshOnSurfaceVariant
+import org.openmesh.android.ui.theme.MeshTertiary
 import org.openmesh.android.ui.theme.MeshPrimary
 import org.openmesh.android.ui.theme.MeshSurfaceHigh
 
@@ -58,11 +60,12 @@ fun ChatListScreen(
     repository: MeshRepository,
     radio: RadioStatus,
     onOpenThread: (peerId: String, channel: Boolean) -> Unit,
-    onOpenSettings: () -> Unit,
+    onOpenRadio: () -> Unit,
     onOpenChannels: () -> Unit = {},
     onOpenHelp: () -> Unit = {},
 ) {
     val conversations by repository.conversations.collectAsState()
+    val settings by repository.settings.collectAsState()
     val channels by repository.channels.collectAsState()
     val contacts by repository.contacts.collectAsState()
     var showNewChat by remember { mutableStateOf(false) }
@@ -103,7 +106,15 @@ fun ChatListScreen(
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             item {
-                RadioBanner(radio = radio, onClick = onOpenSettings)
+                RadioBanner(radio = radio, demoMode = settings.demoMode, onClick = onOpenRadio)
+            }
+            if (!settings.demoMode && radio.queuedMessages > 0) {
+                item {
+                    QueuedMessagesCard(
+                        count = radio.queuedMessages,
+                        onOpenRadio = onOpenRadio,
+                    )
+                }
             }
             item { Spacer(Modifier.height(4.dp)) }
             item { SectionTitle("Conversations") }
@@ -187,6 +198,28 @@ fun ChatListScreen(
             },
             confirmButton = { TextButton(onClick = { showNewChat = false }) { Text("Close") } },
         )
+    }
+}
+
+/** Inline reminder that messages are waiting for a radio link (chat list and thread). */
+@Composable
+fun QueuedMessagesCard(count: Int, onOpenRadio: () -> Unit) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .clip(MaterialTheme.shapes.medium)
+            .background(MeshTertiary.copy(alpha = 0.12f))
+            .padding(horizontal = 12.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text(
+                RadioPresentation.queuedCardText(count),
+                style = MaterialTheme.typography.bodyMedium,
+                color = MeshTertiary,
+            )
+        }
+        TextButton(onClick = onOpenRadio) { Text("Connect") }
     }
 }
 

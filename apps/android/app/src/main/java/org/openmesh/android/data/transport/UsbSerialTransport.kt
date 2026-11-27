@@ -36,6 +36,10 @@ import kotlin.coroutines.resume
  * The radio runs the companion API over its USB serial port at 115200 8N1. The Android USB
  * host permission prompt is handled here; the app's foreground service keeps the connection
  * alive. Frame boundaries are recovered by [SlipFraming.Decoder] in [FramedCompanionClient].
+ *
+ * UX: publishes [LinkProgress] (CONNECTING while the port opens, HANDSHAKING once it is open and
+ * the companion handshake is pending) and maps no-device / denied-permission / port-busy /
+ * cable-pulled failures to a [LinkError] for the persistent error card.
  */
 class UsbSerialTransport(
     private val context: Context,
@@ -53,24 +57,46 @@ class UsbSerialTransport(
     private val _incoming = MutableSharedFlow<ByteArray>(extraBufferCapacity = 64)
     override val incoming: Flow<ByteArray> = _incoming.asSharedFlow()
 
+    private val _progress = MutableStateFlow(LinkProgress())
+    override val progress: StateFlow<LinkProgress> = _progress.asStateFlow()
+
     private var port: UsbSerialPort? = null
     private var readJob: Job? = null
     private var scope = newScope()
+    /** True while [disconnect] is closing the port, so the read loop does not report a cable loss. */
+    private var userClosing = false
 
     private fun newScope() = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     override suspend fun connect(): Result<Unit> = runCatching {
         if (_connected.value) return@runCatching
-
-        val driver = findDriver() ?: error(
-            "No USB serial device found. Plug in an OpenMesh radio and grant USB access.",
+        userClosing = false
+        setProgress(RadioPhase.CONNECTING, "Opening the USB serial port…")
+        val driver = findDriver() ?: throw failure(
+            LinkError.USB_NO_DEVICE,
+            "No USB serial radio found. Plug in an OpenMesh radio and grant USB access.",
         )
+        val deviceName = driver.device.productName
         if (!manager.hasPermission(driver.device)) {
+            setProgress(
+                RadioPhase.CONNECTING,
+                "Waiting for USB permission…",
+                deviceName = deviceName,
+            )
             val granted = requestPermission(driver.device)
-            if (!granted) error("USB permission denied for ${driver.device.productName ?: "device"}")
+            if (!granted) {
+                throw failure(
+                    LinkError.USB_PERMISSION,
+                    "USB permission was denied for ${deviceName ?: "the radio"}.",
+                    deviceName = deviceName,
+                )
+            }
         }
-        val connection = manager.openDevice(driver.device)
-            ?: error("Could not open USB device (already in use?)")
+        val connection = manager.openDevice(driver.device) ?: throw failure(
+            LinkError.USB_PORT,
+            "Could not open the USB radio (another app may be using it).",
+            deviceName = deviceName,
+        )
 
         val serialPort = driver.ports.first()
         serialPort.open(connection)
@@ -83,7 +109,34 @@ class UsbSerialTransport(
         runCatching { serialPort.setDTR(true) }
         port = serialPort
         _connected.value = true
+        setProgress(
+            RadioPhase.HANDSHAKING,
+            "USB radio opened. Waiting for the handshake…",
+            deviceName = deviceName,
+        )
         startReadLoop(serialPort)
+    }
+
+    private fun failure(kind: LinkError, message: String, deviceName: String? = null): IllegalStateException {
+        setProgress(RadioPhase.ERROR, message, deviceName = deviceName, error = kind)
+        return IllegalStateException(message)
+    }
+
+    private fun setProgress(
+        phase: RadioPhase,
+        message: String,
+        deviceName: String? = _progress.value.deviceName,
+        error: LinkError? = null,
+    ) {
+        val previous = _progress.value
+        _progress.value = LinkProgress(
+            phase = phase,
+            message = message,
+            deviceName = deviceName,
+            attempt = 1,
+            error = error,
+            sinceMs = if (previous.phase == phase && previous.sinceMs > 0L) previous.sinceMs else System.currentTimeMillis(),
+        )
     }
 
     private fun findDriver(): UsbSerialDriver? {
@@ -142,12 +195,20 @@ class UsbSerialTransport(
             } finally {
                 if (_connected.value) {
                     _connected.value = false
+                    if (!userClosing) {
+                        setProgress(
+                            RadioPhase.ERROR,
+                            "Lost connection to the USB radio. Check the cable, then reconnect.",
+                            error = LinkError.LINK_LOST,
+                        )
+                    }
                 }
             }
         }
     }
 
     override suspend fun disconnect() {
+        userClosing = true
         _connected.value = false
         readJob?.cancel()
         readJob = null
@@ -157,10 +218,22 @@ class UsbSerialTransport(
         }
         scope.cancel()
         scope = newScope()
+        _progress.value = LinkProgress()
     }
 
     override suspend fun write(bytes: ByteArray) {
         val serialPort = port ?: error("USB transport is not connected")
-        withContext(Dispatchers.IO) { serialPort.write(bytes, 2000) }
+        try {
+            withContext(Dispatchers.IO) { serialPort.write(bytes, 2000) }
+        } catch (e: IOException) {
+            if (!userClosing) {
+                setProgress(
+                    RadioPhase.ERROR,
+                    "Lost connection to the USB radio. Check the cable, then reconnect.",
+                    error = LinkError.LINK_LOST,
+                )
+            }
+            throw e
+        }
     }
 }

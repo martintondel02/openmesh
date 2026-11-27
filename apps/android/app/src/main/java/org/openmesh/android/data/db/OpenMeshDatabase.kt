@@ -178,6 +178,9 @@ interface MeshDao {
     @Query("UPDATE messages SET delivery = :delivery, read = :read WHERE id = :id")
     suspend fun updateDelivery(id: Long, delivery: String, read: Boolean)
 
+    @Query("DELETE FROM messages WHERE id = :id")
+    suspend fun deleteMessage(id: Long)
+
     @Query("UPDATE messages SET read = 1 WHERE peerId = :peerId")
     suspend fun markThreadRead(peerId: String)
 

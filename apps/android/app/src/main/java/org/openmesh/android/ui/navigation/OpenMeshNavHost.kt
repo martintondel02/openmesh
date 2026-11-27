@@ -143,7 +143,7 @@ fun OpenMeshNavHost(
                     repository = repository,
                     radio = radio,
                     onOpenThread = { peerId, channel -> navController.navigate(Routes.thread(peerId, channel)) },
-                    onOpenSettings = { navController.navigate(Routes.SETTINGS) },
+                    onOpenRadio = { navController.navigate(Routes.RADIO) },
                     onOpenChannels = { navController.navigate(Routes.CHANNELS) },
                     onOpenHelp = { navController.navigate(Routes.help()) },
                 )
@@ -163,6 +163,7 @@ fun OpenMeshNavHost(
                     isChannel = channel,
                     onBack = { navController.popBackStack() },
                     onOpenHelp = { slug -> navController.navigate(Routes.help(slug)) },
+                    onOpenRadio = { navController.navigate(Routes.RADIO) },
                 )
             }
             composable(Routes.MAP) { MapScreen(repository = repository) }
@@ -206,7 +207,13 @@ fun OpenMeshNavHost(
             }
             composable(Routes.RADIO) {
                 val settings = repository.settings.collectAsState().value
-                RadioScreen(repository = repository, radio = radio, settings = settings, onBack = { navController.popBackStack() })
+                RadioScreen(
+                    repository = repository,
+                    radio = radio,
+                    settings = settings,
+                    onBack = { navController.popBackStack() },
+                    onOpenHelp = { slug -> navController.navigate(Routes.help(slug)) },
+                )
             }
             composable(Routes.ABOUT) {
                 AboutScreen(

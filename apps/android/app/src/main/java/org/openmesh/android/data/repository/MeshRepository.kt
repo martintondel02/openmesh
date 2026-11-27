@@ -13,8 +13,15 @@ import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.filter
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withTimeoutOrNull
 import org.openmesh.android.data.db.ChannelEntity
 import org.openmesh.android.data.db.ContactEntity
 import org.openmesh.android.data.db.MessageEntity
@@ -59,6 +66,12 @@ import org.openmesh.android.data.security.IdentityStore
 import org.openmesh.android.data.transport.BleTransport
 import org.openmesh.android.data.transport.CompanionTransport
 import org.openmesh.android.data.transport.FramedCompanionClient
+import org.openmesh.android.data.transport.LinkError
+import org.openmesh.android.data.transport.LinkProgress
+import org.openmesh.android.data.transport.RadioErrorHints
+import org.openmesh.android.data.transport.RadioHealth
+import org.openmesh.android.data.transport.RadioHealthPolicy
+import org.openmesh.android.data.transport.RadioPhase
 import org.openmesh.android.data.transport.UsbSerialTransport
 import org.openmesh.android.media.MediaMath
 import org.openmesh.android.media.MediaTierLoader
@@ -183,10 +196,50 @@ class MeshRepository(
     private var companion: FramedCompanionClient? = null
     private var companionKind = CompanionKind.NONE
     private var companionJob: Job? = null
+    private var companionAttempt = 0
+    /** True while the user asked to disconnect, so the link watcher does not report "lost". */
+    @Volatile private var userDisconnect = false
     @Volatile private var latestPrefs = org.openmesh.android.data.prefs.LocalPrefs()
+
+    // ---- Queued outbound messages (radio not READY): held locally, sent on the next READY link. ----
+    private val MAX_QUEUED_MESSAGES = 50
+    private val HANDSHAKE_TIMEOUT_MS = 20_000L
+    private val queueLock = Any()
+    private val outboundQueue = ArrayDeque<QueuedOutbound>()
+    private val flushMutex = Mutex()
+    private var nextLocalMessageId = -1L
+
+    /** A message the user wrote while the radio link was not usable yet. */
+    private data class QueuedOutbound(
+        val localId: Long,
+        val peerId: String,
+        val channel: Boolean,
+        val text: String? = null,
+        val attachmentMime: String? = null,
+        val attachmentName: String? = null,
+        val attachmentBytes: Int = 0,
+        val attachmentDurationMs: Long? = null,
+        val attachmentFile: File? = null,
+    )
 
     init {
         scope.launch { load() }
+        // Liveness of a READY link: the companion client pings every 15 s; if the radio is silent
+        // for ~30 s the UI switches to "not answering" (phase stays READY, health STALE).
+        scope.launch {
+            while (isActive) {
+                delay(1_000)
+                val current = _radio.value
+                val health = RadioHealthPolicy.compute(current.phase, current.lastReplyMs, System.currentTimeMillis())
+                if (health != current.health) _radio.value = current.copy(health = health)
+            }
+        }
+        // Flush locally queued messages whenever a link becomes READY (connect or reconnect).
+        scope.launch {
+            _radio.map { it.phase }.distinctUntilChanged().collect { phase ->
+                if (phase == RadioPhase.READY) flushQueuedMessages()
+            }
+        }
     }
 
     private suspend fun load() {
@@ -196,10 +249,11 @@ class MeshRepository(
         loadFromDatabase()
         if (saved.demoMode) {
             seedDemo()
-        } else if (saved.setupCompleted) {
-            ensureStarted()
+        } else {
+            rehydrateQueuedMessages()
+            if (saved.setupCompleted) ensureStarted()
         }
-        if (saved.autoConnect && saved.radioKind != "none" && saved.setupCompleted) {
+        if (!saved.demoMode && saved.autoConnect && saved.radioKind != "none" && saved.setupCompleted) {
             connectCompanion(if (saved.radioKind == "usb") CompanionKind.USB else CompanionKind.BLE)
         }
         _initialized.value = true
@@ -227,7 +281,9 @@ class MeshRepository(
         _channels.value = DemoData.channels
         _messages.value = DemoData.messages
         _channelMessages.value = DemoData.channelMessages
-        _radio.value = DemoData.radioStatus
+        // Demo mode still shows how many real messages are waiting for a radio link.
+        val waiting = synchronized(queueLock) { outboundQueue.size }
+        _radio.value = DemoData.radioStatus.copy(queuedMessages = waiting)
         rebuildConversations()
     }
 
@@ -332,6 +388,8 @@ class MeshRepository(
         runCatching { engine.announce(System.currentTimeMillis()) }
         if (saved.demoMode) seedDemo()
         _engineReady.value = true
+        // Messages written while the engine/link was not ready are sent now (if the link is READY).
+        if (_radio.value.phase == RadioPhase.READY) maybeFlushQueuedMessages()
         MeshLog.i("engine start: ready node=${engine.nodeIdHex() ?: "?"} name=${saved.nodeName} profile=${saved.profile}/${saved.region}")
     }
 
@@ -377,6 +435,14 @@ class MeshRepository(
     fun sendText(peerId: String, text: String, channel: Boolean = false): Long {
         val trimmed = text.trim()
         if (trimmed.isEmpty()) return -1L
+        // Honest delivery: with no READY radio the message is not handed to the engine yet. It is
+        // stored locally as QUEUED and actually sent (once) when the link becomes READY.
+        if (shouldQueueLocally()) return enqueueText(peerId, trimmed, channel)
+        return sendTextNow(peerId, trimmed, channel)
+    }
+
+    /** Sends a text through the engine immediately (the link is READY, or demo mode is on). */
+    private fun sendTextNow(peerId: String, trimmed: String, channel: Boolean): Long {
         val target = if (channel) Target.Channel(peerId) else Target.Direct(peerId)
         val result = engine.sendText(target, trimmed)
         val id = result.getOrElse {
@@ -425,6 +491,19 @@ class MeshRepository(
         durationMs: Long? = null,
         channel: Boolean = false,
     ): Long {
+        // Same honest-delivery rule as text: keep the media locally and send it when READY.
+        if (shouldQueueLocally()) return enqueueAttachment(peerId, name, mime, data, durationMs, channel)
+        return sendAttachmentNow(peerId, name, mime, data, durationMs, channel)
+    }
+
+    private fun sendAttachmentNow(
+        peerId: String,
+        name: String,
+        mime: String,
+        data: ByteArray,
+        durationMs: Long?,
+        channel: Boolean,
+    ): Long {
         val target = if (channel) Target.Channel(peerId) else Target.Direct(peerId)
         val result = engine.sendAttachment(target, mime, name, data, durationMs)
         val id = result.getOrElse {
@@ -460,10 +539,270 @@ class MeshRepository(
     }
 
     fun retryMessage(messageId: Long) {
+        if (messageId < 0) {
+            // A locally queued message: do not ask the engine (it never saw this message id).
+            if (_radio.value.phase == RadioPhase.READY) {
+                maybeFlushQueuedMessages()
+            } else {
+                _uiEvents.tryEmit(UiEvent.Snackbar("Connect a radio to send this message."))
+            }
+            return
+        }
         engine.retryMessage(messageId)
         scope.launch {
             updateDeliveryAnywhere(messageId, DeliveryState.SENT, null)
         }
+    }
+
+    // ---------------------------------------------------------------- queued outbound messages
+
+    /**
+     * True when a user send must be held locally instead of being handed to the engine.
+     *
+     * The radio link must be READY (HelloAck received) and the engine running: sending earlier
+     * silently dropped frames because no companion existed to carry them, while the UI claimed
+     * "sent". Demo mode is simulated end-to-end and never queues.
+     */
+    private fun shouldQueueLocally(): Boolean =
+        !engine.isDemo() && (_radio.value.phase != RadioPhase.READY || !_engineReady.value)
+
+    private fun enqueueText(peerId: String, text: String, channel: Boolean): Long {
+        val localId: Long? = synchronized(queueLock) {
+            if (outboundQueue.size >= MAX_QUEUED_MESSAGES) {
+                null
+            } else {
+                val id = nextLocalMessageId--
+                outboundQueue.addLast(QueuedOutbound(localId = id, peerId = peerId, channel = channel, text = text))
+                id
+            }
+        }
+        if (localId == null) {
+            _uiEvents.tryEmit(UiEvent.Error("Too many queued messages (max $MAX_QUEUED_MESSAGES). Connect a radio to send them first."))
+            return -1L
+        }
+        val message = Message(
+            id = localId,
+            peerId = peerId,
+            fromId = _selfNodeId.value ?: "self",
+            toId = peerId,
+            kind = MessageKind.TEXT,
+            text = text,
+            sentAtMs = System.currentTimeMillis(),
+            outgoing = true,
+            delivery = DeliveryState.QUEUED,
+        )
+        appendMessage(peerId, message, channel)
+        scope.launch { dao.upsertMessage(MessageEntity.fromModel(message)) }
+        refreshQueuedCount()
+        MeshLog.i("send queued (radio not ready) local_id=$localId channel=$channel")
+        return localId
+    }
+
+    private fun enqueueAttachment(
+        peerId: String,
+        name: String,
+        mime: String,
+        data: ByteArray,
+        durationMs: Long?,
+        channel: Boolean,
+    ): Long {
+        val localId: Long? = synchronized(queueLock) {
+            if (outboundQueue.size >= MAX_QUEUED_MESSAGES) null else nextLocalMessageId--
+        }
+        if (localId == null) {
+            _uiEvents.tryEmit(UiEvent.Error("Too many queued messages (max $MAX_QUEUED_MESSAGES). Connect a radio to send them first."))
+            return -1L
+        }
+        val local = File(attachmentsDir(), "att_$localId")
+        if (runCatching { local.writeBytes(data) }.isFailure) {
+            _uiEvents.tryEmit(UiEvent.Error("Could not save the queued attachment. Try again."))
+            return -1L
+        }
+        synchronized(queueLock) {
+            outboundQueue.addLast(
+                QueuedOutbound(
+                    localId = localId,
+                    peerId = peerId,
+                    channel = channel,
+                    text = name,
+                    attachmentMime = mime,
+                    attachmentName = name,
+                    attachmentBytes = data.size,
+                    attachmentDurationMs = durationMs,
+                    attachmentFile = local,
+                ),
+            )
+        }
+        val message = Message(
+            id = localId,
+            peerId = peerId,
+            fromId = _selfNodeId.value ?: "self",
+            toId = peerId,
+            kind = MessageKind.ATTACHMENT,
+            text = name,
+            sentAtMs = System.currentTimeMillis(),
+            outgoing = true,
+            delivery = DeliveryState.QUEUED,
+            attachment = Attachment(
+                id = "att_$localId",
+                mime = mime,
+                sizeBytes = data.size,
+                durationMs = durationMs?.toInt(),
+                name = name,
+                progress = 1f,
+            ),
+        )
+        appendMessage(peerId, message, channel)
+        scope.launch { dao.upsertMessage(MessageEntity.fromModel(message)) }
+        refreshQueuedCount()
+        MeshLog.i("attachment queued (radio not ready) local_id=$localId channel=$channel bytes=${data.size}")
+        return localId
+    }
+
+    /** Fire-and-forget flush; coalesced by [flushMutex] and a READY-link check inside. */
+    private fun maybeFlushQueuedMessages() {
+        if (engine.isDemo()) return
+        scope.launch { flushQueuedMessages() }
+    }
+
+    /**
+     * Sends locally queued messages in order once the link is READY, converting each temp row into
+     * the engine-id row with delivery SENT. A failed send keeps the bubble and marks it FAILED.
+     */
+    private suspend fun flushQueuedMessages() {
+        if (engine.isDemo() || _radio.value.phase != RadioPhase.READY) return
+        if (!_engineReady.value && !ensureStartedAwait(20_000)) return
+        flushMutex.withLock {
+            while (true) {
+                if (engine.isDemo() || _radio.value.phase != RadioPhase.READY) return@withLock
+                val next = synchronized(queueLock) { outboundQueue.firstOrNull() } ?: return@withLock
+                val result = runCatching { sendQueuedNow(next) }
+                    .getOrElse { error -> Result.failure(error) }
+                synchronized(queueLock) {
+                    if (outboundQueue.firstOrNull()?.localId == next.localId) outboundQueue.removeFirst()
+                }
+                refreshQueuedCount()
+                result.onSuccess { realId -> convertQueuedToSent(next, realId) }
+                    .onFailure { error ->
+                        MeshLog.w("queued send failed local=${next.localId}: ${error.message}")
+                        updateDeliveryAnywhere(next.localId, DeliveryState.FAILED, next.channel)
+                        _uiEvents.tryEmit(UiEvent.Error("A queued message could not be sent: ${error.message ?: "radio busy"}"))
+                    }
+            }
+        }
+    }
+
+    private fun sendQueuedNow(queued: QueuedOutbound): Result<Long> {
+        val target = if (queued.channel) Target.Channel(queued.peerId) else Target.Direct(queued.peerId)
+        return when {
+            queued.attachmentFile != null -> {
+                val data = queued.attachmentFile.readBytes()
+                engine.sendAttachment(
+                    target,
+                    queued.attachmentMime ?: "application/octet-stream",
+                    queued.attachmentName,
+                    data,
+                    queued.attachmentDurationMs,
+                )
+            }
+            queued.text != null -> engine.sendText(target, queued.text)
+            else -> Result.failure(IllegalStateException("queued message has no content"))
+        }
+    }
+
+    private fun convertQueuedToSent(queued: QueuedOutbound, realId: Long) {
+        var attachment: Attachment? = null
+        val source = queued.attachmentFile
+        if (source != null) {
+            val realFile = File(attachmentsDir(), "att_$realId")
+            runCatching { source.copyTo(realFile, overwrite = true) }
+            runCatching { source.delete() }
+            attachment = Attachment(
+                id = "att_$realId",
+                mime = queued.attachmentMime ?: "application/octet-stream",
+                sizeBytes = queued.attachmentBytes,
+                durationMs = queued.attachmentDurationMs?.toInt(),
+                name = queued.attachmentName,
+                progress = 1f,
+            )
+        }
+        // Replace the temporary negative-id bubble with the real engine-id message.
+        removeMessageEverywhere(queued.localId)
+        val message = Message(
+            id = realId,
+            peerId = queued.peerId,
+            fromId = _selfNodeId.value ?: "self",
+            toId = queued.peerId,
+            kind = if (attachment != null) MessageKind.ATTACHMENT else MessageKind.TEXT,
+            text = queued.text,
+            sentAtMs = System.currentTimeMillis(),
+            outgoing = true,
+            delivery = DeliveryState.SENT,
+            attachment = attachment,
+        )
+        appendMessage(queued.peerId, message, queued.channel)
+        scope.launch {
+            dao.deleteMessage(queued.localId)
+            dao.upsertMessage(MessageEntity.fromModel(message))
+        }
+        MeshLog.i("queued message sent local=${queued.localId} engine_id=$realId channel=${queued.channel}")
+    }
+
+    private fun removeMessageEverywhere(id: Long) {
+        fun strip(list: List<Message>) = list.filterNot { it.id == id }
+        _messages.value = _messages.value.mapValues { (_, list) -> strip(list) }
+        _channelMessages.value = _channelMessages.value.mapValues { (_, list) -> strip(list) }
+        rebuildConversations()
+    }
+
+    private fun refreshQueuedCount() {
+        val count = synchronized(queueLock) { outboundQueue.size }
+        if (_radio.value.queuedMessages != count) updateRadio { it.copy(queuedMessages = count) }
+    }
+
+    /**
+     * Restores queued messages from the database after a process restart (they were persisted as
+     * QUEUED with a temporary negative id). Payloads: text lives in the row; attachments are read
+     * back from the local file written when the message was queued.
+     */
+    private fun rehydrateQueuedMessages() {
+        if (_settings.value.demoMode) return
+        val channelIds = _channels.value.map { it.id }.toSet()
+        val queuedRows = (_messages.value.values.flatten() + _channelMessages.value.values.flatten())
+            .filter { it.outgoing && it.delivery == DeliveryState.QUEUED && it.id < 0 }
+            .sortedBy { it.sentAtMs }
+        if (queuedRows.isEmpty()) return
+        val overflow = mutableListOf<Message>()
+        synchronized(queueLock) {
+            outboundQueue.clear()
+            for (message in queuedRows) {
+                if (outboundQueue.size >= MAX_QUEUED_MESSAGES) {
+                    overflow += message
+                    continue
+                }
+                val attachment = message.attachment
+                val file = attachment?.let { File(attachmentsDir(), it.id) }
+                outboundQueue.addLast(
+                    QueuedOutbound(
+                        localId = message.id,
+                        peerId = message.peerId,
+                        channel = message.peerId in channelIds,
+                        text = if (message.kind == MessageKind.ATTACHMENT) null else message.text,
+                        attachmentMime = attachment?.mime,
+                        attachmentName = attachment?.name ?: message.text,
+                        attachmentBytes = attachment?.sizeBytes ?: 0,
+                        attachmentDurationMs = attachment?.durationMs?.toLong(),
+                        attachmentFile = file?.takeIf { it.isFile },
+                    ),
+                )
+            }
+            if (queuedRows.isNotEmpty()) {
+                nextLocalMessageId = minOf(nextLocalMessageId, queuedRows.minOf { it.id } - 1)
+            }
+        }
+        overflow.forEach { updateDeliveryAnywhere(it.id, DeliveryState.FAILED, null) }
+        refreshQueuedCount()
+        MeshLog.i("queued messages restored: ${outboundQueue.size} (failed overflow=${overflow.size})")
     }
 
     fun markThreadRead(peerId: String, channel: Boolean = false) {
@@ -637,14 +976,17 @@ class MeshRepository(
     fun connectCompanion(kind: CompanionKind) {
         if (kind == CompanionKind.NONE) {
             // ACTION_START from the foreground service must not tear down a link that the engine
-            // auto-reconnect or the user just started (that race cancelled the connect coroutine).
-            if (companionKind != CompanionKind.NONE && (_radio.value.connected || companionJob?.isActive == true)) {
-                return
-            }
+            // auto-reconnect or the user just started (that race cancelled the connect coroutine),
+            // nor hide a persistent connection error the user still has to act on.
+            val keepLink = _radio.value.connected ||
+                companionJob?.isActive == true ||
+                _radio.value.phase == RadioPhase.ERROR
+            if (keepLink) return
             disconnectCompanion()
             return
         }
         if (companionKind == kind && _radio.value.connected) return
+        userDisconnect = false
         disconnectCompanion()
         val newTransport: CompanionTransport = when (kind) {
             CompanionKind.USB -> UsbSerialTransport(appContext)
@@ -655,78 +997,248 @@ class MeshRepository(
         transport = newTransport
         companion = client
         companionKind = kind
-        MeshLog.i("radio connect: kind=$kind")
+        companionAttempt += 1
+        MeshLog.i("radio connect: kind=$kind attempt=$companionAttempt")
         client.start(scope)
         scope.launch { prefs.setRadioKind(if (kind == CompanionKind.USB) "usb" else "ble") }
+        // A new attempt starts from a clean slate: clear the previous error, keep queued messages.
+        updateRadio {
+            it.copy(
+                phase = RadioPhase.NONE,
+                phaseMessage = "",
+                deviceName = null,
+                deviceAddress = null,
+                devicesFound = 0,
+                lastError = null,
+                lastErrorHint = null,
+                lastErrorKind = null,
+                phaseSinceMs = System.currentTimeMillis(),
+                health = RadioHealth.UNKNOWN,
+                transportName = newTransport.label,
+                txQueue = 0,
+                airtimePct = 0f,
+                rssi = null,
+                snr = null,
+                lastReplyMs = 0L,
+            )
+        }
         companionJob = scope.launch {
-            val result = newTransport.connect()
-            if (result.isFailure) {
-                MeshLog.w("radio connect failed: ${result.exceptionOrNull()?.message}")
-                _radio.value = _radio.value.copy(connected = false, transportName = newTransport.label)
-                _uiEvents.tryEmit(UiEvent.Error(result.exceptionOrNull()?.message ?: "Could not connect to radio"))
-                return@launch
+            val progressJob = launch {
+                newTransport.progress.collect { progress -> applyTransportProgress(progress) }
             }
-            MeshLog.i("radio connected: ${newTransport.label}")
-            MeshLog.i("radio connected: ${newTransport.label}")
-            _radio.value = _radio.value.copy(connected = true, transportName = newTransport.label)
-            pushRadioConfig(client)
-            client.events.collect { event ->
-                when (event) {
-                    is FramedCompanionClient.CompanionEvent.HelloReceived -> {
-                        _radio.value = _radio.value.copy(
-                            firmwareVersion = event.hello.firmwareVersion,
-                            nodeId = event.hello.nodeIdHex,
-                            region = event.hello.region,
-                            profile = event.hello.profile,
-                        )
-                        _uiEvents.tryEmit(UiEvent.Snackbar("Radio ready: ${event.hello.firmwareVersion}"))
-                        // Announce once the companion session is up. The engine's startup announce
-                        // fires before a radio is linked (and is dropped), so without this peers and
-                        // the bridge never learn our identity/public key and drop our signed group
-                        // messages as "group message from unknown signer".
-                        scope.launch {
-                            delay(1_000)
-                            runCatching { engine.announce(System.currentTimeMillis()) }
-                                .onFailure { MeshLog.w("announce after radio ready failed: ${it.message}") }
-                        }
-                    }
-
-                    is FramedCompanionClient.CompanionEvent.Rx -> {
-                        engine.ingestFrame(event.frame, System.currentTimeMillis())
-                    }
-
-                    is FramedCompanionClient.CompanionEvent.Stats -> {
-                        _radio.value = _radio.value.copy(
-                            txQueue = event.entries["tx_queue"]?.toInt() ?: _radio.value.txQueue,
-                            airtimePct = event.entries["airtime_used_pct"]?.toFloat() ?: _radio.value.airtimePct,
-                            rssi = event.entries["last_rssi"]?.toInt() ?: _radio.value.rssi,
-                        )
-                    }
-
-                    is FramedCompanionClient.CompanionEvent.Config -> {
-                        val entries = event.entries
-                        updateSettings {
-                            it.copy(
-                                profile = entries["radio.profile"] ?: it.profile,
-                                region = entries["radio.region"] ?: it.region,
-                                nodeName = entries["node.name"] ?: it.nodeName,
-                                storeForward = (entries["mesh.store"] ?: "1") == "1",
-                            )
-                        }
-                    }
-
-                    is FramedCompanionClient.CompanionEvent.RadioEvent ->
-                        _uiEvents.tryEmit(UiEvent.Snackbar("Radio: ${event.kind} ${event.detail}"))
-
-                    is FramedCompanionClient.CompanionEvent.Pong,
-                    is FramedCompanionClient.CompanionEvent.Failure,
-                    -> Unit
+            try {
+                val result = newTransport.connect()
+                if (result.isFailure) {
+                    progressJob.cancel()
+                    // The transport already published the specific failure through [progress];
+                    // prefer that reason over the thrown exception text.
+                    val snapshot = newTransport.progress.value
+                    val errorKind = snapshot.error ?: LinkError.UNKNOWN
+                    val message = result.exceptionOrNull()?.message?.takeIf { it.isNotBlank() }
+                        ?: snapshot.message.ifBlank { "Could not connect to the radio." }
+                    failCompanion(errorKind, message)
+                    closeCompanionResources(newTransport, client)
+                    return@launch
                 }
+                // Transport is connected; the companion client has sent Hello and waits for HelloAck.
+                val transportProgress = newTransport.progress.value
+                applyTransportProgress(
+                    if (transportProgress.phase == RadioPhase.HANDSHAKING) {
+                        transportProgress
+                    } else {
+                        transportProgress.copy(
+                            phase = RadioPhase.HANDSHAKING,
+                            message = "Radio found. Waiting for the handshake…",
+                            sinceMs = System.currentTimeMillis(),
+                        )
+                    },
+                )
+                // READY only after HelloAck — a GATT/USB write channel alone is not "connected".
+                val session = withTimeoutOrNull(HANDSHAKE_TIMEOUT_MS) {
+                    client.session.filter { it.ready || it.lastError != null }.first()
+                }
+                if (session == null || !session.ready) {
+                    progressJob.cancel()
+                    failCompanion(
+                        LinkError.HANDSHAKE_TIMEOUT,
+                        session?.lastError
+                            ?: "The radio did not finish the handshake. Its firmware may be out of date.",
+                    )
+                    closeCompanionResources(newTransport, client)
+                    return@launch
+                }
+                val hello = session.hello
+                val now = System.currentTimeMillis()
+                updateRadio {
+                    it.copy(
+                        phase = RadioPhase.READY,
+                        phaseMessage = "Connected and answering",
+                        firmwareVersion = hello?.firmwareVersion ?: it.firmwareVersion,
+                        nodeId = hello?.nodeIdHex ?: it.nodeId,
+                        region = hello?.region ?: it.region,
+                        profile = hello?.profile ?: it.profile,
+                        lastError = null,
+                        lastErrorHint = null,
+                        lastErrorKind = null,
+                        phaseSinceMs = now,
+                        health = RadioHealth.HEALTHY,
+                        lastReplyMs = now,
+                        deviceName = it.deviceName ?: "OpenMesh radio",
+                    )
+                }
+                MeshLog.i(
+                    "radio ready: fw=${hello?.firmwareVersion} node=${hello?.nodeIdHex} " +
+                        "profile=${hello?.profile}/${hello?.region}",
+                )
+                _uiEvents.tryEmit(UiEvent.Snackbar("Radio ready: ${hello?.firmwareVersion ?: "connected"}"))
+                // Announce once the companion session is up. The engine's startup announce fires
+                // before a radio is linked (and is dropped), so peers/bridge never learned our
+                // identity/public key otherwise.
+                scope.launch {
+                    delay(1_000)
+                    runCatching { engine.announce(System.currentTimeMillis()) }
+                        .onFailure { MeshLog.w("announce after radio ready failed: ${it.message}") }
+                }
+                pushRadioConfig(client)
+                maybeFlushQueuedMessages()
+                // Detect a link that dies after READY (radio out of range, cable pulled, BLE dropped).
+                val linkWatcher = launch {
+                    newTransport.connected.collect { connected ->
+                        if (!connected && !userDisconnect && _radio.value.phase == RadioPhase.READY) {
+                            MeshLog.w("radio link lost after ready (kind=$kind)")
+                            failCompanion(
+                                LinkError.LINK_LOST,
+                                "Lost connection to the radio. It may be out of range or switched off.",
+                            )
+                            companionJob?.cancel()
+                        }
+                    }
+                }
+                try {
+                    client.events.collect { event -> handleCompanionEvent(event) }
+                } finally {
+                    linkWatcher.cancel()
+                }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                MeshLog.e("radio companion loop failed", e)
+                failCompanion(LinkError.UNKNOWN, e.message ?: "The radio link stopped unexpectedly.")
+                closeCompanionResources(newTransport, client)
+            } finally {
+                progressJob.cancel()
             }
         }
     }
 
+    private fun closeCompanionResources(t: CompanionTransport, client: FramedCompanionClient) {
+        scope.launch {
+            runCatching { client.stop() }
+            runCatching { t.disconnect() }
+        }
+    }
+
+    private fun handleCompanionEvent(event: FramedCompanionClient.CompanionEvent) {
+        markRadioReply()
+        when (event) {
+            is FramedCompanionClient.CompanionEvent.Rx ->
+                engine.ingestFrame(event.frame, System.currentTimeMillis())
+
+            is FramedCompanionClient.CompanionEvent.Stats -> updateRadio {
+                it.copy(
+                    txQueue = event.entries["tx_queue"]?.toInt() ?: it.txQueue,
+                    airtimePct = event.entries["airtime_used_pct"]?.toFloat() ?: it.airtimePct,
+                    rssi = event.entries["last_rssi"]?.toInt() ?: it.rssi,
+                )
+            }
+
+            is FramedCompanionClient.CompanionEvent.Config -> {
+                val entries = event.entries
+                updateSettings {
+                    it.copy(
+                        profile = entries["radio.profile"] ?: it.profile,
+                        region = entries["radio.region"] ?: it.region,
+                        nodeName = entries["node.name"] ?: it.nodeName,
+                        storeForward = (entries["mesh.store"] ?: "1") == "1",
+                    )
+                }
+            }
+
+            is FramedCompanionClient.CompanionEvent.RadioEvent ->
+                _uiEvents.tryEmit(UiEvent.Snackbar("Radio: ${event.kind} ${event.detail}"))
+
+            is FramedCompanionClient.CompanionEvent.Failure ->
+                failCompanion(LinkError.UNKNOWN, event.message)
+
+            is FramedCompanionClient.CompanionEvent.HelloReceived,
+            is FramedCompanionClient.CompanionEvent.Pong,
+            -> Unit
+        }
+    }
+
+    /** Applies transport-published progress (scan/connect/handshake/error) to [RadioStatus]. */
+    private fun applyTransportProgress(progress: LinkProgress) {
+        if (progress.phase == RadioPhase.NONE) return
+        updateRadio { current ->
+            val newPhase = current.phase != progress.phase
+            current.copy(
+                phase = progress.phase,
+                phaseMessage = progress.message,
+                deviceName = progress.deviceName ?: current.deviceName,
+                deviceAddress = progress.deviceAddress ?: current.deviceAddress,
+                rssi = progress.rssi ?: current.rssi,
+                devicesFound = progress.devicesFound,
+                phaseSinceMs = if (newPhase) progress.sinceMs else current.phaseSinceMs,
+                health = if (progress.phase == RadioPhase.ERROR) RadioHealth.UNKNOWN else current.health,
+                lastError = if (progress.phase == RadioPhase.ERROR) progress.message else current.lastError,
+                lastErrorHint = if (progress.phase == RadioPhase.ERROR) {
+                    RadioErrorHints.hintFor(progress.error ?: LinkError.UNKNOWN)
+                } else {
+                    current.lastErrorHint
+                },
+                lastErrorKind = if (progress.phase == RadioPhase.ERROR) {
+                    progress.error ?: LinkError.UNKNOWN
+                } else {
+                    current.lastErrorKind
+                },
+            )
+        }
+    }
+
+    /** Makes a link failure persistent: visible on the banner, radio screen and notification. */
+    private fun failCompanion(error: LinkError, message: String) {
+        MeshLog.w("radio error: kind=$error message=$message")
+        updateRadio {
+            it.copy(
+                phase = RadioPhase.ERROR,
+                phaseMessage = message,
+                lastError = message,
+                lastErrorHint = RadioErrorHints.hintFor(error),
+                lastErrorKind = error,
+                phaseSinceMs = System.currentTimeMillis(),
+                health = RadioHealth.UNKNOWN,
+            )
+        }
+    }
+
+    /** Records an inbound companion message so the health ticker can tell a live link from a dead one. */
+    private fun markRadioReply(nowMs: Long = System.currentTimeMillis()) {
+        val current = _radio.value
+        _radio.value = if (current.phase == RadioPhase.READY) {
+            current.copy(lastReplyMs = nowMs, health = RadioHealth.HEALTHY)
+        } else {
+            current.copy(lastReplyMs = nowMs)
+        }
+    }
+
+    /** Enforces the invariant `connected == (phase == READY)` for real links. */
+    private fun updateRadio(transform: (RadioStatus) -> RadioStatus) {
+        val next = transform(_radio.value)
+        _radio.value = next.copy(connected = next.phase == RadioPhase.READY)
+    }
+
     fun disconnectCompanion() {
+        userDisconnect = true
         companionJob?.cancel()
         companionJob = null
         val client = companion
@@ -738,7 +1250,20 @@ class MeshRepository(
             runCatching { client?.stop() }
             runCatching { t?.disconnect() }
         }
-        _radio.value = _radio.value.copy(connected = false)
+        updateRadio {
+            it.copy(
+                phase = RadioPhase.NONE,
+                phaseMessage = "",
+                deviceName = null,
+                deviceAddress = null,
+                devicesFound = 0,
+                phaseSinceMs = System.currentTimeMillis(),
+                health = RadioHealth.UNKNOWN,
+                rssi = null,
+                snr = null,
+                lastReplyMs = 0L,
+            )
+        }
     }
 
     val companionConnected: StateFlow<RadioStatus> = _radio
@@ -1007,6 +1532,7 @@ class MeshRepository(
         _settings.value = updated
         scope.launch {
             if (updated.uiMode != previous.uiMode) prefs.setMode(UiMode.from(updated.uiMode))
+            if (updated.demoMode != previous.demoMode) prefs.setDemoMode(updated.demoMode)
             if (updated.nodeName != previous.nodeName) prefs.setNodeName(updated.nodeName)
             if (updated.profile != previous.profile) prefs.setProfile(updated.profile)
             if (updated.region != previous.region) prefs.setRegion(updated.region)
@@ -1030,7 +1556,24 @@ class MeshRepository(
 
     fun setUiMode(mode: UiMode) = updateSettings { it.copy(uiMode = mode.wire) }
 
-    fun setDemoMode(enabled: Boolean) = updateSettings { it.copy(demoMode = enabled) }
+    /**
+     * Toggle the simulated mesh. Demo mode changes which [EngineBridge] implementation runs, so
+     * restart the engine after persisting the flag: otherwise the UI says "demo" while real
+     * messages try to reach a radio (or get queued for one).
+     */
+    fun setDemoMode(enabled: Boolean) {
+        if (_settings.value.demoMode == enabled) return
+        updateSettings { it.copy(demoMode = enabled) }
+        scope.launch {
+            prefs.setDemoMode(enabled)
+            if (enabled) {
+                // Demo mode is a simulated mesh: drop any real link and show the demo radio status.
+                _radio.value = DemoData.radioStatus
+                disconnectCompanion()
+            }
+            if (started) startEngine()
+        }
+    }
 
     fun setRole(role: String) = updateSettings { it.copy(role = role) }
 

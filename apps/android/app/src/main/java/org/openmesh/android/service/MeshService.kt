@@ -17,10 +17,12 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
 import org.openmesh.android.data.notify.Notifications
 import org.openmesh.android.data.repository.CompanionKind
 import org.openmesh.android.data.repository.MeshGraph
+import org.openmesh.android.ui.radio.RadioPresentation
 import org.openmesh.android.util.MeshLog
 
 /**
@@ -54,13 +56,19 @@ class MeshService : Service() {
         }
         MeshGraph.repository().ensureStarted()
         observer = scope.launch {
-            MeshGraph.repository().engineStatus.collectLatest { status ->
-                val radio = MeshGraph.repository().radio.value
-                val text = when {
-                    radio.connected -> "Radio ${radio.transportName} · ${status.knownNodes} nodes"
-                    status.running -> "Mesh running · no radio connected"
-                    else -> "Mesh stopped"
-                }
+            // Phase-aware notification: scanning/connecting/handshake/ready/error/demo, so a
+            // backgrounded app still tells the user what the radio link is doing.
+            combine(
+                MeshGraph.repository().engineStatus,
+                MeshGraph.repository().radio,
+            ) { status, radio -> status to radio }.collectLatest { (status, radio) ->
+                val demoMode = MeshGraph.repository().settings.value.demoMode
+                val text = RadioPresentation.notificationText(
+                    radio = radio,
+                    demoMode = demoMode,
+                    knownNodes = status.knownNodes,
+                    engineRunning = status.running,
+                )
                 val manager = getSystemService(NotificationManager::class.java)
                 manager?.notify(Notifications.SERVICE_ID, Notifications.serviceNotification(this@MeshService, text))
             }

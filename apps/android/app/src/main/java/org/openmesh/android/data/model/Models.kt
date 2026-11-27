@@ -1,5 +1,9 @@
 package org.openmesh.android.data.model
 
+import org.openmesh.android.data.transport.LinkError
+import org.openmesh.android.data.transport.RadioHealth
+import org.openmesh.android.data.transport.RadioPhase
+
 /**
  * Domain models for the Android client.
  *
@@ -130,6 +134,29 @@ data class RadioStatus(
     val airtimePct: Float = 0f,
     val rssi: Int? = null,
     val snr: Float? = null,
+    // ---- Radio-link UX (v0.8): typed phase, persistent failure and liveness. ----
+    /** Current link phase; [connected] is derived as `phase == READY` for real links. */
+    val phase: RadioPhase = RadioPhase.NONE,
+    /** Plain-language progress line published by the transport ("Looking for OpenMesh radios…"). */
+    val phaseMessage: String = "",
+    val deviceName: String? = null,
+    val deviceAddress: String? = null,
+    /** Candidate radios seen during the last scan (0 when not scanning). */
+    val devicesFound: Int = 0,
+    /** Persistent, user-readable failure reason; stays visible until the next connect attempt. */
+    val lastError: String? = null,
+    /** 1–2 beginner-language bullets on what to try next. */
+    val lastErrorHint: String? = null,
+    /** Typed failure reason behind [lastError] (drives the step rail and help links). */
+    val lastErrorKind: LinkError? = null,
+    /** System.currentTimeMillis() when [phase] started (elapsed counter in the radio screen). */
+    val phaseSinceMs: Long = 0L,
+    /** Liveness of a READY link; STALE means the radio stopped answering keep-alives. */
+    val health: RadioHealth = RadioHealth.UNKNOWN,
+    /** Last inbound companion message timestamp (hello/rx/stats/pong/config). */
+    val lastReplyMs: Long = 0L,
+    /** Messages the app is holding locally until the radio link is ready. */
+    val queuedMessages: Int = 0,
 )
 
 /** Settings persisted locally; mirrors the subset of companion config keys we expose. */

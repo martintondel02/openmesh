@@ -80,9 +80,11 @@ fun ChatThreadScreen(
     isChannel: Boolean,
     onBack: () -> Unit,
     onOpenHelp: (String) -> Unit = {},
+    onOpenRadio: () -> Unit = {},
 ) {
     val context = LocalContext.current
     val directMessages by repository.messages.collectAsState()
+    val radio by repository.radio.collectAsState()
     val channelMessages by repository.channelMessages.collectAsState()
     val thread = if (isChannel) channelMessages[peerId].orEmpty() else directMessages[peerId].orEmpty()
     val settings by repository.settings.collectAsState()
@@ -151,6 +153,10 @@ fun ChatThreadScreen(
                     )
                 }
             }
+        }
+
+        if (!settings.demoMode && radio.queuedMessages > 0) {
+            QueuedMessagesCard(count = radio.queuedMessages, onOpenRadio = onOpenRadio)
         }
 
         Row(
@@ -292,6 +298,10 @@ private fun MessageBubble(message: Message, isChannel: Boolean, repository: Mesh
                     color = MeshOnSurfaceVariant,
                 )
                 if (outgoing) {
+                    if (message.delivery == DeliveryState.QUEUED) {
+                        Spacer(Modifier.width(4.dp))
+                        Text("queued", style = MaterialTheme.typography.labelSmall, color = MeshTertiary)
+                    }
                     Spacer(Modifier.width(4.dp))
                     DeliveryIcon(message.delivery)
                 }

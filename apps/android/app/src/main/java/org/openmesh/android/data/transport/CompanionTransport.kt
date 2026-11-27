@@ -17,6 +17,12 @@ interface CompanionTransport {
     /** True while the underlying link is usable for writes. */
     val connected: StateFlow<Boolean>
 
+    /**
+     * Human-readable progress of the current link attempt (scan → connect → handshake), or the
+     * persistent failure reason. READY is only set by the repository after the companion HelloAck.
+     */
+    val progress: StateFlow<LinkProgress>
+
     /** Raw bytes as they arrive; may split or coalesce frames arbitrarily. */
     val incoming: Flow<ByteArray>
 

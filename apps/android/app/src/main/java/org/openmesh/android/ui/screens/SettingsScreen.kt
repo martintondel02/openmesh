@@ -55,7 +55,9 @@ import org.openmesh.android.ui.components.NodeIdText
 import org.openmesh.android.ui.components.SectionTitle
 import org.openmesh.android.ui.components.StatusPill
 import org.openmesh.android.ui.components.formatDuration
+import org.openmesh.android.ui.radio.RadioPresentation
 import org.openmesh.android.ui.theme.MeshOnSurfaceVariant
+import org.openmesh.android.ui.theme.MeshError
 import org.openmesh.android.ui.theme.MeshPrimary
 import org.openmesh.android.ui.theme.MeshTertiary
 import org.openmesh.android.util.LoraProfile
@@ -208,25 +210,43 @@ fun SettingsScreen(
             SectionTitle("Radio")
             MeshCard {
                 Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    val linkCopy = RadioPresentation.phaseCopy(radio, settings.demoMode)
+                    val linkRunning = !settings.demoMode && RadioPresentation.isRunning(radio.phase)
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Column(Modifier.weight(1f)) {
                             Text(
-                                if (radio.connected) "Connected · ${radio.transportName}" else "No companion link",
+                                linkCopy.title,
                                 style = MaterialTheme.typography.titleMedium,
+                                color = if (linkCopy.tone == org.openmesh.android.ui.radio.RadioTone.ERROR) {
+                                    MeshError
+                                } else {
+                                    MaterialTheme.colorScheme.onSurface
+                                },
                             )
                             Text(
-                                radio.firmwareVersion?.let { "firmware $it" } ?: "Connect a radio over USB or BLE",
+                                when {
+                                    settings.demoMode -> "No radio needed while demo mode is on."
+                                    radio.phase == org.openmesh.android.data.transport.RadioPhase.READY ->
+                                        "firmware ${radio.firmwareVersion ?: "—"} · ${radio.transportName} · " +
+                                            RadioPresentation.healthLabel(radio).lowercase()
+                                    linkCopy.subtitle.isNotBlank() -> linkCopy.subtitle
+                                    else -> "Connect a radio over USB or BLE"
+                                },
                                 style = MaterialTheme.typography.bodyMedium,
                                 color = MeshOnSurfaceVariant,
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis,
                             )
                         }
-                        if (radio.connected) {
-                            OutlinedButton(onClick = {
-                                MeshService.stop(context)
-                            }) { Text("Disconnect") }
+                        if (linkRunning) {
+                            OutlinedButton(onClick = { MeshService.disconnect(context) }) { Text("Cancel") }
+                        } else if (radio.phase == org.openmesh.android.data.transport.RadioPhase.READY) {
+                            OutlinedButton(onClick = { MeshService.stop(context) }) { Text("Disconnect") }
                         }
                     }
-                    if (!radio.connected) {
+                    if (!settings.demoMode && !linkRunning &&
+                        radio.phase != org.openmesh.android.data.transport.RadioPhase.READY
+                    ) {
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             Button(
                                 onClick = {

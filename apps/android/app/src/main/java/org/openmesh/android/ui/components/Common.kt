@@ -22,6 +22,7 @@ import androidx.compose.material.icons.filled.Schedule
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -41,11 +42,14 @@ import java.util.Locale
 import org.openmesh.android.data.model.DeliveryState
 import org.openmesh.android.data.model.RadioStatus
 import org.openmesh.android.data.repository.MediaEstimate
+import org.openmesh.android.ui.radio.RadioPresentation
+import org.openmesh.android.ui.radio.RadioTone
 import org.openmesh.android.ui.theme.MeshError
 import org.openmesh.android.ui.theme.MeshOnline
 import org.openmesh.android.ui.theme.MeshOnSurfaceVariant
 import org.openmesh.android.ui.theme.MeshOutline
 import org.openmesh.android.ui.theme.MeshPrimary
+import org.openmesh.android.ui.theme.MeshSecondary
 import org.openmesh.android.ui.theme.MeshSurface
 import org.openmesh.android.ui.theme.MeshSurfaceHigh
 import org.openmesh.android.ui.theme.MeshTertiary
@@ -98,9 +102,26 @@ fun StatusPill(text: String, color: Color = MeshPrimary, modifier: Modifier = Mo
     }
 }
 
-/** One-line radio status used at the top of the chat list and settings. */
+/** Theme color for a radio status tone (dot, spinner, error accents). */
+fun radioToneColor(tone: RadioTone): Color = when (tone) {
+    RadioTone.NEUTRAL -> MeshOnSurfaceVariant
+    RadioTone.PROGRESS -> MeshSecondary
+    RadioTone.POSITIVE -> MeshOnline
+    RadioTone.WARNING -> MeshTertiary
+    RadioTone.ERROR -> MeshError
+}
+
+/**
+ * One-line radio status used at the top of the chat list and settings.
+ *
+ * Phase-aware: says what the link is doing (scanning/connecting/handshake/ready/error) instead of
+ * only "connected / no radio", and shows how many messages are waiting locally.
+ */
 @Composable
-fun RadioBanner(radio: RadioStatus, onClick: () -> Unit) {
+fun RadioBanner(radio: RadioStatus, demoMode: Boolean, onClick: () -> Unit) {
+    val copy = RadioPresentation.bannerCopy(radio, demoMode)
+    val tone = radioToneColor(copy.tone)
+    val running = !demoMode && RadioPresentation.isRunning(radio.phase)
     Card(
         onClick = onClick,
         colors = CardDefaults.cardColors(containerColor = MeshSurface),
@@ -111,24 +132,32 @@ fun RadioBanner(radio: RadioStatus, onClick: () -> Unit) {
             Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            StatusDot(radio.connected)
+            Box(Modifier.size(8.dp).clip(CircleShape).background(tone))
             Spacer(Modifier.width(10.dp))
             Column(Modifier.weight(1f)) {
                 Text(
-                    if (radio.connected) "Radio connected · ${radio.transportName}" else "No radio · demo mode",
+                    copy.title,
                     style = MaterialTheme.typography.titleMedium,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
                 Text(
-                    "${radio.profile.replace('_', ' ').lowercase()} · ${radio.region} · " +
-                        "${radio.airtimePct.toString().take(4)}% airtime",
+                    copy.subtitle,
                     style = MaterialTheme.typography.bodyMedium,
                     color = MeshOnSurfaceVariant,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
                 )
             }
-            if (radio.txQueue > 0) {
-                StatusPill("${radio.txQueue} queued", MeshTertiary)
+            if (radio.queuedMessages > 0) {
+                StatusPill(RadioPresentation.queuedChipLabel(radio.queuedMessages), MeshTertiary)
+            } else if (running) {
+                Spacer(Modifier.width(8.dp))
+                CircularProgressIndicator(
+                    modifier = Modifier.size(18.dp),
+                    color = tone,
+                    strokeWidth = 2.dp,
+                )
             }
         }
     }

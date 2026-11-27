@@ -50,6 +50,7 @@ import org.openmesh.android.ui.components.NodeIdText
 import org.openmesh.android.ui.components.SectionTitle
 import org.openmesh.android.ui.components.StatusPill
 import org.openmesh.android.ui.components.relativeTime
+import org.openmesh.android.ui.radio.RadioPresentation
 import org.openmesh.android.ui.theme.MeshOnSurfaceVariant
 import org.openmesh.android.ui.theme.MeshPrimary
 import org.openmesh.android.ui.theme.MeshSecondary
@@ -61,6 +62,7 @@ import org.openmesh.android.ui.theme.MeshTertiary
 fun NodesScreen(repository: MeshRepository) {
     val nodes by repository.nodes.collectAsState()
     val radio by repository.radio.collectAsState()
+    val settings by repository.settings.collectAsState()
     var query by remember { mutableStateOf("") }
     var selected by remember { mutableStateOf<NodeInfo?>(null) }
 
@@ -73,7 +75,7 @@ fun NodesScreen(repository: MeshRepository) {
             Text("Nodes", style = MaterialTheme.typography.headlineSmall)
             Text(
                 "${nodes.size} known · ${nodes.count { it.isContact }} contacts · " +
-                    if (radio.connected) "listening via ${radio.transportName}" else "demo data (no radio)",
+                    RadioPresentation.nodesSubtitle(radio, settings.demoMode),
                 style = MaterialTheme.typography.bodyMedium,
                 color = MeshOnSurfaceVariant,
             )
