@@ -73,6 +73,7 @@ int main(int argc, char** argv) {
     RUN_TEST(test_duty_override_policy);
     RUN_TEST(test_frequency_override_and_config);
     RUN_TEST(test_regulatory_override_persistence);
+    RUN_TEST(test_relay_config_persistence);
 
     // Golden vectors
     RUN_TEST(test_vectors_frame);

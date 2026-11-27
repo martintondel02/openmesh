@@ -1069,6 +1069,7 @@ void Engine::fillConfig(CompanionMsg& msg) const {
     u64ToText(config_.default_ttl, tmp, sizeof(tmp));
     add("mesh.ttl", tmp);
     add("mesh.store", config_.store_role ? "1" : "0");
+    add("mesh.relay", config_.relay_role ? "1" : "0");
     u64ToText(config_.announce_interval_ms / 1000u, tmp, sizeof(tmp));
     add("mesh.announce_interval", tmp);
     char signed_tmp[16];
@@ -1172,6 +1173,15 @@ bool Engine::applyConfig(const char* key, const char* value) {
         if (on) config_.caps |= kCapStore;
         else config_.caps &= (uint16_t)~kCapStore;
         accepted = true;
+    } else if (eq(key, "mesh.relay")) {
+        // Managed flooding: turning relaying off removes the node from the relay set and clears
+        // the announce caps bit. Companion-attached radios may do this to spend their airtime
+        // budget on app traffic instead of relaying frames (see COMPANION-API.md).
+        const bool on = std::strcmp(value, "1") == 0;
+        config_.relay_role = on;
+        if (on) config_.caps |= kCapRelay;
+        else config_.caps &= (uint16_t)~kCapRelay;
+        accepted = true;
     } else if (eq(key, "mesh.store_capacity")) {
         accepted = true;  // compile-time capacity (OM_STORE_CAPACITY); accepted but not resized
     } else if (eq(key, "mesh.announce_interval")) {
@@ -1223,7 +1233,7 @@ bool Engine::persistConfig() {
     buf[off++] = 'O';
     buf[off++] = 'M';
     buf[off++] = 'C';
-    buf[off++] = 2;
+    buf[off++] = 3;  // v3 adds mesh.relay; v2 blobs still load (relay defaults on)
     auto putName = [&](const char* name, size_t max_len) {
         const size_t n = name != nullptr ? std::strlen(name) : 0;
         const size_t take = n < max_len ? n : max_len - 1;
@@ -1246,6 +1256,7 @@ bool Engine::persistConfig() {
     buf[off++] = (uint8_t)(int8_t)config_.power_override_dbm;
     writeU32Be(buf + off, config_.frequency_override_khz);
     off += 4;
+    buf[off++] = config_.relay_role ? 1 : 0;
     writeU32Be(buf + off, crc32(buf, off));
     off += 4;
     return storage_->save(configFileName(), buf, off);
@@ -1256,7 +1267,10 @@ void Engine::loadPersistedConfig() {
     uint8_t buf[96];
     size_t len = 0;
     if (!storage_->load(configFileName(), buf, sizeof(buf), len) || len < 80) return;
-    if (buf[0] != 'O' || buf[1] != 'M' || buf[2] != 'C' || buf[3] != 2) return;
+    if (buf[0] != 'O' || buf[1] != 'M' || buf[2] != 'C') return;
+    const uint8_t version = buf[3];
+    if (version != 2 && version != 3) return;
+    if (len < (size_t)(version == 3 ? 91 : 90)) return;
     const uint32_t expected_crc = readU32Be(buf + len - 4);
     if (crc32(buf, len - 4) != expected_crc) return;
     size_t off = 4;
@@ -1281,6 +1295,11 @@ void Engine::loadPersistedConfig() {
     config_.power_override_dbm = (int8_t)buf[off++];
     config_.frequency_override_khz = readU32Be(buf + off);
     off += 4;
+    if (version >= 3 && off < len - 4) {
+        config_.relay_role = buf[off++] != 0;
+        if (config_.relay_role) config_.caps |= kCapRelay;
+        else config_.caps &= (uint16_t)~kCapRelay;
+    }
     if (region != nullptr) config_.region = region;
     if (profile != nullptr && profileFitsRegion(*profile, *config_.region)) {
         config_.profile = profile;

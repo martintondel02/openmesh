@@ -154,6 +154,8 @@ void configureEngine() {
     }
     config.store_role = g_board->default_role == board::DefaultRole::Repeater ||
                         g_board->default_role == board::DefaultRole::Gateway;
+    // Default: participate in managed flooding. The persisted `mesh.relay` config key (default 1)
+    // may override this at boot; companion-attached radios can disable relaying to save airtime.
     config.relay_role = true;
     config.accept_channels = true;
     config.position_sharing = g_board->gps.module != board::GnssModule::None;
@@ -611,14 +613,17 @@ void loop() {
             if (drop_changed || g_ble.sentChunks() > 0 || g_ble.queuedBytes() > 0) {
                 Serial.printf(
                     "[om] ble tx mtu=%u q=%lu peak=%lu sent=%lu fail=%lu drops=%lu drop_bytes=%lu "
-                    "rx=%lu fwd=%lu evdrop=%lu\n",
+                    "rx=%lu fwd=%lu evdrop=%lu relayed=%lu txf=%lu txair=%lu\n",
                     (unsigned)g_ble.mtu(), (unsigned long)g_ble.queuedBytes(),
                     (unsigned long)g_ble.peakQueuedBytes(), (unsigned long)g_ble.sentChunks(),
                     (unsigned long)g_ble.notifyFailures(), (unsigned long)ble_drops,
                     (unsigned long)g_ble.droppedBytes(),
                     (unsigned long)g_engine.stats().rx_frames,
                     (unsigned long)g_ble_rx_events_fwd,
-                    (unsigned long)g_engine.stats().events_dropped);
+                    (unsigned long)g_engine.stats().events_dropped,
+                    (unsigned long)g_engine.stats().relayed,
+                    (unsigned long)g_engine.stats().tx_frames,
+                    (unsigned long)g_engine.stats().airtime_ms);
             }
             s_ble_drops_seen = ble_drops;
         }

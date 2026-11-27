@@ -76,6 +76,7 @@ accepts `Tx` frames. The radio MUST reject `Tx` frames larger than `max_frame` w
 | `radio.frequency` | kHz, override for test networks | advanced |
 | `mesh.ttl` | 1..15 | default 5 |
 | `mesh.store` | `0`/`1` | store-and-forward on relays |
+| `mesh.relay` | `0`/`1` | default `1`; set `0` on a companion-attached radio to keep its airtime budget for app traffic instead of flooding relays (persisted; clears the announce relay caps bit) |
 | `mesh.store_capacity` | envelopes | default 64 |
 | `mesh.announce_interval` | seconds | default 1800 / 3600 |
 | `mesh.position_sharing` | `0`/`1` | GPS trackers only |

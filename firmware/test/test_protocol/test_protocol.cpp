@@ -1268,6 +1268,15 @@ void test_engine_config_and_companion_views() {
     TEST_ASSERT_TRUE(node->engine->applyConfig("radio.tx_power", "30"));
     // Legal-region ceiling 27 dBm, board PA cap 22 dBm -> 22; never 14 and never 30.
     TEST_ASSERT_EQUAL_INT(22, node->engine->config().tx_power_dbm);
+    // mesh.relay toggles managed-flood participation and the announce caps bit.
+    TEST_ASSERT_TRUE(node->engine->config().relay_role);
+    TEST_ASSERT_TRUE((node->engine->config().caps & kCapRelay) != 0);
+    TEST_ASSERT_TRUE(node->engine->applyConfig("mesh.relay", "0"));
+    TEST_ASSERT_FALSE(node->engine->config().relay_role);
+    TEST_ASSERT_EQUAL_UINT16(0, node->engine->config().caps & kCapRelay);
+    TEST_ASSERT_TRUE(node->engine->applyConfig("mesh.relay", "1"));
+    TEST_ASSERT_TRUE(node->engine->config().relay_role);
+    TEST_ASSERT_TRUE((node->engine->config().caps & kCapRelay) != 0);
     TEST_ASSERT_FALSE(node->engine->applyConfig("nope.nope", "1"));
 
     CompanionMsg ack;
@@ -1560,4 +1569,28 @@ void test_regulatory_override_persistence() {
     TEST_ASSERT_NULL(restored->engine->overrideWarning());
     TEST_ASSERT_EQUAL_INT(10, (int)restored->engine->effectiveDutyPctValue());
     TEST_ASSERT_EQUAL_INT(22, restored->engine->config().tx_power_dbm);
+}
+
+void test_relay_config_persistence() {
+    InMemoryStorage storage;
+    {
+        auto node = makeNodeWithConfig(0x83, defaultEngineConfig(0x83, true, false, false),
+                                       &storage);
+        TEST_ASSERT_TRUE(node->engine->config().relay_role);
+        TEST_ASSERT_TRUE((node->engine->config().caps & kCapRelay) != 0);
+        TEST_ASSERT_TRUE(node->engine->applyConfig("mesh.relay", "0"));
+        TEST_ASSERT_FALSE(node->engine->config().relay_role);
+    }
+    // A fresh boot with the same storage restores mesh.relay=0 and clears the caps bit.
+    auto restored = makeNodeWithConfig(0x83, defaultEngineConfig(0x83, true, false, false),
+                                       &storage);
+    TEST_ASSERT_FALSE(restored->engine->config().relay_role);
+    TEST_ASSERT_EQUAL_UINT16(0, restored->engine->config().caps & kCapRelay);
+    CompanionMsg config;
+    restored->engine->fillConfig(config);
+    TEST_ASSERT_EQUAL_STRING("0", configValue(config, "mesh.relay"));
+    // Re-enabling at runtime restores the caps bit and is persisted again.
+    TEST_ASSERT_TRUE(restored->engine->applyConfig("mesh.relay", "1"));
+    TEST_ASSERT_TRUE(restored->engine->config().relay_role);
+    TEST_ASSERT_TRUE((restored->engine->config().caps & kCapRelay) != 0);
 }

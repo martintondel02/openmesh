@@ -60,6 +60,7 @@ void test_effective_power_policy();
 void test_duty_override_policy();
 void test_frequency_override_and_config();
 void test_regulatory_override_persistence();
+void test_relay_config_persistence();
 
 // Golden-vector replay (protocol/vectors/*.json; skipped when absent).
 void test_vectors_frame();
