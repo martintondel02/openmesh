@@ -156,7 +156,10 @@ When the demo is no longer enough:
 
 1. **Plug in / connect a radio.** Supported boards are listed in
    [docs/hardware/boards.md](../docs/hardware/boards.md). Serial radios need the `real-serial`
-   build feature (`cargo build --release -p openmesh-bridge --features real-serial`).
+   build feature (`cargo build --release -p openmesh-bridge --features real-serial`). The bridge
+   auto-detects the radio's companion protocol on the serial link (it sends a companion `Hello`,
+   expects a `HelloAck`, and keeps the link alive with Pings); if no `HelloAck` arrives it falls
+   back to a raw-frame link and logs a warning.
 2. **Restart the bridge without `--demo`** (and without `--sim`). On first real start it opens the
    UDP LAN transport; a USB/serial radio should appear under **Settings → Radio**.
 3. **Match settings across devices.** Everyone in your group must use the same **region** (legal

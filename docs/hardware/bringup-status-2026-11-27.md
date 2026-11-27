@@ -46,6 +46,12 @@ Final verified images (all fixes in this tree):
   `HelloAck {proto:1, fw_version:"0.7.1", node_id:7fe558cfc94d9c60, caps:101, region:"EU868",
   profile:"MEDIUM_FAST"}`. This is the same session the Android app performs, so the app-side
   handshake path is exercised end to end. See §2.7 for the BLE write bug this uncovered.
+* PC side verified (2026-11-27): the bridge's `--serial` radio link now auto-detects and speaks the
+  firmware's companion protocol (`Hello`/`HelloAck`, `Tx`/`Rx`, 20 s `Ping` keepalive, raw-frame
+  fallback with a warning). Injected companion `Tx` from the T1000-E → bridge `mesh.rx_frames`
+  0→1; bridge announce and a signed channel message → T1000-E `rx_frames` 2→3 and 4→8. The Android
+  app was rebuilt from HEAD (0.7.1-debug), installed and launched on the test phone, and the BLE
+  NUS session from a host client matches what the app performs; §8 has the full end-to-end setup.
 
 ### Two-node RF acceptance (2026-11-27, final run)
 
@@ -273,12 +279,11 @@ listed in §6).
 ## 6. Remaining work, in order
 
 1. **Android app end-to-end.** The BLE NUS session is verified from a host BLE client (Ping/Pong +
-   HelloAck), the app build/installs on the test phone, and the PC bridge/web side is being
-   brought up; the remaining verification is the user-facing phone-app -> BLE radio -> LoRa ->
-   second radio -> bridge -> web GUI path, including a shared channel invite. A second open item:
-   the bridge's `--serial` transport is a raw OMP-frame pipe while the firmware speaks the companion
-   protocol (see the bridge workstream) — that link must use the companion client before the web
-   GUI can receive radio traffic.
+   HelloAck), the app builds/installs/l launches on the test phone, the bridge now speaks the
+   companion protocol over `--serial` (both directions verified with the real radios), and the web
+   client is built/served with its token flow verified. The only remaining verification is the
+   user-facing tap-through: phone app -> BLE radio -> LoRa -> second radio -> bridge -> web GUI,
+   including pasting the shared channel invite (§8).
 2. **Deep sleep / power budget.** The receiver stays on continuously today; implement radio RX
    windows and measure current (light sleep via `delay()` + FreeRTOS tickless idle is in place).
    Battery/ADC calibration and GNSS date/time remain as before (§9 in `firmware/README.md`).
@@ -312,3 +317,47 @@ python3 scripts/check_docs.py && python3 scripts/check_help.py && python3 script
 Serial access needs the `dialout` group (`sg dialout -c '...'`). The two-node harness exits 0 only
 when both RF directions pass. Evidence logs from the session (serial captures, RF pass log) are
 kept outside the repo under `/tmp/bringup-evidence/`; they are not committed.
+
+---
+
+## 8. End-to-end setup: phone app ↔ BLE radio ↔ LoRa ↔ RAK ↔ bridge ↔ web GUI
+
+Pieces verified on 2026-11-27: Android app 0.7.1-debug installed on the test phone; host-side BLE
+NUS session (Ping/Pong + HelloAck); bridge companion-mode `--serial` link both directions; web
+client built and served with the bearer-token flow. The phone-side taps below are the remaining
+acceptance step. Both radios are EU868 / MEDIUM_FAST.
+
+PC side (run from the repo; adapt ports with the udev detection shown in §7):
+
+```bash
+cargo build -p openmesh-bridge --features real-serial
+pnpm --dir apps/web build
+RAK=$(for p in /dev/ttyACM*; do udevadm info "$p" 2>/dev/null \
+      | grep -q 'ID_MODEL=WisCore_RAK4631_Board' && echo "$p"; done | head -1)
+mkdir -p /tmp/openmesh-bridge-test
+nohup setsid sg dialout -c "exec ./target/debug/openmesh-bridge --serial $RAK \
+  --data-dir /tmp/openmesh-bridge-test --token-file /tmp/openmesh-bridge-test/bridge-token \
+  --serve-web apps/web/dist --name 'PC Bridge' --region EU868 --profile MEDIUM_FAST \
+  --class gateway --no-udp" > /tmp/openmesh-bridge.log 2>&1 &
+cat /tmp/openmesh-bridge-test/bridge-token   # bearer token to paste in the web client
+```
+
+Web client (`http://127.0.0.1:8787`):
+1. The client cannot read the token automatically; open **Settings → Bridge connection**, paste the
+   bearer token, then **Save & reconnect** (the "no bridge token" banner clears).
+2. Finish onboarding if it opens (role `client`, country `NO` → EU868/MEDIUM_FAST), or apply it via
+   `POST /api/setup/quick`.
+3. Create a channel; its invite URL (`openmesh://channel?name=…&id=…&psk=…`) is shown once and
+   is also returned by `POST /api/channels` — that URL is what the phone joins with.
+
+Phone (Android app, installed):
+1. Finish the three-step onboarding: **Phone or handheld → country Norway → Secure my node →
+   Start messaging**.
+2. **Radio → BLE** → connect to `OpenMesh T1000-E` (the app only lists radio names starting with
+   `OpenMesh`; no pairing button is needed — the NUS characteristics are open).
+3. **Channels → Join with invite** → paste the `openmesh://channel?...` URL from the web client.
+4. Send a message on the channel; it should appear in the web client, and a web reply should arrive
+   on the phone. Expected timing is one LoRa hop (~0.5 s airtime) plus USB/bridge processing.
+
+Notes: the T1000-E can stay USB-connected to the PC for power/logs while the phone talks to it over
+BLE (coexistence verified); a device-initiated reset can renumber `/dev/ttyACM*`, so re-detect ports.
