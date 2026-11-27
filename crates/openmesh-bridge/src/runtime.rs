@@ -512,6 +512,14 @@ impl CoreRuntime {
                 progress: 0.0,
             });
             self.incoming_resources.insert(a.res_id, (peer, msg.id));
+            tracing::debug!(
+                res_id = a.res_id,
+                msg_id = msg.id,
+                peer = %peer,
+                mime = %a.mime,
+                size = a.size,
+                "incoming attachment manifest recorded"
+            );
         }
         let record = StoredMessage {
             msg_id: msg.id,
@@ -560,6 +568,13 @@ impl CoreRuntime {
         let channel = received.channel;
         let sender = received.sender;
         let msg = received.message;
+        tracing::debug!(
+            channel = %channel.to_hex(),
+            sender = %sender.to_hex(),
+            msg_id = msg.id,
+            attachment = msg.attachment.is_some(),
+            "incoming channel message"
+        );
         let channel_name = self
             .store
             .get_channel(channel)?
@@ -686,6 +701,7 @@ impl CoreRuntime {
         total: u16,
         _now: u64,
     ) -> Result<()> {
+        tracing::debug!(%peer, res_id, received, total, "resource progress event");
         let (direction, msg_id) = if let Some((_, msg_id)) = self.outgoing_resources.get(&res_id) {
             ("out", *msg_id)
         } else if let Some((_, msg_id)) = self.incoming_resources.get(&res_id) {
@@ -757,6 +773,14 @@ impl CoreRuntime {
         data: Vec<u8>,
         now: u64,
     ) -> Result<()> {
+        tracing::debug!(
+            res_id = manifest.res_id,
+            msg_id = manifest.msg_id,
+            kind = ?manifest.kind,
+            peer = %peer,
+            bytes = data.len(),
+            "incoming resource completed"
+        );
         // Long text / history resources carry a CBOR application envelope that the engine has
         // already surfaced as a normal `message`/`group_message` event; only binary attachment
         // kinds carry file bytes we must store.
