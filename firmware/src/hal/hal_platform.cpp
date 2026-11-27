@@ -6,7 +6,10 @@
 #include <Arduino.h>
 #include <nrf.h>
 #include <nrf_gpio.h>
+#include <nrf_soc.h>
 #include <nrfx_rtc.h>
+#include <cstring>
+#include "openmesh/om_sha256.h"
 #elif defined(ESP32)
 #include <Arduino.h>
 #include <esp_sleep.h>
@@ -28,7 +31,63 @@ const board::Board* g_board = nullptr;
 uint32_t g_gps_baud = 9600;
 uint64_t g_wall_ms = 0;
 bool g_wall_valid = false;
+bool g_softdevice_enabled = false;
+
+// SoftDevice RNG application API. Only valid while the SoftDevice is enabled: with it running the
+// nRF52 RNG peripheral belongs to the SoftDevice (BLE uses it), so applications must not poke
+// NRF_RNG directly. The pool is filled asynchronously, so poll for a bounded time.
+bool fillFromSoftDeviceRng(uint8_t* out, size_t len) {
+    size_t got = 0;
+    for (uint32_t spins = 0; spins < 2000 && got < len; ++spins) {
+        uint8_t available = 0;
+        if (sd_rand_application_bytes_available_get(&available) != NRF_SUCCESS) return false;
+        if (available == 0) {
+            delay(1);
+            continue;
+        }
+        size_t want = len - got;
+        if (want > available) want = available;
+        if (want > 255) want = 255;
+        if (sd_rand_application_vector_get(out + got, (uint8_t)want) != NRF_SUCCESS) return false;
+        got += want;
+    }
+    return got == len;
+}
+
+// Fallback when the SoftDevice RNG is unavailable: SHA-256 counter chain seeded from the device
+// id and boot time. Not a substitute for true entropy, but never touches the SD-owned RNG and
+// never returns a zero block (used only if the SD RNG pool does not fill).
+void fillFromHashChain(uint8_t* out, size_t len) {
+    static uint8_t state[32];
+    static uint32_t counter = 0;
+    static bool seeded = false;
+    if (!seeded) {
+        seeded = true;
+        uint8_t seed[16];
+        const uint32_t id0 = NRF_FICR->DEVICEID[0];
+        const uint32_t id1 = NRF_FICR->DEVICEID[1];
+        const uint64_t t = (uint64_t)millis();
+        std::memcpy(seed, &id0, sizeof(id0));
+        std::memcpy(seed + 4, &id1, sizeof(id1));
+        std::memcpy(seed + 8, &t, sizeof(t));
+        om_sha256(seed, sizeof(seed), state);
+    }
+    while (len > 0) {
+        om_sha256_ctx ctx;
+        om_sha256_init(&ctx);
+        om_sha256_update(&ctx, state, sizeof(state));
+        om_sha256_update(&ctx, &counter, sizeof(counter));
+        om_sha256_final(&ctx, state);
+        ++counter;
+        const size_t n = len < sizeof(state) ? len : sizeof(state);
+        std::memcpy(out, state, n);
+        out += n;
+        len -= n;
+    }
+}
 }  // namespace
+
+void setSoftDeviceEnabled(bool enabled) { g_softdevice_enabled = enabled; }
 
 #if defined(ARDUINO_ARCH_NRF52) || defined(NRF52_SERIES)
 
@@ -36,8 +95,13 @@ uint64_t nowMs() { return (uint64_t)millis(); }
 
 void randomBytes(void* ctx, uint8_t* out, size_t len) {
     (void)ctx;
-    // NRF_RNG is enabled on demand for each byte; the Adafruit core also exposes
-    // random() but that is a PRNG, so use the hardware peripheral directly.
+    if (g_softdevice_enabled) {
+        if (fillFromSoftDeviceRng(out, len)) return;
+        fillFromHashChain(out, len);
+        return;
+    }
+    // No SoftDevice: NRF_RNG can be driven directly. The Adafruit core also exposes
+    // random() but that is a PRNG, so use the hardware peripheral.
     NRF_RNG->CONFIG = RNG_CONFIG_DERCEN_Enabled << RNG_CONFIG_DERCEN_Pos;
     NRF_RNG->TASKS_START = 1;
     size_t i = 0;
@@ -155,6 +219,8 @@ void randomBytes(void* ctx, uint8_t* out, size_t len) {
     for (size_t i = 0; i < len; ++i) out[i] = (uint8_t)(esp_random() >> 24);
 }
 
+void setSoftDeviceEnabled(bool) {}
+
 void sleepMs(uint32_t ms) {
     // ESP32-S3 light sleep with a timer wake-up: the radio is re-armed by the caller after the
     // sleep, so only scheduler delays are passed here.
@@ -241,6 +307,8 @@ uint64_t nowMs() {
     using namespace std::chrono;
     return (uint64_t)duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count();
 }
+void setSoftDeviceEnabled(bool) {}
+
 void randomBytes(void* ctx, uint8_t* out, size_t len) {
     (void)ctx;
     static uint64_t state = 0x1234567;

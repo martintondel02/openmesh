@@ -38,6 +38,14 @@ om::BatteryReading readBattery(const board::Board& board);
 // Wall clock (Unix ms) when the platform knows it (GPS time once fixed, else 0).
 uint64_t wallTimeMs();
 
+// Enables the nRF52 SoftDevice without starting BLE (BLE-compiled-out product images still need
+// it: Adafruit's InternalFS flash writes use sd_flash_* SVCs, valid only with the SoftDevice on).
+// Returns true when the SoftDevice is running. No-op false on the other platforms.
+bool beginSoftDevice();
+// Internal: records whether the SoftDevice is enabled so randomBytes() uses the SD RNG API
+// instead of touching the SoftDevice-owned RNG peripheral.
+void setSoftDeviceEnabled(bool enabled);
+
 }  // namespace hal
 }  // namespace om
 

@@ -487,6 +487,17 @@ void setup() {
 #endif
     g_board = &board::get();
     Serial.printf("[om] board=%s\n", g_board->id); Serial.flush(); delay(150);
+#if defined(OM_ENABLE_SOFTDEVICE) && (OM_ENABLE_SOFTDEVICE)
+    // BLE-compiled-out images still enable the SoftDevice: InternalFS flash writes use sd_flash_*
+    // SVCs that need it. Must happen before g_storage.begin()/identity load. The TinyUSB <-> SD
+    // hand-off this triggers runs once here, before the companion link is used.
+    {
+        const bool sd_ok = hal::beginSoftDevice();
+        Serial.printf("[om] softdevice=%s (BLE closed)\n", sd_ok ? "ok" : "ERROR");
+        Serial.flush();
+        delay(150);
+    }
+#endif
 #if OM_ENABLE_BLE
     // Bring the SoftDevice up before the rest of the peripherals. Two reasons: Adafruit's
     // InternalFS writes go through SoftDevice flash SVCs and are only valid once the SoftDevice is

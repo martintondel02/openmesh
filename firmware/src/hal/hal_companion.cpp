@@ -1,11 +1,15 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 #include "hal_companion.h"
 
+#include "hal.h"
+
 #if defined(ARDUINO_ARCH_NRF52) || defined(NRF52_SERIES) || defined(ESP32)
 #include <Arduino.h>
 #endif
 
-#if (defined(ARDUINO_ARCH_NRF52) || defined(NRF52_SERIES)) && defined(OM_ENABLE_BLE)
+#if (defined(ARDUINO_ARCH_NRF52) || defined(NRF52_SERIES)) && \
+    ((defined(OM_ENABLE_BLE) && (OM_ENABLE_BLE)) || \
+     (defined(OM_ENABLE_SOFTDEVICE) && (OM_ENABLE_SOFTDEVICE)))
 #include <bluefruit.h>
 #elif defined(ESP32) && defined(OM_ENABLE_BLE)
 #include <NimBLEDevice.h>
@@ -56,6 +60,7 @@ BLEUart g_bleuart;
 }
 bool BleTransport::begin(const char* device_name) {
     const bool sd_ok = Bluefruit.begin();
+    setSoftDeviceEnabled(sd_ok);
     Bluefruit.setName(device_name);
     Bluefruit.setTxPower(4);
     Bluefruit.Periph.setConnectCallback(nullptr);
@@ -182,6 +187,26 @@ bool BleTransport::begin(const char*) { return false; }
 int BleTransport::read(uint8_t*, size_t) { return 0; }
 size_t BleTransport::write(const uint8_t*, size_t) { return 0; }
 bool BleTransport::connected() const { return false; }
+#endif
+
+// --- SoftDevice-only bring-up (BLE compiled out) -------------------------------------------
+#if defined(ARDUINO_ARCH_NRF52) || defined(NRF52_SERIES)
+bool beginSoftDevice() {
+#if defined(OM_ENABLE_SOFTDEVICE) && (OM_ENABLE_SOFTDEVICE)
+    // BLE-compiled-out images still need the SoftDevice: Adafruit's InternalFS flash writes go
+    // through sd_flash_* SVCs, which are only valid while the SoftDevice is enabled. Product
+    // (BLE-on) builds enable it via Bluefruit.begin() in BleTransport::begin(); here we only bring
+    // the SoftDevice up and leave BLE closed. The USB/TinyUSB <-> SoftDevice hand-off therefore
+    // happens once, early in setup, in these images too.
+    const bool ok = Bluefruit.begin();
+    setSoftDeviceEnabled(ok);
+    return ok;
+#else
+    return false;  // BLE-on builds enable the SoftDevice through BleTransport::begin()
+#endif
+}
+#else
+bool beginSoftDevice() { return false; }
 #endif
 
 }  // namespace hal
