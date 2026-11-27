@@ -50,7 +50,7 @@ magic(2) = b"OM" | type(u8) | len(u16 LE) | payload(len) | crc16/payload-crc
 | 9 | radio → app | `Stats` | `{entries: [[key, u64], ...]}` |
 | 10 | app → radio | `Ping` | `{nonce: u32}` |
 | 11 | radio → app | `Pong` | `{nonce: u32}` |
-| 12 | radio → app | `Event` | `{kind: str, detail: str}` (`boot`, `radio_error`, `announce_tx`, `store_push`, `store_deliver`, `low_battery`, `gps_fix`) |
+| 12 | radio → app | `Event` | `{kind: str, detail: str}` (`boot`, `radio_error`, `radio_recovered`, `announce_tx`, `store_push`, `store_deliver`, `low_battery`, `gps_fix`). `radio_recovered` means the firmware re-armed a disarmed receiver (`detail: "rearm"`) or reset/re-initialised the transceiver (`detail: "reinit"`) without rebooting the MCU; `radio_error` with `detail: "reinit_failed"` means recovery failed and the radio stays unavailable. |
 | 13 | app → radio | `Reset` | `{}` — reboot the radio after an OTA write |
 
 ## 3. Handshake

@@ -577,6 +577,18 @@ void loop() {
     }
 #endif
     pollRadio();
+    // Radio health watchdog: a live retune (ConfigSet / app settings push) used to leave the
+    // transceiver in standby with the receiver disarmed. The HAL now re-arms on retune and this
+    // watchdog recovers any other "deaf but MCU alive" state without rebooting the node.
+    g_radio.pollHealth((uint32_t)now);
+    for (const char* radio_detail = g_radio.takeRadioEvent(); radio_detail != nullptr;
+         radio_detail = g_radio.takeRadioEvent()) {
+        if (std::strcmp(radio_detail, "reinit_failed") == 0) {
+            sendEvent("radio_error", radio_detail);
+        } else {
+            sendEvent("radio_recovered", radio_detail);
+        }
+    }
     pollCompanion();
     applyRadioConfigIfChanged();
     g_engine.tick(now);

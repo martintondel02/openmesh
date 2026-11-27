@@ -44,7 +44,10 @@ bool Radio::begin(const board::Board& board, const LoraProfile& profile, const R
     module_ = module;
     radio_ = radio;
     if (!applyConfig(profile, region, tx_power_dbm, frequency_override_khz)) return false;
-    startReceive();
+    // applyConfig leaves the transceiver in STANDBY (RadioLib::begin behavior), so arm RX now.
+    // If that fails once, reset the transceiver and retry before giving up; the watchdog would
+    // also retry, but initialisation is the one place where a failure is worth handling inline.
+    if (!armReceiver()) (void)hardRecover((uint32_t)millis());
     ok_ = true;
     return true;
 }
@@ -102,6 +105,11 @@ bool Radio::applyConfig(const LoraProfile& profile, const Region& region, int8_t
     (void)board_->radio.dio2_as_rf_switch;
 #endif
     radio->setOutputPower(power);
+    cfg_profile_ = &profile;
+    cfg_region_ = &region;
+    cfg_power_dbm_ = tx_power_dbm;
+    cfg_frequency_khz_ = frequency_override_khz;
+    have_config_ = true;
     last_rssi_ = 0;
     last_snr_ = 0;
     return true;
@@ -109,7 +117,15 @@ bool Radio::applyConfig(const LoraProfile& profile, const Region& region, int8_t
 
 bool Radio::reconfigure(const LoraProfile& profile, const Region& region, int8_t tx_power_dbm,
                         uint32_t frequency_override_khz) {
-    return applyConfig(profile, region, tx_power_dbm, frequency_override_khz);
+    const bool ok = applyConfig(profile, region, tx_power_dbm, frequency_override_khz);
+    // RadioLib::begin() inside applyConfig() stops reception and leaves the chip in STANDBY.
+    // Without re-arming here every live retune (companion ConfigSet, app settings push) leaves the
+    // receiver deaf until some later transmit() happens to re-arm it. This was the reproducible
+    // "T1000-E goes deaf while the MCU still answers" bug.
+    if (ok && !armReceiver()) {
+        if (!hardRecover((uint32_t)millis())) postEvent("reinit_failed");
+    }
+    return ok;
 }
 
 bool Radio::transmit(const uint8_t* data, size_t len) {
@@ -117,7 +133,7 @@ bool Radio::transmit(const uint8_t* data, size_t len) {
     if (radio == nullptr || data == nullptr || len > 255) return false;
     const int16_t state = radio->transmit(const_cast<uint8_t*>(data), len);
     // Always return to RX so relays keep hearing frames.
-    startReceive();
+    if (!armReceiver()) markUnhealthy((uint32_t)millis());
     return state == RADIOLIB_ERR_NONE;
 }
 
@@ -140,11 +156,12 @@ int Radio::receive(uint8_t* buffer, size_t capacity, int16_t& rssi, int16_t& snr
     constexpr uint16_t kIrqAll = RADIOLIB_SX126X_IRQ_ALL;
 #endif
     const uint32_t irq = radio->getIrqFlags();
+    if (irq != 0) noteActivity((uint32_t)millis());
     if ((irq & kRxDone) == 0) {
         if ((irq & kRxError) != 0) {
             // Drop a corrupted/timed-out reception and re-arm so the receiver cannot wedge.
             radio->clearIrqFlags(kIrqAll);
-            startReceive();
+            if (!armReceiver()) markUnhealthy((uint32_t)millis());
             return -1;
         }
         return 0;
@@ -154,7 +171,7 @@ int Radio::receive(uint8_t* buffer, size_t capacity, int16_t& rssi, int16_t& snr
         // Oversized (or unexpected) packet for the OMP MTU: read and discard.
         const size_t dropped = radio->readData(g_radio_discard, sizeof(g_radio_discard));
         (void)dropped;
-        startReceive();
+        if (!armReceiver()) markUnhealthy((uint32_t)millis());
         return -1;
     }
     const int16_t state = radio->readData(buffer, capacity);
@@ -162,14 +179,120 @@ int Radio::receive(uint8_t* buffer, size_t capacity, int16_t& rssi, int16_t& snr
     last_snr_ = (int16_t)radio->getSNR();
     rssi = last_rssi_;
     snr = last_snr_;
-    startReceive();
+    if (!armReceiver()) markUnhealthy((uint32_t)millis());
     if (state != RADIOLIB_ERR_NONE) return -1;
     return (int)length;
 }
 
-void Radio::startReceive() {
+bool Radio::startReceive() { return armReceiver(); }
+
+bool Radio::armReceiver() {
     auto* radio = static_cast<RadioLibRadio*>(radio_);
-    if (radio != nullptr) radio->startReceive();
+    if (radio == nullptr) return false;
+    const int16_t state = radio->startReceive();
+    if (state != RADIOLIB_ERR_NONE) return false;
+    last_activity_ms_ = (uint32_t)millis();
+    return true;
+}
+
+void Radio::noteActivity(uint32_t now_ms) {
+    last_activity_ms_ = now_ms;
+    unhealthy_since_ms_ = 0;
+}
+
+void Radio::markUnhealthy(uint32_t now_ms) {
+    if (unhealthy_since_ms_ == 0) unhealthy_since_ms_ = now_ms;
+}
+
+void Radio::postEvent(const char* detail) { pending_event_ = detail; }
+
+const char* Radio::takeRadioEvent() {
+    const char* detail = pending_event_;
+    pending_event_ = nullptr;
+    return detail;
+}
+
+#if defined(OM_RADIO_LR1110)
+bool Radio::readChipStatus(uint8_t out[2]) {
+    auto* mod = static_cast<Module*>(module_);
+    if (mod == nullptr) return false;
+    // GET_STATUS is read-only and allowed in every chip mode; it does not disturb reception.
+    // LR11x0 needs two SPI transactions: command first, then a command-less read (RadioLib's
+    // LRxxxx::SPIcommand does the same by temporarily setting the command width to 0).
+    if (mod->SPIwriteStream(RADIOLIB_LR11X0_CMD_GET_STATUS, nullptr, 0, true, false) !=
+        RADIOLIB_ERR_NONE) {
+        return false;
+    }
+    const Module::BitWidth_t previous = mod->spiConfig.widths[RADIOLIB_MODULE_SPI_WIDTH_CMD];
+    mod->spiConfig.widths[RADIOLIB_MODULE_SPI_WIDTH_CMD] = Module::BITS_0;
+    const int16_t state = mod->SPIreadStream(RADIOLIB_LRXXXX_CMD_NOP, out, 2, true, false);
+    mod->spiConfig.widths[RADIOLIB_MODULE_SPI_WIDTH_CMD] = previous;
+    return state == RADIOLIB_ERR_NONE;
+}
+#else
+bool Radio::readChipStatus(uint8_t[2]) { return false; }
+#endif
+
+bool Radio::hardRecover(uint32_t now_ms) {
+    if (!have_config_ || cfg_profile_ == nullptr || cfg_region_ == nullptr) return false;
+    ++reinit_count_;
+    // applyConfig() re-runs RadioLib::begin(), which toggles the transceiver NRST pin, so this
+    // recovers a wedged/unresponsive LR1110/SX1262 without resetting the whole MCU.
+    if (!applyConfig(*cfg_profile_, *cfg_region_, cfg_power_dbm_, cfg_frequency_khz_)) return false;
+    if (!armReceiver()) return false;
+    noteActivity(now_ms);
+    return true;
+}
+
+void Radio::pollHealth(uint32_t now_ms) {
+    if (!ok_ || radio_ == nullptr) return;
+    const uint32_t now = now_ms;
+    if ((uint32_t)(now - last_health_ms_) < 5000u) return;
+    last_health_ms_ = now;
+
+#if defined(OM_RADIO_LR1110)
+    // Precise, non-intrusive check: ask the LR1110 which mode it is actually in. A receiver that
+    // was left in STANDBY (or a transceiver whose SPI stopped answering) is the failure class
+    // that used to require an MCU reset.
+    uint8_t status[2] = {0, 0};
+    if (readChipStatus(status)) {
+        const uint8_t mode = (uint8_t)((status[1] >> 1) & 0x07u);
+        if (mode == 0x04u /*RX*/ || mode == 0x05u /*TX in progress*/) {
+            noteActivity(now);
+            return;
+        }
+        // Not listening: re-arm continuous RX first (radio-only recovery).
+        if (armReceiver()) {
+            ++rearm_count_;
+            if (unhealthy_since_ms_ != 0) {
+                postEvent("rearm");
+                unhealthy_since_ms_ = 0;
+                reinit_fail_count_ = 0;
+            }
+        } else {
+            markUnhealthy(now);
+        }
+    } else {
+        markUnhealthy(now);
+    }
+#else
+    // SX126x has no cheap chip-mode read, and the "deaf" failure class seen on the T1000-E is a
+    // retune/arm issue, not an idle-RX issue. Do not touch a healthy SX126x receiver here; the
+    // hard-recovery block below still runs after a real arm failure (markUnhealthy()).
+    (void)last_activity_ms_;
+#endif
+
+    if (unhealthy_since_ms_ != 0 && (uint32_t)(now - last_recover_ms_) >= 5000u) {
+        last_recover_ms_ = now;
+        if (hardRecover(now)) {
+            postEvent("reinit");
+            unhealthy_since_ms_ = 0;
+            reinit_fail_count_ = 0;
+        } else if (++reinit_fail_count_ >= 3u) {
+            postEvent("reinit_failed");
+            reinit_fail_count_ = 0;
+        }
+    }
 }
 
 void Radio::sleep() {
@@ -185,7 +308,15 @@ bool Radio::begin(const board::Board&, const LoraProfile&, const Region&, int8_t
 bool Radio::reconfigure(const LoraProfile&, const Region&, int8_t, uint32_t) { return false; }
 bool Radio::transmit(const uint8_t*, size_t) { return false; }
 int Radio::receive(uint8_t*, size_t, int16_t&, int16_t&) { return 0; }
-void Radio::startReceive() {}
+bool Radio::startReceive() { return false; }
+void Radio::pollHealth(uint32_t) {}
+const char* Radio::takeRadioEvent() { return nullptr; }
+bool Radio::armReceiver() { return false; }
+bool Radio::hardRecover(uint32_t) { return false; }
+bool Radio::readChipStatus(uint8_t[2]) { return false; }
+void Radio::noteActivity(uint32_t) {}
+void Radio::markUnhealthy(uint32_t) {}
+void Radio::postEvent(const char*) {}
 void Radio::sleep() {}
 #endif
 
