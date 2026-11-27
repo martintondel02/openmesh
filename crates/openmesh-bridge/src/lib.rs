@@ -273,6 +273,8 @@ impl Bridge {
                     transport::serial::SerialConfig {
                         port,
                         baud: 115_200,
+                        region: config.region.clone(),
+                        profile: config.profile.clone(),
                     },
                     link_id,
                     inbound_tx.clone(),
