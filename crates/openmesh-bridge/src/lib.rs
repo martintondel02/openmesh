@@ -532,6 +532,8 @@ async fn core_task(
         gateway_echo: std::collections::HashSet::new(),
         shutdown: shutdown.clone(),
     };
+    // Pace resource chunk offers to the radio's legal airtime (duty-aware hint from profile/region).
+    runtime.apply_resource_pace();
     // Introduce ourselves immediately so nearby nodes learn the identity.
     let now = util::now_ms();
     if let Ok(processed) = runtime.engine.announce(now) {

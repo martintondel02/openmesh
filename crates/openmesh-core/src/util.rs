@@ -226,6 +226,39 @@ pub fn lora_airtime_ms(profile: &LoraProfile, payload_len: usize) -> u32 {
     total_ms.ceil().max(1.0) as u32
 }
 
+/// Minimum wall time between paced resource chunk batches (floor for [`resource_pace_interval_ms`]).
+pub const RESOURCE_PACE_INTERVAL_MIN_MS: u64 = 250;
+/// Maximum wall time between paced resource chunk batches (ceiling for [`resource_pace_interval_ms`]).
+pub const RESOURCE_PACE_INTERVAL_MAX_MS: u64 = 120_000;
+
+/// Duty-aware pacing interval between resource chunk batches.
+///
+/// A batch of `batch` full-size (240 B) frames costs `batch * lora_airtime_ms(profile, 240)` of
+/// airtime. A radio limited to `duty_pct` percent of wall time can only spend that fraction of the
+/// clock transmitting, so the engine must offer the next batch no sooner than
+/// `airtime / (duty_pct / 100)`. Pacing to this interval keeps the companion radio's TX
+/// FIFO/queue from overflowing (the live phone→bridge chunk-loss failure).
+///
+/// Clamped to [`RESOURCE_PACE_INTERVAL_MIN_MS`]..=[`RESOURCE_PACE_INTERVAL_MAX_MS`]; `duty_pct`
+/// is clamped to 1..=100 and `batch` to at least 1.
+pub fn resource_pace_interval_ms(profile: &LoraProfile, duty_pct: u8, batch: u16) -> u64 {
+    let duty = f64::from(duty_pct.clamp(1, 100)) / 100.0;
+    let frames = f64::from(batch.max(1));
+    let airtime = f64::from(lora_airtime_ms(profile, 240).max(1));
+    ((frames * airtime / duty).ceil() as u64)
+        .clamp(RESOURCE_PACE_INTERVAL_MIN_MS, RESOURCE_PACE_INTERVAL_MAX_MS)
+}
+
+/// [`resource_pace_interval_ms`] for a regulatory region, using the region's duty-cycle cap
+/// (`100 %` for fair-use regions without an explicit cap).
+pub fn resource_pace_interval_ms_for_region(
+    profile: &LoraProfile,
+    region: &Region,
+    batch: u16,
+) -> u64 {
+    resource_pace_interval_ms(profile, region.duty_cycle_pct.unwrap_or(100), batch)
+}
+
 /// Maximum attachment size recommended for a given profile and duty-cycle region.
 ///
 /// Takes the smaller of the PROTOCOL.md §9.4 default cap for the profile and a 90 s airtime
@@ -395,5 +428,52 @@ mod tests {
         assert_eq!(format_duration_ms(820), "820ms");
         assert_eq!(format_duration_ms(4_200), "4.2s");
         assert_eq!(format_duration_ms(184_000), "3m 04s");
+    }
+}
+
+#[cfg(test)]
+mod pace_tests {
+    use super::*;
+
+    #[test]
+    fn medium_fast_eu868_batch2_matches_duty_budget() {
+        // 240 B MEDIUM_FAST frame = 611 ms airtime; 2 frames at 10 % duty = 12 220 ms wall time.
+        let pace = resource_pace_interval_ms(&MEDIUM_FAST, 10, 2);
+        assert_eq!(pace, 12_220, "expected 2 x 611 ms / 0.10");
+        let eu868 = region("EU868").expect("EU868 region");
+        assert_eq!(
+            resource_pace_interval_ms_for_region(&MEDIUM_FAST, eu868, 2),
+            pace
+        );
+    }
+
+    #[test]
+    fn faster_profile_and_tighter_duty_are_slower() {
+        // 240 B SHORT_FAST frame = 194 ms; 2 frames at 1 % duty = 38 800 ms wall time.
+        assert_eq!(resource_pace_interval_ms(&SHORT_FAST, 1, 2), 38_800);
+        // Fair-use regions (no explicit duty cap) use 100 % duty.
+        let fair_use = REGIONS
+            .iter()
+            .find(|r| r.duty_cycle_pct.is_none())
+            .expect("fair-use region");
+        assert_eq!(
+            resource_pace_interval_ms_for_region(&SHORT_FAST, fair_use, 2),
+            u64::from(lora_airtime_ms(&SHORT_FAST, 240)) * 2
+        );
+    }
+
+    #[test]
+    fn clamps_to_sane_bounds() {
+        // LONG_SLOW at 10 % would otherwise be ~4.5 minutes for two frames.
+        assert_eq!(
+            resource_pace_interval_ms(&LONG_SLOW, 10, 2),
+            RESOURCE_PACE_INTERVAL_MAX_MS
+        );
+        assert_eq!(
+            resource_pace_interval_ms(&SHORT_TURBO, 100, 1),
+            RESOURCE_PACE_INTERVAL_MIN_MS.max(97)
+        );
+        // Zero batch/duty values are normalised instead of dividing by zero.
+        assert!(resource_pace_interval_ms(&MEDIUM_FAST, 0, 0) >= RESOURCE_PACE_INTERVAL_MIN_MS);
     }
 }

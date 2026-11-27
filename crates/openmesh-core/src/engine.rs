@@ -108,6 +108,17 @@ pub const MAX_ORIGINATE_PER_MIN: u32 = 60;
 pub const MAX_STORE_OFFER_IDS: usize = 16;
 /// Application-level `(src, msg_id)` dedup memory (24 h, as recommended by §17).
 pub const SEEN_MSG_TTL_MS: u64 = 86_400_000;
+/// Current message-id derivation epoch.
+///
+/// Message ids are `SHA-256("openmesh/v1/msg-id" || epoch || seed || counter)[0..4]`; bumping the
+/// epoch moves the id space so a snapshot that never persisted its counter (legacy) cannot collide
+/// with ids derived by the current engine. This is not a wire change: `msg_id` remains an opaque u32.
+pub const MSG_ID_EPOCH: u32 = 1;
+/// Counter floor applied when importing a legacy snapshot without a persisted message-id counter.
+///
+/// Old engines derived ids from counters `1..N`; starting fresh imports at a high counter value
+/// (combined with the epoch) guarantees the new ids cannot repeat any previously issued id.
+pub const LEGACY_MSG_COUNTER_START: u32 = 0x8000_0000;
 /// Capacity of the application-level dedup map.
 pub const SEEN_MSG_CAPACITY: usize = 4096;
 /// Default resource chunk size.
@@ -515,6 +526,15 @@ pub struct StateSnapshot {
     pub channels: Vec<(NodeId, String, [u8; 32])>,
     /// Last transmitted per-sender sequence number.
     pub last_seq: u32,
+    /// Monotonic message-id allocation counter (persisted so a restart never reuses an id).
+    ///
+    /// `0` means "legacy snapshot written before the counter was persisted"; import applies
+    /// [`LEGACY_MSG_COUNTER_START`] so ids from old app versions cannot be re-derived.
+    pub msg_counter: u32,
+    /// Message-id derivation epoch. Snapshots from older app versions default to `0` (legacy);
+    /// current engines use [`MSG_ID_EPOCH`]. Bumping the epoch changes the derived id space without
+    /// changing the wire format (`msg_id` stays an opaque u32).
+    pub msg_id_epoch: u32,
 }
 
 /// The mesh protocol state machine.
@@ -524,6 +544,8 @@ pub struct Engine {
     now_ms: u64,
     seq: u32,
     msg_counter: u32,
+    /// Message-id derivation epoch (see [`MSG_ID_EPOCH`]).
+    msg_id_epoch: u32,
     res_counter: u32,
     peers: HashMap<NodeId, PeerEntry>,
     contacts: HashMap<NodeId, Option<String>>,
@@ -544,6 +566,8 @@ pub struct Engine {
     last_announce_ms: u64,
     orig_window_start_ms: u64,
     orig_count: u32,
+    /// Wall-clock interval between paced resource chunk batches (duty-aware hint).
+    resource_pace_interval_ms: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -746,6 +770,7 @@ impl Engine {
             now_ms: 0,
             seq: 0,
             msg_counter: 0,
+            msg_id_epoch: MSG_ID_EPOCH,
             res_counter: 0,
             peers: HashMap::new(),
             contacts: HashMap::new(),
@@ -767,6 +792,7 @@ impl Engine {
             last_announce_ms: u64::MAX,
             orig_window_start_ms: 0,
             orig_count: 0,
+            resource_pace_interval_ms: RESOURCE_PACE_INTERVAL_MS,
         }
     }
 
@@ -805,6 +831,21 @@ impl Engine {
             self.store = StoreQueue::new(capacity, new_ttl);
         }
         self.config = config;
+    }
+
+    /// Wall-clock interval between paced resource chunk batches.
+    ///
+    /// Defaults to [`RESOURCE_PACE_INTERVAL_MS`]; embedders should set a duty-aware hint derived
+    /// from the active LoRa profile and region duty cycle (see
+    /// [`crate::util::resource_pace_interval_ms`]). The engine releases at most
+    /// [`RESOURCE_TX_BATCH`] chunks per interval on both tick- and ack-driven paths.
+    pub fn resource_pace_interval_ms(&self) -> u64 {
+        self.resource_pace_interval_ms
+    }
+
+    /// Apply a duty-aware resource chunk pacing hint (clamped to at least 1 ms).
+    pub fn set_resource_pace_interval_ms(&mut self, interval_ms: u64) {
+        self.resource_pace_interval_ms = interval_ms.max(1);
     }
 
     fn store_capacity(role: &Role) -> usize {
@@ -1094,7 +1135,7 @@ impl Engine {
     /// Send a plain text message (single frame, or streamed as a long-text resource).
     pub fn send_text(&mut self, target: Target, text: &str, now_ms: u64) -> Result<Processed> {
         let message = AppMessage {
-            id: self.allocate_msg_id(),
+            id: self.allocate_message_id(),
             kind: MessageKind::Text,
             sent_at_ms: now_ms,
             text: Some(text.to_string()),
@@ -1127,7 +1168,7 @@ impl Engine {
         now_ms: u64,
     ) -> Result<Processed> {
         let message = AppMessage {
-            id: self.allocate_msg_id(),
+            id: self.allocate_message_id(),
             kind: MessageKind::Position,
             sent_at_ms: now_ms,
             text: None,
@@ -1167,7 +1208,7 @@ impl Engine {
         let mut out = Processed::default();
         for target in targets {
             let message = AppMessage {
-                id: self.allocate_msg_id(),
+                id: self.allocate_message_id(),
                 kind: MessageKind::Telemetry,
                 sent_at_ms: now_ms,
                 text: None,
@@ -1192,7 +1233,7 @@ impl Engine {
         now_ms: u64,
     ) -> Result<Processed> {
         let message = AppMessage {
-            id: self.allocate_msg_id(),
+            id: self.allocate_message_id(),
             kind: MessageKind::Telemetry,
             sent_at_ms: now_ms,
             text: None,
@@ -1729,6 +1770,8 @@ impl Engine {
             contacts,
             channels,
             last_seq: self.seq,
+            msg_counter: self.msg_counter,
+            msg_id_epoch: self.msg_id_epoch,
         }
     }
 
@@ -1741,6 +1784,16 @@ impl Engine {
             self.add_channel(&name, &psk);
         }
         self.seq = self.seq.max(state.last_seq);
+        // Persisted message-id allocation state. Monotonic counters prevent id reuse across
+        // restarts; a legacy snapshot (epoch 0 / counter 0) starts at a high floor so ids issued
+        // before the counter was persisted can never be re-derived.
+        self.msg_counter = self.msg_counter.max(state.msg_counter);
+        if state.msg_id_epoch == 0 {
+            self.msg_counter = self.msg_counter.max(LEGACY_MSG_COUNTER_START);
+            self.msg_id_epoch = self.msg_id_epoch.max(MSG_ID_EPOCH);
+        } else {
+            self.msg_id_epoch = self.msg_id_epoch.max(state.msg_id_epoch);
+        }
     }
 
     // -----------------------------------------------------------------------------------------
@@ -1752,20 +1805,32 @@ impl Engine {
         self.seq
     }
 
-    fn allocate_msg_id(&mut self) -> u32 {
+    /// Allocate a fresh outgoing message id for a user-visible message.
+    ///
+    /// The counter and derivation epoch are part of [`Engine::export_state`], so an embedder that
+    /// persists/imports the state never reuses an id after a restart. Within a session the loop
+    /// also skips ids that are still pending or carried by an in-flight resource.
+    pub fn allocate_message_id(&mut self) -> u32 {
         loop {
             self.msg_counter = self.msg_counter.wrapping_add(1);
             let seed = self.identity.seed();
             let mut hasher = Sha256::new();
             hasher.update(b"openmesh/v1/msg-id");
+            hasher.update(self.msg_id_epoch.to_be_bytes());
             hasher.update(seed);
             hasher.update(self.msg_counter.to_be_bytes());
             let digest: [u8; 32] = hasher.finalize().into();
             let id = u32::from_be_bytes([digest[0], digest[1], digest[2], digest[3]]);
-            if id != 0 && !self.pending_msgs.contains_key(&id) {
+            if id != 0 && !self.msg_id_in_use(id) {
                 return id;
             }
         }
+    }
+
+    /// Whether a message id is still pending (direct ack) or carried by an in-flight resource.
+    fn msg_id_in_use(&self, id: u32) -> bool {
+        self.pending_msgs.contains_key(&id)
+            || self.outgoing.values().any(|resource| resource.msg_id == id)
     }
 
     fn allocate_res_id(&mut self) -> u32 {
@@ -2378,6 +2443,7 @@ impl Engine {
                 let (Some(next_expected), Some(bitmap)) = (ack.next_expected, ack.bitmap) else {
                     return;
                 };
+                let pace_interval = self.resource_pace_interval_ms;
                 let (completed, unsent, progress) = {
                     let Some(resource) = self.outgoing.get_mut(&res_id) else {
                         return;
@@ -2398,12 +2464,17 @@ impl Engine {
                             // completes small resources: if the last chunk was lost (or emitted in a
                             // burst that the companion radio dropped), the ack for N-1 chunks is the
                             // signal to release it again on a paced link.
+                            //
+                            // Both tick and ack releases share the same duty-aware interval so a
+                            // fast-acking/fast-ticking embedder cannot outpace the radio.
                             let batch = usize::from(RESOURCE_TX_BATCH).max(1);
-                            let mut release = resource.sender.take_unsent(batch);
-                            if !release.is_empty() {
-                                resource.paced_ms = now_ms;
-                            }
-                            if release.len() < batch {
+                            let paced = now_ms.saturating_sub(resource.paced_ms) >= pace_interval;
+                            let mut release = if paced {
+                                resource.sender.take_unsent(batch)
+                            } else {
+                                Vec::new()
+                            };
+                            if paced && release.len() < batch {
                                 let pending = resource.sender.pending_window();
                                 release.extend(
                                     pending
@@ -2411,6 +2482,9 @@ impl Engine {
                                         .filter(|index| !resource.sender.acked[*index as usize])
                                         .take(batch - release.len()),
                                 );
+                            }
+                            if !release.is_empty() {
+                                resource.paced_ms = now_ms;
                             }
                             (
                                 false,
@@ -2969,7 +3043,7 @@ impl Engine {
             // whole window in one burst (the live photo failure).
             let unsent = match self.outgoing.get_mut(&res_id) {
                 Some(resource) => {
-                    if now_ms.saturating_sub(resource.paced_ms) < RESOURCE_PACE_INTERVAL_MS {
+                    if now_ms.saturating_sub(resource.paced_ms) < self.resource_pace_interval_ms {
                         Vec::new()
                     } else {
                         resource.sender.take_unsent(RESOURCE_TX_BATCH as usize)
@@ -3362,5 +3436,157 @@ mod tests {
             let _ = e.ingest(&bytes, None, len as u64);
         }
         let _ = e.ingest(&[], None, 0);
+    }
+
+    #[test]
+    fn resource_pace_hint_defaults_and_clamps() {
+        let mut e = engine(11);
+        assert_eq!(e.resource_pace_interval_ms(), RESOURCE_PACE_INTERVAL_MS);
+        e.set_resource_pace_interval_ms(12_220);
+        assert_eq!(e.resource_pace_interval_ms(), 12_220);
+        e.set_resource_pace_interval_ms(0);
+        assert_eq!(e.resource_pace_interval_ms(), 1);
+    }
+
+    #[test]
+    fn persisted_msg_counter_prevents_id_reuse_after_restart() {
+        let seed = [7u8; 32];
+        let mut a = engine_from_seed(&seed, EngineConfig::client("restart"));
+        let first = a.allocate_message_id();
+        let snapshot = a.export_state();
+        assert_eq!(snapshot.msg_id_epoch, MSG_ID_EPOCH);
+        assert_eq!(snapshot.msg_counter, 1);
+        assert_eq!(snapshot.last_seq, a.seq);
+
+        // Simulate an app restart: same identity, state restored from the persisted snapshot.
+        let mut b = engine_from_seed(&seed, EngineConfig::client("restart"));
+        b.import_state(snapshot);
+        let second = b.allocate_message_id();
+        assert_ne!(
+            first, second,
+            "a restart must not reuse the previous message id"
+        );
+        assert!(b.msg_counter > 1);
+    }
+
+    #[test]
+    fn legacy_snapshot_cannot_rederive_old_message_ids() {
+        // Snapshots written before task-16 have no counter/epoch: import must start at the legacy
+        // floor with the current epoch so ids issued by old engines (counter 1..N, epoch 0) never
+        // reappear.
+        let mut e = engine_from_seed(&[8u8; 32], EngineConfig::client("legacy"));
+        e.import_state(StateSnapshot {
+            contacts: Vec::new(),
+            channels: Vec::new(),
+            last_seq: 0,
+            msg_counter: 0,
+            msg_id_epoch: 0,
+        });
+        let id = e.allocate_message_id();
+        assert!(e.msg_counter >= LEGACY_MSG_COUNTER_START);
+
+        let seed = e.identity.seed();
+        let legacy_ids: std::collections::HashSet<u32> = (1u32..=32)
+            .map(|counter| {
+                let mut hasher = Sha256::new();
+                hasher.update(b"openmesh/v1/msg-id");
+                hasher.update(seed);
+                hasher.update(counter.to_be_bytes());
+                let digest: [u8; 32] = hasher.finalize().into();
+                u32::from_be_bytes([digest[0], digest[1], digest[2], digest[3]])
+            })
+            .collect();
+        assert!(
+            !legacy_ids.contains(&id),
+            "legacy-derived ids must never be reissued"
+        );
+    }
+
+    #[test]
+    fn stalled_attachment_id_is_not_reused_for_the_next_message() {
+        let mut e = engine(13);
+        let channel = e.add_channel("media", &[6u8; 32]);
+        let image_id = e.allocate_message_id();
+        let image = vec![7u8; 400];
+        let sent = e
+            .send_resource(
+                Target::Channel(channel),
+                image_id,
+                0x1111_2222,
+                ResourceKind::Attachment,
+                "image/webp",
+                &image,
+                0,
+            )
+            .expect("image resource");
+        assert!(!sent.outbound.is_empty());
+        assert!(
+            e.outgoing
+                .values()
+                .any(|resource| resource.msg_id == image_id)
+        );
+
+        let voice_id = e.allocate_message_id();
+        assert_ne!(
+            image_id, voice_id,
+            "the stalled image id must not be reused"
+        );
+        let voice = vec![8u8; 308];
+        e.send_resource(
+            Target::Channel(channel),
+            voice_id,
+            0x3333_4444,
+            ResourceKind::Attachment,
+            "audio/c2-1300",
+            &voice,
+            1,
+        )
+        .expect("voice resource");
+    }
+
+    #[test]
+    fn resource_pace_hint_limits_tick_release() {
+        let mut e = engine(12);
+        e.set_resource_pace_interval_ms(10_000);
+        let channel = e.add_channel("pace", &[9u8; 32]);
+        let data: Vec<u8> = (0..900u32).map(|i| (i % 251) as u8).collect();
+        let sent = e
+            .send_resource(
+                Target::Channel(channel),
+                1,
+                2,
+                ResourceKind::Attachment,
+                "image/webp",
+                &data,
+                0,
+            )
+            .expect("send");
+        let resource_frames = |processed: &Processed| {
+            processed
+                .outbound
+                .iter()
+                .filter(|outbound| outbound.frame.typ == FrameType::Resource)
+                .count()
+        };
+        assert_eq!(
+            resource_frames(&sent),
+            2,
+            "only the first paced batch is released"
+        );
+        assert_eq!(
+            resource_frames(&e.tick(1_000)),
+            0,
+            "interval has not elapsed yet"
+        );
+        assert_eq!(
+            resource_frames(&e.tick(10_000)),
+            2,
+            "one interval releases one batch"
+        );
+        assert_eq!(
+            resource_frames(&e.tick(20_000)),
+            2,
+            "the remaining chunks follow"
+        );
     }
 }

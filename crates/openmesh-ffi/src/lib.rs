@@ -416,7 +416,6 @@ pub struct OpenMeshNode {
     config: Mutex<FfiConfig>,
     node_id_hex: String,
     public_identity: Vec<u8>,
-    next_msg_id: AtomicU32,
     next_res_id: AtomicU32,
     last_now_ms: AtomicU64,
     /// Outgoing resource id → message id, for `AttachmentSent`.
@@ -468,7 +467,6 @@ impl OpenMeshNode {
             config: Mutex::new(config),
             node_id_hex,
             public_identity: public_identity.to_bytes().to_vec(),
-            next_msg_id: AtomicU32::new(seed_counter.wrapping_mul(0x9E37_79B9)),
             next_res_id: AtomicU32::new(seed_counter.wrapping_mul(0x85EB_CA6B)),
             last_now_ms: AtomicU64::new(0),
             outgoing_resources: Mutex::new(HashMap::new()),
@@ -611,6 +609,19 @@ impl OpenMeshNode {
         Ok(())
     }
 
+    /// Apply the duty-aware resource chunk pacing hint, in milliseconds.
+    ///
+    /// Derive the value with [`openmesh_resource_pace_interval_ms`] from the active radio profile
+    /// and region duty cycle, and call this after every config change (especially profile/region
+    /// changes). The engine then releases at most its internal chunk batch per interval on both
+    /// tick- and ack-driven paths, so the companion radio's FIFO is not overrun in duty-cycle
+    /// regions and a fast app tick cannot offer chunks faster than airtime allows.
+    pub fn set_resource_pace_interval_ms(&self, ms: u64) -> Result<(), FfiError> {
+        let mut engine = self.lock_engine()?;
+        engine.set_resource_pace_interval_ms(ms);
+        Ok(())
+    }
+
     /// Feed one complete OMP frame received from the radio.
     pub fn ingest_frame(&self, frame: Vec<u8>, now_ms: i64) -> Result<FfiProcessed, FfiError> {
         if frame.is_empty() {
@@ -731,7 +742,12 @@ impl OpenMeshNode {
         let now_ms = to_u64(now_ms, "nowMs")?;
         self.note_now(now_ms);
         let target = parse_target(&target)?;
-        let msg_id = self.next_msg_id();
+        // Allocate through the engine so the persisted counter/epoch (StateJson) prevents id reuse
+        // across app restarts and lets in-flight resources keep their ids reserved.
+        let msg_id = {
+            let mut engine = self.lock_engine()?;
+            engine.allocate_message_id()
+        };
         let res_id = self.next_res_id();
         let filename = filename.filter(|name| !name.trim().is_empty());
         let duration_ms = duration_ms.map(|value| value.max(0).min(u32::MAX as i64) as u32);
@@ -1015,15 +1031,6 @@ impl OpenMeshNode {
 
     fn current_now(&self) -> u64 {
         self.last_now_ms.load(Ordering::Relaxed)
-    }
-
-    fn next_msg_id(&self) -> u32 {
-        loop {
-            let id = self.next_msg_id.fetch_add(1, Ordering::Relaxed);
-            if id != 0 {
-                return id;
-            }
-        }
     }
 
     fn next_res_id(&self) -> u32 {
@@ -1578,6 +1585,12 @@ struct StateJson {
     contacts: Vec<StateContact>,
     channels: Vec<StateChannel>,
     last_seq: u32,
+    /// Monotonic message-id allocation counter (added in state version 2; defaults to 0 = legacy).
+    #[serde(default)]
+    msg_counter: u32,
+    /// Message-id derivation epoch (added in state version 2; defaults to 0 = legacy).
+    #[serde(default)]
+    msg_id_epoch: u32,
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -1596,7 +1609,7 @@ struct StateChannel {
 impl StateJson {
     fn from_core(snapshot: &StateSnapshot) -> Self {
         Self {
-            version: 1,
+            version: 2,
             contacts: snapshot
                 .contacts
                 .iter()
@@ -1615,6 +1628,8 @@ impl StateJson {
                 })
                 .collect(),
             last_seq: snapshot.last_seq,
+            msg_counter: snapshot.msg_counter,
+            msg_id_epoch: snapshot.msg_id_epoch,
         }
     }
 
@@ -1641,6 +1656,8 @@ impl StateJson {
             contacts,
             channels,
             last_seq: self.last_seq,
+            msg_counter: self.msg_counter,
+            msg_id_epoch: self.msg_id_epoch,
         })
     }
 
@@ -1715,6 +1732,32 @@ pub fn openmesh_voice_tiers_json() -> String {
         .clone()
 }
 
+/// Wall-clock milliseconds between resource chunk batches for a radio profile and region.
+///
+/// Duty-aware pacing hint: `batch * airtime(240 B frame) / (duty_pct / 100)`, clamped to
+/// 250 ms..=120 s. Apply the result with [`OpenMeshNode::set_resource_pace_interval_ms`] at
+/// startup and after config changes. Unknown profile/region names return an error.
+#[uniffi::export]
+pub fn openmesh_resource_pace_interval_ms(
+    profile: String,
+    region: String,
+    batch: u16,
+) -> Result<u64, FfiError> {
+    let profile_name = profile.trim();
+    let profile = util::PROFILES
+        .iter()
+        .find(|candidate| candidate.name.eq_ignore_ascii_case(profile_name))
+        .ok_or_else(|| FfiError::invalid(format!("unknown radio profile: {profile_name}")))?;
+    let region_name = region.trim();
+    let region = util::region(region_name)
+        .ok_or_else(|| FfiError::invalid(format!("unknown region: {region_name}")))?;
+    Ok(util::resource_pace_interval_ms_for_region(
+        profile,
+        region,
+        batch.max(1),
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1772,6 +1815,98 @@ mod tests {
             }
         }
         all
+    }
+
+    #[test]
+    fn resource_pace_interval_helper_matches_duty_budget() {
+        // MEDIUM_FAST 240 B = 611 ms airtime; batch 2 at EU868 10 % duty = 12 220 ms.
+        assert_eq!(
+            openmesh_resource_pace_interval_ms("MEDIUM_FAST".into(), "EU868".into(), 2)
+                .expect("pace"),
+            12_220
+        );
+        assert!(openmesh_resource_pace_interval_ms("NOPE".into(), "EU868".into(), 2).is_err());
+        assert!(
+            openmesh_resource_pace_interval_ms("MEDIUM_FAST".into(), "NOPE".into(), 2).is_err()
+        );
+        let node = node("pacer", 7);
+        node.set_resource_pace_interval_ms(12_220)
+            .expect("apply pace");
+        node.set_resource_pace_interval_ms(0)
+            .expect("clamped by engine");
+    }
+
+    #[test]
+    fn legacy_state_json_without_msg_fields_still_imports() {
+        let node = node("legacy-state", 12);
+        let exported = node.export_state().expect("export");
+        let mut value: serde_json::Value = serde_json::from_slice(&exported).expect("state JSON");
+        let object = value.as_object_mut().expect("state object");
+        object.remove("msg_counter");
+        object.remove("msg_id_epoch");
+        object.insert("version".into(), serde_json::Value::from(1));
+        let legacy = serde_json::to_vec(&value).expect("legacy bytes");
+        node.import_state(legacy).expect("legacy import");
+
+        // Re-export: the imported legacy state must have advanced to the new epoch/counter floor.
+        let reexported = node.export_state().expect("re-export");
+        let value: serde_json::Value = serde_json::from_slice(&reexported).expect("JSON");
+        assert_eq!(value["version"], 2);
+        assert_eq!(value["msg_id_epoch"], 1);
+        assert!(value["msg_counter"].as_u64().expect("counter") >= 0x8000_0000);
+    }
+
+    #[test]
+    fn restored_state_never_reuses_attachment_message_ids() {
+        let first_node = node("media", 9);
+        let channel = first_node
+            .join_channel("media-test".into(), b64(&[7u8; 32]))
+            .expect("channel");
+        let target = FfiTarget::Channel {
+            channel_id_hex: channel.channel_id_hex.clone(),
+        };
+        let first = first_node
+            .send_attachment(
+                target.clone(),
+                "audio/c2-1300".into(),
+                None,
+                vec![1u8; 308],
+                Some(2_000),
+                1_000,
+            )
+            .expect("first attachment");
+        let first_id = first.msg_id.expect("msg id");
+        // A stalled transfer must not release its id: a second media message gets a fresh one.
+        let stalled = first_node
+            .send_attachment(
+                target.clone(),
+                "image/webp".into(),
+                None,
+                vec![2u8; 400],
+                None,
+                1_500,
+            )
+            .expect("second attachment");
+        assert_ne!(first_id, stalled.msg_id.expect("msg id"));
+
+        // Export/import simulates an app restart; the persisted counter/epoch must prevent reuse.
+        let state = first_node.export_state().expect("export state");
+        let text = String::from_utf8_lossy(&state);
+        assert!(text.contains("msg_counter"));
+        assert!(text.contains("msg_id_epoch"));
+        let second_node = node("media", 9);
+        second_node.import_state(state).expect("import state");
+        let after_restart = second_node
+            .send_attachment(
+                target,
+                "audio/c2-1300".into(),
+                None,
+                vec![3u8; 308],
+                Some(2_000),
+                2_000,
+            )
+            .expect("post-restart attachment");
+        assert_ne!(first_id, after_restart.msg_id.expect("msg id"));
     }
 
     #[test]

@@ -133,6 +133,19 @@ impl RuntimeConfig {
     }
 }
 
+/// Duty-aware resource chunk pacing interval for the bridge engine.
+///
+/// `batch` frames are offered per interval; each full 240 B frame costs `lora_airtime_ms` of
+/// airtime, and the radio may only occupy `duty_cycle_pct` of wall time. This keeps the bridge
+/// sender's chunk offers at the legal airtime rate (same helper the FFI exposes on mobile).
+pub(crate) fn duty_aware_resource_pace_ms(
+    profile: &util::LoraProfile,
+    region: &util::Region,
+    batch: u16,
+) -> u64 {
+    util::resource_pace_interval_ms_for_region(profile, region, batch)
+}
+
 /// A live snapshot of everything the API can answer without asking the engine task.
 #[derive(Clone, Default)]
 pub struct Snapshot {
@@ -1916,6 +1929,8 @@ impl CoreRuntime {
         }
         self.engine.set_config(config.engine_config());
         self.config = config.clone();
+        // The radio profile/region may have changed: re-derive the duty-aware chunk pacing hint.
+        self.apply_resource_pace();
         self.store.set_meta_json("config", &config)?;
         self.refresh_snapshot().await;
         let snapshot = self.snapshot.read().await.clone();
@@ -1971,6 +1986,26 @@ impl CoreRuntime {
     // -----------------------------------------------------------------------------------------
     // Tick / snapshot
     // -----------------------------------------------------------------------------------------
+
+    /// Apply the duty-aware resource chunk pacing hint for the active profile and region.
+    ///
+    /// Called at startup and after every config change so `Engine` releases chunks at the radio's
+    /// legal airtime rate instead of a fixed wall-clock rate (duty-cycle regions drop bursts).
+    pub fn apply_resource_pace(&mut self) {
+        let profile = self.config.profile();
+        let region = self.config.region();
+        let batch = openmesh_core::engine::RESOURCE_TX_BATCH;
+        let pace_ms = duty_aware_resource_pace_ms(profile, region, batch);
+        self.engine.set_resource_pace_interval_ms(pace_ms);
+        tracing::info!(
+            profile = profile.name,
+            region = region.name,
+            duty_pct = region.duty_cycle_pct.unwrap_or(100),
+            batch,
+            pace_ms,
+            "duty-aware resource chunk pacing applied"
+        );
+    }
 
     pub async fn tick(&mut self, now: u64) {
         let processed = self.engine.tick(now);
@@ -2633,6 +2668,40 @@ mod radio_state_tests {
             tx: mpsc::channel(1).0,
             stats,
         }
+    }
+
+    #[test]
+    fn duty_aware_pace_matches_region_budget() {
+        // MEDIUM_FAST 240 B = 611 ms airtime; batch 2 at EU868 10 % duty = 12 220 ms.
+        let eu868 = util::region("EU868").expect("EU868");
+        assert_eq!(
+            duty_aware_resource_pace_ms(&util::MEDIUM_FAST, eu868, 2),
+            12_220
+        );
+        // SHORT_FAST at 1 % duty: 2 x 194 ms / 0.01 = 38 800 ms.
+        assert_eq!(
+            duty_aware_resource_pace_ms(
+                &util::SHORT_FAST,
+                &util::Region {
+                    name: "test-1pct",
+                    freq_khz: 868_100,
+                    max_power_dbm: 14,
+                    duty_cycle_pct: Some(1),
+                    bw_khz: 125,
+                },
+                2
+            ),
+            38_800
+        );
+        // Fair-use regions (no cap) use 100 % duty.
+        let fair_use = util::REGIONS
+            .iter()
+            .find(|region| region.duty_cycle_pct.is_none())
+            .expect("fair-use region");
+        assert_eq!(
+            duty_aware_resource_pace_ms(&util::MEDIUM_FAST, fair_use, 2),
+            u64::from(util::lora_airtime_ms(&util::MEDIUM_FAST, 240)) * 2
+        );
     }
 
     #[test]
