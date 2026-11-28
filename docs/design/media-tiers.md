@@ -52,20 +52,23 @@ Single source for web, Android and tests. The bridge does not need it at runtime
 
 Encoder policy for image tiers:
 
-* **AVIF is the preferred encoder.** Before encoding, a client probes the platform encoder
-  (web: canvas `toBlob('image/avif', quality)`) and treats AVIF as available only when the returned
-  blob's `type` is really `image/avif`; browsers that silently return PNG for an unknown type are
-  detected and rejected. Clients then try AVIF first, WebP second and JPEG third, and always label
-  the attachment with the **actual** encoded MIME and matching filename extension. A requested type
-  that comes back as something else must never be sent under the requested name.
-* `mime` in the preset is the **preferred** MIME; the capability-gated fallback chain above is part
-  of the contract. `original` passes the picked bytes through unchanged (the client does not
+* **Auto: send the smaller of AVIF and WebP at matched visual quality.** The bundled Rust AVIF
+  encoder (`crates/openmesh-image` via `openmesh-image-wasm` on web and `openmesh-ffi` on Android)
+  is preferred where it produces a **strictly smaller** file than canvas/platform WebP; a tie goes
+  to WebP. AVIF is encoded at the quality-calibrated setting (§1.2), not at the preset's numeric
+  WebP quality. If the AVIF encoder is unavailable or errors, the client sends WebP (or JPEG when
+  WebP is unavailable) and labels the attachment with the **actual** encoded MIME and matching
+  filename extension. A requested type that comes back as something else must never be sent under
+  the requested name.
+* `mime` in the preset is a **preference/indication**, not a mandate: clients apply the Auto
+  selection above. `original` passes the picked bytes through unchanged (the client does not
   transcode or relabel it).
 
 Rules:
 
-* **Image tiers** are targets: clients downscale to `max_dim`, encode at `quality` with the first
-  capability-supported encoder (AVIF → WebP → JPEG), then show the *actual* bytes, actual MIME and
+* **Image tiers** are targets: clients downscale to `max_dim`, encode quality-matched AVIF and
+  WebP candidates where the encoders are available, send the strictly smaller result (WebP on a
+  tie; JPEG only if WebP cannot be produced), then show the *actual* bytes, actual MIME and
   airtime. If the result exceeds the active profile's attachment cap
   (`util::max_attachment_bytes`), the next smaller tier is suggested; `original` is allowed only
   with an explicit confirmation and is blocked by default on long-range profiles.
@@ -83,24 +86,34 @@ Rules:
 
 ### 1.1 Measured encoder output (2026-11-28)
 
-Honest browser measurement on a 768×512 Kodak test photo (canvas downscale, preset quality,
-returned Blob size; no relays/retries):
+Real browser measurement (Chromium 159 headless, demo mode) on a 768×512 Kodak test photo:
+canvas downscale to the preset `max_dim`, then both candidates — AVIF through the bundled WASM
+Worker at the calibrated quality (§1.2) and WebP through canvas at the preset quality — encoded
+from the same canvas. Bytes are the actual uploaded payloads; timings are Worker-side encode time
+on a desktop (phone browsers will be slower). No relays/retries are included.
 
-| Tier | Output | WebP bytes | JPEG bytes | AVIF request |
-| --- | --- | --- | --- | --- |
-| tiny | 256×171 q0.28 | 3,066 B | 3,940 B | not encodable — returned PNG (96,756 B) |
-| medium | 512×341 q0.40 | 8,714 B | 12,318 B | not encodable — returned PNG (362,152 B) |
-| high | 768×512 q0.50 | 17,290 B | 26,633 B | not encodable — returned PNG (783,179 B) |
+| Tier | Output | AVIF (WASM, calibrated q) | WebP (canvas) | JPEG (canvas) | Chosen |
+| --- | --- | --- | --- | --- | --- |
+| tiny | 256×171 | 2,642 B (q35, speed 10, 54 ms) | 3,066 B (q28) | 3,940 B | AVIF |
+| medium | 512×341 | 7,468 B (q50, speed 8, 227 ms) | 8,714 B (q40) | 12,318 B | AVIF |
+| high | 768×512 | 16,470 B (q62, speed 8, 664 ms) | 17,290 B (q50) | 26,633 B | AVIF |
 
-Compared with the previous presets (320/640/1280 px at q0.35/0.55/0.70) the same photo encodes
-**29 % / 37 % / 22 % smaller** with WebP. Chromium 159 (headless, canvas) **cannot encode AVIF at
-all**: `toBlob('image/avif')` returns an `image/png` blob (e.g. 11,005 B vs 1,502 B WebP for the
-capability probe), which is exactly why the runtime type check is mandatory. Real AVIF *decode* is
-supported (a 12,877 B, 2048×858 sample renders via `createImageBitmap` and `<img>`), and the web
-client renders received `image/avif` attachments in the bubble, fullscreen viewer and Save dialog.
-In Chromium the AVIF branch therefore stays dormant and the client sends WebP with the correct
-MIME; browsers that can genuinely produce AVIF will use it for all three non-original tiers. These
-are content-dependent examples — clients always display the measured bytes for the actual file.
+The AVIF candidate wins these three samples by **14 % / 14 % / 5 %** at matched visual quality;
+the same photo's WebP candidate is **29 % / 37 % / 22 % smaller** than the previous
+320/640/1280 px presets. A text-heavy 2160×1350 UI screenshot shows the opposite at high:
+AVIF 17,580 B (q62) vs WebP 16,648 B (q50) → **WebP was sent** (tiny/medium still chose AVIF).
+That is the point of the dynamic choice (§1.2). These are content-dependent
+examples: clients always display the measured bytes and the chosen format for the actual file.
+
+Chromium's **canvas** still cannot encode AVIF (`toBlob('image/avif')` silently returns
+`image/png`), so the web client never uses canvas AVIF; the AVIF candidate comes from the bundled
+WASM encoder. On the web the module is ~1.3 MB raw / ~406 KB gzip-9, loaded lazily in a Worker on
+the first image encode (not at app startup), once per page session. With the WASM artifact absent
+or failing, the composer falls back to canvas WebP/JPEG and the attachment keeps that MIME
+(verified headlessly: a static build without the WASM produced `image/webp`, never AVIF).
+Real AVIF *decode* is supported by Chromium (a 12,877 B, 2048×858 sample renders via
+`createImageBitmap`/`<img>`), and the web client renders received `image/avif` attachments in the
+bubble, fullscreen viewer and Save dialog.
 
 ### 1.2 Quality-calibrated AVIF/WebP choice (2026-11-28)
 
@@ -121,8 +134,9 @@ comparison would often choose AVIF at lower visual quality. The policy is theref
   attachment with the **actual** MIME/filename. Never send fallback bytes under an AVIF name.
 * Composer default: **Auto (smallest, quality-matched)** with the actual format/bytes/airtime shown;
   explicit **force AVIF** / **force WebP** choices can be added later as user overrides.
-* This policy is implemented in the clients (task-37: Android size-aware selection; web follows
-  when the lazy AVIF WASM is wired). The encoder API/capability contract above is unchanged.
+* This policy is implemented in both clients: Android size-aware selection and the web lazy
+  AVIF WASM path (Worker encode, AVIF/WebP comparison, WebP tie-break). The encoder
+  API/capability contract above is unchanged.
 
 **Measurement (SSIM-matched quality, 126 encodes).** Three real 2048×1536 sample photos
 (Picsum/Unsplash: one typical scene, one portrait-style scene, one detail-heavy star-field
@@ -225,11 +239,12 @@ Generated Kotlin names must be confirmed by the implementer and relayed to platf
 ## 5. Web UX (web-client)
 
 * Composer image attach: tier menu **Tiny (≤256 px, q0.28) / Medium (≤512 px, q0.40) / High
-  (≤1024 px, q0.50) / Original**, labelled with the encoder this browser can really produce
-  (AVIF when the verified probe succeeds, otherwise WebP/JPEG), compression, then a pre-send
-  preview card showing **actual size**, **actual MIME**, **estimated airtime**, **% of hourly
-  duty**, and a warning when it exceeds the profile cap; `Original` requires a confirmation and is
-  disabled by default for `LONG_*`.
+  (≤1024 px, q0.50) / Original**, with an **Auto** encoder label; the client encodes AVIF in the
+  lazy WASM Worker and WebP on canvas, sends the strictly smaller result (WebP tie-break), and
+  labels the tile/metrics with the actual format and bytes. The pre-send preview shows **actual
+  size**, **actual MIME**, **estimated airtime**, **% of hourly duty**, and a warning when it
+  exceeds the profile cap; `Original` requires a confirmation and is disabled by default for
+  `LONG_*`.
 * Voice recorder: tier selector **Tiny (Codec2 1.3k) / Medium (Codec2 3.2k) / High (Opus)**;
   record ≤ effective cap; show bytes + airtime before send. Tiny/medium: capture PCM via
   `AudioContext`/`AudioWorklet` (or `MediaRecorder` decode), resample to 8 kHz mono via

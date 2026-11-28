@@ -44,3 +44,6 @@ apps/android/local.properties
 # Generated Codec2 WASM (scripts/build-voice-wasm.sh)
 apps/web/src/voice/openmesh_voice.wasm
 apps/web/public/voice/openmesh_voice.wasm
+
+# Generated AVIF WASM (crates/openmesh-image-wasm/build-wasm.sh)
+apps/web/public/image/openmesh_image.wasm
