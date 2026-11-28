@@ -90,6 +90,19 @@ pub const RESOURCE_PACE_INTERVAL_MS: u64 = 1_000;
 /// Maximum resource retransmissions between progress (hard safety ceiling; the time budget is the
 /// primary give-up condition).
 pub const RESOURCE_MAX_RETRIES: u8 = MAX_RESOURCE_RETRIES;
+/// Default total copies of a short channel text message (first immediate + repeats).
+pub const CHANNEL_TEXT_REPEATS: u8 = 3;
+/// Base spacing between channel-text copies (copy 2 after ~1x, copy 3 after ~2x this interval).
+pub const CHANNEL_TEXT_SPACING_MS: u64 = 900;
+/// Randomised jitter added to each channel-text repeat delay (0..=jitter ms).
+pub const CHANNEL_TEXT_JITTER_MS: u64 = 600;
+/// Companion-radio resource retry cap: consecutive no-progress retries before abandoning media.
+pub const COMPANION_RESOURCE_RETRY_CAP: u8 = 6;
+/// Companion-radio no-progress budget before abandoning media (vs the 15-minute best-effort
+/// default for non-companion links).
+pub const COMPANION_RESOURCE_RETRY_BUDGET_MS: u64 = 120_000;
+/// Maximum exponential retry backoff for a companion-radio media transfer.
+pub const COMPANION_RESOURCE_MAX_RETRY_BACKOFF_MS: u64 = 20_000;
 /// How long a completed resource stays cached to answer duplicate acks.
 pub const RESOURCE_KEEP_MS: u64 = 600_000;
 /// Minimum spacing between store offers to one peer.
@@ -220,6 +233,18 @@ pub struct EngineConfig {
     /// only exposes the effective duty-cycle policy, radio power and frequency are applied by
     /// the embedder (docs/design/regulatory-and-regions.md §2).
     pub regulatory: crate::regulatory::RegulatoryOverride,
+    /// Total copies of a short channel text message (including the immediate first copy).
+    /// Used clamped to `1..=5`; default [`CHANNEL_TEXT_REPEATS`].
+    pub channel_text_repeats: u8,
+    /// Base spacing between channel-text copies in milliseconds.
+    pub channel_text_spacing_ms: u64,
+    /// Randomised jitter (0..=ms) added to each channel-text repeat delay.
+    pub channel_text_jitter_ms: u64,
+    /// True when the embedder sends through a companion radio (BLE/USB) with a shallow TX queue.
+    /// Enables the short companion retry cap/budget so failed media retries cannot starve text.
+    pub companion_attached: bool,
+    /// Consecutive no-progress resource retries before abandoning media in companion mode.
+    pub companion_resource_retry_cap: u8,
 }
 
 impl EngineConfig {
@@ -234,6 +259,11 @@ impl EngineConfig {
             role: Role::Client,
             accept_channels: true,
             regulatory: crate::regulatory::RegulatoryOverride::default(),
+            channel_text_repeats: CHANNEL_TEXT_REPEATS,
+            channel_text_spacing_ms: CHANNEL_TEXT_SPACING_MS,
+            channel_text_jitter_ms: CHANNEL_TEXT_JITTER_MS,
+            companion_attached: false,
+            companion_resource_retry_cap: COMPANION_RESOURCE_RETRY_CAP,
         }
     }
 
@@ -248,6 +278,11 @@ impl EngineConfig {
             role: Role::Relay(RelayConfig::default()),
             accept_channels: false,
             regulatory: crate::regulatory::RegulatoryOverride::default(),
+            channel_text_repeats: CHANNEL_TEXT_REPEATS,
+            channel_text_spacing_ms: CHANNEL_TEXT_SPACING_MS,
+            channel_text_jitter_ms: CHANNEL_TEXT_JITTER_MS,
+            companion_attached: false,
+            companion_resource_retry_cap: COMPANION_RESOURCE_RETRY_CAP,
         }
     }
 
@@ -584,6 +619,15 @@ pub struct Engine {
     orig_count: u32,
     /// Wall-clock interval between paced resource chunk batches (duty-aware hint).
     resource_pace_interval_ms: u64,
+    /// Scheduled duplicate transmissions of recent short channel text messages.
+    channel_repeats: Vec<PendingChannelRepeat>,
+}
+
+/// A channel-text frame scheduled for duplicate transmission on a later tick.
+#[derive(Debug)]
+struct PendingChannelRepeat {
+    frame: Frame,
+    due_ms: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -823,6 +867,7 @@ impl Engine {
             orig_window_start_ms: 0,
             orig_count: 0,
             resource_pace_interval_ms: RESOURCE_PACE_INTERVAL_MS,
+            channel_repeats: Vec::new(),
         }
     }
 
@@ -1477,6 +1522,7 @@ impl Engine {
                     return Err(Error::UnknownNode(channel_id));
                 };
                 let key = entry.key.clone();
+                let repeat_text = message.kind == MessageKind::Text;
                 let signature = self.identity.sign(&group_signature_payload(
                     &self.node_id(),
                     &channel_id,
@@ -1501,7 +1547,16 @@ impl Engine {
                         &key,
                     )?;
                     let mut out = Processed::default();
-                    self.emit_frame(&mut out, frame, SendMode::Flood);
+                    if repeat_text {
+                        // Channel text has no ARQ: schedule the same frame (same seq, so receivers
+                        // dedup) a few times on later ticks. Direct messages and resources are
+                        // unchanged. The first copy is emitted immediately below.
+                        let frame_to_repeat = frame.clone();
+                        self.emit_frame(&mut out, frame, SendMode::Flood);
+                        self.schedule_channel_repeats(frame_to_repeat, msg_id, now_ms);
+                    } else {
+                        self.emit_frame(&mut out, frame, SendMode::Flood);
+                    }
                     Ok(out)
                 } else {
                     self.start_resource_with_key(
@@ -1820,6 +1875,7 @@ impl Engine {
         self.last_announce_ms = u64::MAX;
         self.orig_window_start_ms = 0;
         self.orig_count = 0;
+        self.channel_repeats.clear();
     }
 
     /// Known nodes, sorted by node id.
@@ -1867,6 +1923,9 @@ impl Engine {
         }
 
         self.tick_pending_messages(now_ms, &mut out);
+        // Channel text copies are emitted before resource retries so a media storm cannot starve
+        // Public Mesh chat text in the same tick.
+        self.tick_channel_repeats(now_ms, &mut out);
         self.tick_outgoing_resources(now_ms, &mut out);
         self.tick_incoming_resources(now_ms, &mut out);
 
@@ -1997,6 +2056,75 @@ impl Engine {
 
     fn peer_identity(&self, node: NodeId) -> Option<PublicIdentity> {
         self.peers.get(&node).map(|peer| peer.info.ident)
+    }
+
+    /// Schedule the duplicate copies of a short channel text message (`repeats - 1` copies).
+    fn schedule_channel_repeats(&mut self, frame: Frame, msg_id: u32, now_ms: u64) {
+        let copies = self.config.channel_text_repeats.clamp(1, 5);
+        let seq = frame.seq;
+        for copy in 1..copies {
+            let delay = self.channel_repeat_delay(msg_id, seq, copy);
+            self.channel_repeats.push(PendingChannelRepeat {
+                frame: frame.clone(),
+                due_ms: now_ms.saturating_add(delay),
+            });
+        }
+        tracing::debug!(
+            msg_id,
+            copies,
+            spacing_ms = self.config.channel_text_spacing_ms,
+            jitter_ms = self.config.channel_text_jitter_ms,
+            "channel text repetition scheduled"
+        );
+    }
+
+    /// Deterministic pseudo-random delay for copy `copy` of a channel text message: base spacing
+    /// times the copy index plus jitter derived from the message id and frame sequence. Determinism
+    /// keeps tests reproducible while still de-correlating copies from other senders/traffic.
+    fn channel_repeat_delay(&self, msg_id: u32, seq: u32, copy: u8) -> u64 {
+        let spacing = self.config.channel_text_spacing_ms;
+        let jitter = self.config.channel_text_jitter_ms;
+        let base = spacing.saturating_mul(u64::from(copy));
+        if jitter == 0 {
+            return base;
+        }
+        let mut hash = u64::from(msg_id)
+            ^ (u64::from(seq) << 32)
+            ^ (u64::from(copy) << 16)
+            ^ 0x9e37_79b9_7f4a_7c15;
+        hash ^= hash >> 30;
+        hash = hash.wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        hash ^= hash >> 27;
+        hash = hash.wrapping_mul(0x94d0_49bb_1331_11eb);
+        hash ^= hash >> 31;
+        base.saturating_add(hash % (jitter.saturating_add(1)))
+    }
+
+    /// Emit channel text copies whose due time has elapsed. Called from [`Engine::tick`] before
+    /// resource retries; the frames are byte-identical retransmissions (same `(src, seq)`), so
+    /// receivers suppress duplicates but the airtime redundancy improves delivery on a lossy link.
+    fn tick_channel_repeats(&mut self, now_ms: u64, out: &mut Processed) {
+        if self.channel_repeats.is_empty() {
+            return;
+        }
+        let mut pending = Vec::with_capacity(self.channel_repeats.len());
+        let mut due = Vec::new();
+        for repeat in self.channel_repeats.drain(..) {
+            if repeat.due_ms <= now_ms {
+                due.push(repeat.frame);
+            } else {
+                pending.push(repeat);
+            }
+        }
+        self.channel_repeats = pending;
+        for frame in due {
+            tracing::debug!(
+                msg_ref = format!("{:#010x}", frame.body.first().copied().unwrap_or_default()),
+                seq = frame.seq,
+                "channel text repeat emitted"
+            );
+            self.emit_frame(out, frame, SendMode::Flood);
+        }
     }
 
     fn emit_frame(&mut self, out: &mut Processed, frame: Frame, mode: SendMode) {
@@ -3254,6 +3382,24 @@ impl Engine {
     // -----------------------------------------------------------------------------------------
 
     fn tick_outgoing_resources(&mut self, now_ms: u64, out: &mut Processed) {
+        // A companion radio (BLE/USB) has a shallow FIFO and its failed-media storm was starving
+        // channel text. Cap/back off much sooner there; non-companion links keep the patient
+        // best-effort budget. Text itself has no ARQ, so it must win the airtime contention.
+        let (retry_cap, retry_budget_ms, max_retry_backoff_ms) = if self.config.companion_attached {
+            (
+                self.config
+                    .companion_resource_retry_cap
+                    .clamp(1, RESOURCE_MAX_RETRIES),
+                COMPANION_RESOURCE_RETRY_BUDGET_MS,
+                COMPANION_RESOURCE_MAX_RETRY_BACKOFF_MS,
+            )
+        } else {
+            (
+                RESOURCE_MAX_RETRIES,
+                RESOURCE_RETRY_BUDGET_MS,
+                RESOURCE_MAX_RETRY_BACKOFF_MS,
+            )
+        };
         let ids: Vec<u32> = self.outgoing.keys().copied().collect();
         for res_id in ids {
             let Some(snapshot) = self.outgoing_snapshot(res_id, now_ms) else {
@@ -3370,11 +3516,12 @@ impl Engine {
             let retry_ok = match self.outgoing.get_mut(&res_id) {
                 Some(resource) => resource
                     .sender
-                    .schedule_retry(
+                    .schedule_retry_with_cap(
                         now_ms,
                         RESOURCE_RTO_MS,
-                        RESOURCE_RETRY_BUDGET_MS,
-                        RESOURCE_MAX_RETRY_BACKOFF_MS,
+                        retry_budget_ms,
+                        max_retry_backoff_ms,
+                        retry_cap,
                     )
                     .is_some(),
                 None => false,
@@ -3382,7 +3529,7 @@ impl Engine {
             if !retry_ok {
                 self.outgoing.remove(&res_id);
                 out.events.push(Event::Error(format!(
-                    "resource {res_id} failed after {RESOURCE_MAX_RETRIES} retries without acknowledged progress"
+                    "resource {res_id} failed after {retry_cap} retries without acknowledged progress"
                 )));
                 continue;
             }
@@ -3747,6 +3894,240 @@ mod tests {
         let engine = Engine::new(Identity::from_seed(&[1u8; 32]), config);
         assert_eq!(engine.config().effective_duty_pct(region), Some(100));
         assert!(engine.config().regulatory.is_active());
+    }
+
+    #[test]
+    fn channel_text_is_repeated_and_receiver_dedups() {
+        let mut config = EngineConfig::client("node-201");
+        config.channel_text_repeats = 3;
+        config.channel_text_spacing_ms = 100;
+        config.channel_text_jitter_ms = 0;
+        let mut sender = engine_from_seed(&[201u8; 32], config);
+        let mut receiver = engine(202);
+        receiver.add_contact(sender.public_identity(), Some("sender".into()));
+        let channel = sender.add_channel("Public Mesh", &[42u8; 32]);
+        receiver.add_channel("Public Mesh", &[42u8; 32]);
+
+        let sent = sender
+            .send_text(Target::Channel(channel), "hello mesh", 0)
+            .expect("send channel text");
+        assert_eq!(sent.outbound.len(), 1, "first copy is immediate");
+        let first = sent.outbound[0].frame.clone();
+        let frame_airtime = crate::util::lora_airtime_ms(
+            &crate::util::MEDIUM_FAST,
+            crate::wire::HEADER_LEN + first.body.len(),
+        ) as u64;
+        let mut receive = |frame: Frame| -> usize {
+            receiver
+                .on_frame(frame, None, 0)
+                .events
+                .iter()
+                .filter(|event| matches!(event, Event::GroupMessage(_)))
+                .count()
+        };
+        let mut group_events = receive(first.clone());
+        assert_eq!(group_events, 1);
+
+        let channel_frames = |processed: &Processed| {
+            processed
+                .outbound
+                .iter()
+                .filter(|out| out.frame.typ == FrameType::Data && out.frame.dst == channel)
+                .count()
+        };
+        let second = sender.tick(100);
+        assert_eq!(
+            channel_frames(&second),
+            1,
+            "second copy due at 100 ms (the first tick also emits the startup announce)"
+        );
+        let announce_airtime = second
+            .outbound
+            .iter()
+            .find(|out| out.frame.typ == FrameType::Announce)
+            .map(|out| {
+                crate::util::lora_airtime_ms(
+                    &crate::util::MEDIUM_FAST,
+                    crate::wire::HEADER_LEN + out.frame.body.len(),
+                ) as u64
+            })
+            .unwrap_or(0);
+        let second_frame = second
+            .outbound
+            .iter()
+            .find(|out| out.frame.typ == FrameType::Data && out.frame.dst == channel)
+            .expect("second channel copy")
+            .frame
+            .clone();
+        assert_eq!(second_frame.seq, first.seq, "same frame/seq");
+        assert_eq!(second_frame.body, first.body);
+        group_events += receive(second_frame);
+
+        let third = sender.tick(200);
+        assert_eq!(channel_frames(&third), 1, "third copy due at 200 ms");
+        let third_frame = third
+            .outbound
+            .iter()
+            .find(|out| out.frame.typ == FrameType::Data && out.frame.dst == channel)
+            .expect("third channel copy")
+            .frame
+            .clone();
+        assert_eq!(third_frame.seq, first.seq);
+        group_events += receive(third_frame);
+
+        assert_eq!(
+            group_events, 1,
+            "receiver dedups the repeated (src, seq) frames"
+        );
+        assert_eq!(receiver.stats().dedup_hits, 2);
+        assert_eq!(
+            sender.stats().tx_frames,
+            4,
+            "3 text copies + startup announce"
+        );
+        assert_eq!(
+            sender.stats().airtime_tx_ms,
+            frame_airtime * 3 + announce_airtime
+        );
+        assert_eq!(channel_frames(&sender.tick(10_000)), 0, "no extra copies");
+    }
+
+    #[test]
+    fn channel_text_repetition_is_configurable_and_direct_messages_are_not_repeated() {
+        let mut config = EngineConfig::client("node-211");
+        config.channel_text_repeats = 2;
+        config.channel_text_spacing_ms = 1_000;
+        config.channel_text_jitter_ms = 0;
+        let mut sender = engine_from_seed(&[211u8; 32], config);
+        let receiver = engine(212);
+        sender.add_contact(receiver.public_identity(), Some("b".into()));
+        let channel = sender.add_channel("Public Mesh", &[43u8; 32]);
+        let sent = sender
+            .send_text(Target::Channel(channel), "two copies", 0)
+            .expect("channel");
+        assert_eq!(sent.outbound.len(), 1);
+        let channel_frames = |processed: &Processed| {
+            processed
+                .outbound
+                .iter()
+                .filter(|out| out.frame.typ == FrameType::Data && out.frame.dst == channel)
+                .count()
+        };
+        assert_eq!(
+            channel_frames(&sender.tick(1_000)),
+            1,
+            "second configured copy"
+        );
+        assert!(sender.tick(2_000).outbound.is_empty());
+
+        // Direct messages are unchanged (no repetition).
+        let direct = sender
+            .send_text(Target::Direct(receiver.node_id()), "direct", 2_000)
+            .expect("direct");
+        assert_eq!(direct.outbound.len(), 1);
+        assert_eq!(channel_frames(&sender.tick(3_000)), 0);
+        assert_eq!(channel_frames(&sender.tick(10_000)), 0);
+
+        // One copy disables repetition entirely.
+        let mut config = EngineConfig::client("node-213");
+        config.channel_text_repeats = 1;
+        let mut single = engine_from_seed(&[213u8; 32], config);
+        let channel = single.add_channel("Public Mesh", &[44u8; 32]);
+        single
+            .send_text(Target::Channel(channel), "single", 0)
+            .expect("single");
+        let single_channel = single.add_channel("Public Mesh", &[44u8; 32]);
+        assert_eq!(
+            single
+                .tick(10_000)
+                .outbound
+                .iter()
+                .filter(|out| out.frame.typ == FrameType::Data && out.frame.dst == single_channel)
+                .count(),
+            0
+        );
+    }
+
+    #[test]
+    fn channel_text_copies_are_emitted_before_resource_retries() {
+        let mut config = EngineConfig::client("node-221");
+        config.channel_text_repeats = 2;
+        config.channel_text_spacing_ms = 3_000;
+        config.channel_text_jitter_ms = 0;
+        let mut sender = engine_from_seed(&[221u8; 32], config);
+        let channel = sender.add_channel("Public Mesh", &[45u8; 32]);
+        sender
+            .send_text(Target::Channel(channel), "priority", 0)
+            .expect("text");
+        sender
+            .send_resource(
+                Target::Channel(channel),
+                0x9000_0001,
+                0x9000_0002,
+                ResourceKind::Attachment,
+                "image/webp",
+                &[7u8; 700],
+                0,
+            )
+            .expect("resource");
+
+        let processed = sender.tick(3_000);
+        let text_pos = processed
+            .outbound
+            .iter()
+            .position(|out| out.frame.typ == FrameType::Data && out.frame.dst == channel)
+            .expect("channel text repeat");
+        let resource_pos = processed
+            .outbound
+            .iter()
+            .position(|out| out.frame.typ == FrameType::Resource)
+            .expect("resource retry");
+        assert!(
+            text_pos < resource_pos,
+            "channel text repeat (pos {text_pos}) must precede resource retries (pos {resource_pos})"
+        );
+    }
+
+    #[test]
+    fn companion_resource_retries_are_capped_and_release_the_queue() {
+        let mut config = EngineConfig::client("node-231");
+        config.companion_attached = true;
+        config.companion_resource_retry_cap = 6;
+        let mut sender = engine_from_seed(&[231u8; 32], config);
+        let channel = sender.add_channel("Public Mesh", &[46u8; 32]);
+        let res_id = 0x9100_0001;
+        sender
+            .send_resource(
+                Target::Channel(channel),
+                0x9100_0002,
+                res_id,
+                ResourceKind::Attachment,
+                "image/webp",
+                &[8u8; 900],
+                0,
+            )
+            .expect("resource");
+
+        let mut failed = false;
+        let mut frames_after_failure = 0usize;
+        for step in 0..140u32 {
+            let now = u64::from(step) * 1_000;
+            let processed = sender.tick(now);
+            if processed.events.iter().any(|event| {
+                matches!(event, Event::Error(message) if message.contains("failed after 6 retries"))
+            }) {
+                failed = true;
+            }
+            if failed && sender.outgoing.contains_key(&res_id) {
+                panic!("resource still queued after companion retry cap");
+            }
+            if failed {
+                frames_after_failure += processed.outbound.len();
+            }
+        }
+        assert!(failed, "companion retry cap did not fail the resource");
+        assert!(!sender.outgoing.contains_key(&res_id));
+        assert_eq!(frames_after_failure, 0, "no retry frames after the give-up");
     }
 
     #[test]

@@ -1421,6 +1421,9 @@ fn engine_config_for(config: &FfiConfig) -> Result<EngineConfig, FfiError> {
     engine_config.class = class;
     engine_config.accept_channels = config.accept_channels;
     engine_config.announce_interval_ms = (config.announce_interval_s as u64) * 1000;
+    // Phone engines send through a companion radio (BLE/USB); use the short media retry cap so a
+    // failed resource transfer cannot starve channel text.
+    engine_config.companion_attached = true;
     if config.store_forward {
         engine_config.caps |= openmesh_core::services::caps::STORE;
         engine_config.role = Role::Relay(RelayConfig {

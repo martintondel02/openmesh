@@ -259,10 +259,31 @@ impl ResourceSender {
         no_progress_budget_ms: u64,
         max_backoff_ms: u64,
     ) -> Option<u64> {
+        self.schedule_retry_with_cap(
+            now_ms,
+            rto_ms,
+            no_progress_budget_ms,
+            max_backoff_ms,
+            MAX_RETRIES,
+        )
+    }
+
+    /// [`ResourceSender::schedule_retry`] with an explicit no-progress retry cap.
+    ///
+    /// Companion radios use a much smaller cap (and shorter budget/backoff passed by the engine) so
+    /// a failed media transfer cannot keep retrying for minutes and starve channel text.
+    pub fn schedule_retry_with_cap(
+        &mut self,
+        now_ms: u64,
+        rto_ms: u64,
+        no_progress_budget_ms: u64,
+        max_backoff_ms: u64,
+        max_retries: u8,
+    ) -> Option<u64> {
         if now_ms.saturating_sub(self.last_progress_ms) > no_progress_budget_ms {
             return None;
         }
-        if self.retries >= MAX_RETRIES {
+        if self.retries >= max_retries {
             return None;
         }
         self.retries += 1;

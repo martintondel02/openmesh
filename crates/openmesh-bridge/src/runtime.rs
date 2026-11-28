@@ -126,6 +126,9 @@ impl RuntimeConfig {
         };
         config.class = class;
         config.accept_channels = true;
+        // The bridge always talks to a radio through the companion/transport layer: use the short
+        // media retry cap so failed resource storms cannot starve channel text.
+        config.companion_attached = true;
         config.regulatory = self.regulatory_override.to_core();
         if matches!(class, NodeClass::Gateway) {
             config.caps |= caps::WIFI | caps::ETHERNET;
