@@ -3,19 +3,19 @@
   "airtime_note": "Tier sizes are targets; clients show the measured bytes and estimated airtime before sending.",
   "images": {
     "tiny": {
-      "max_dim": 320,
-      "quality": 0.35,
-      "mime": "image/webp"
+      "max_dim": 256,
+      "quality": 0.28,
+      "mime": "image/avif"
     },
     "medium": {
-      "max_dim": 640,
-      "quality": 0.55,
-      "mime": "image/webp"
+      "max_dim": 512,
+      "quality": 0.4,
+      "mime": "image/avif"
     },
     "high": {
-      "max_dim": 1280,
-      "quality": 0.7,
-      "mime": "image/webp"
+      "max_dim": 1024,
+      "quality": 0.5,
+      "mime": "image/avif"
     },
     "original": {
       "max_dim": null,
