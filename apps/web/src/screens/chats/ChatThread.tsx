@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ArrowDown,
+  Globe,
   Hash,
   Info,
   LogOut,
@@ -8,9 +9,11 @@ import {
   MessageSquare,
   QrCode,
   ShieldCheck,
+  TriangleAlert,
   UserRound,
 } from 'lucide-react';
 import { useAppStore } from '../../store/app';
+import { cn } from '../../lib/utils';
 import { selectThreadHeader, selectThreadMessages } from '../../store/selectors';
 import { Avatar, Badge, EmptyState, IconButton } from '../../components/ui/primitives';
 import { RoleBadge } from '../../components/ui/signals';
@@ -20,6 +23,7 @@ import { DaySeparator, EmptyThreadState, MessageBubble, isGroupMessage, type Any
 import { Composer } from './Composer';
 import { ChannelInviteModal } from './ChannelModals';
 import { PeerLinkChip, PeerLinkPanel } from './PeerLinkCard';
+import { PUBLIC_CHANNEL_SUBTITLE, PUBLIC_CHANNEL_WARNING } from '../../lib/public-channel';
 
 export function ChatThread() {
   const activeThread = useAppStore((state) => state.activeThread);
@@ -173,6 +177,16 @@ export function ChatThread() {
           <div className="flex items-center gap-1.5">
             <h2 className="truncate text-sm font-semibold text-white">{isGroup ? header.name : header.name}</h2>
             {isGroup ? (
+              header.public ? (
+                <span
+                  className="shrink-0 rounded border border-amber-300/30 bg-amber-300/10 px-1 py-px text-[9px] font-semibold uppercase tracking-[0.08em] text-amber-200"
+                  title={PUBLIC_CHANNEL_WARNING}
+                >
+                  Public
+                </span>
+              ) : null
+            ) : null}
+            {isGroup ? (
               <ShieldCheck className="h-3.5 w-3.5 shrink-0 text-emerald-400/70" aria-label="Messages are signed" />
             ) : null}
             {!isGroup && header.node ? <RoleBadge role={header.node.class} /> : null}
@@ -180,9 +194,14 @@ export function ChatThread() {
           <p className="mt-0.5 flex items-center gap-1.5 truncate text-3xs text-slate-500">
             {isGroup ? (
               <>
-                <span className="font-mono">{shortChannelId(activeThread.id)}</span>
-                <span>·</span>
-                <span>{header.subtitle}</span>
+                <Globe className="h-3 w-3 shrink-0 text-amber-300/80" aria-hidden="true" />
+                <span className="truncate">{header.public ? PUBLIC_CHANNEL_SUBTITLE : header.subtitle}</span>
+                {!header.public ? (
+                  <>
+                    <span>·</span>
+                    <span className="font-mono">{shortChannelId(activeThread.id)}</span>
+                  </>
+                ) : null}
               </>
             ) : (
               <>
@@ -216,7 +235,9 @@ export function ChatThread() {
           {isGroup ? (
             <>
               <IconButton icon={QrCode} label="Invite to channel" onClick={() => setInviteOpen(true)} />
-              <IconButton icon={LogOut} label="Leave channel" onClick={() => setLeaveOpen(true)} />
+              {!header.public ? (
+                <IconButton icon={LogOut} label="Leave channel" onClick={() => setLeaveOpen(true)} />
+              ) : null}
             </>
           ) : null}
           <IconButton
@@ -229,6 +250,15 @@ export function ChatThread() {
           />
         </div>
       </header>
+
+      {header.public ? (
+        <div className="flex items-start gap-2 border-b border-amber-300/20 bg-amber-300/[0.06] px-3 py-2 text-2xs leading-relaxed text-amber-100/90 md:px-6" role="note">
+          <TriangleAlert className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-300" aria-hidden="true" />
+          <p>
+            <span className="font-semibold text-amber-200">Public channel.</span> {PUBLIC_CHANNEL_WARNING}
+          </p>
+        </div>
+      ) : null}
 
       {/* Messages */}
       <div className="relative min-h-0 flex-1">
@@ -247,9 +277,11 @@ export function ChatThread() {
                 icon={MessageSquare}
                 title={`Start chatting with ${header.name}`}
                 description={
-                  isGroup
-                    ? 'Messages in this channel are encrypted with the shared key and signed with each sender’s Ed25519 identity.'
-                    : 'Messages take the mesh path through nearby nodes. Delivery shows as a double check when an ack arrives.'
+                  header.public
+                    ? 'This is a public channel: anyone with OpenMesh can read and post. Messages are signed so senders are verifiable, but there is no privacy.'
+                    : isGroup
+                      ? 'Messages in this channel are encrypted with the shared key and signed with each sender’s Ed25519 identity.'
+                      : 'Messages take the mesh path through nearby nodes. Delivery shows as a double check when an ack arrives.'
                 }
                 className="py-20"
               />
@@ -348,12 +380,14 @@ export function ChatThread() {
 
 function ThreadIntro({
   isGroup,
+  publicChannel = false,
   name,
   subtitle,
   address,
   nodeRssi,
 }: {
   isGroup: boolean;
+  publicChannel?: boolean;
   name: string;
   subtitle: string;
   address: string;
@@ -363,8 +397,15 @@ function ThreadIntro({
     <div className="mb-3 mt-2 flex flex-col items-center gap-2 text-center">
       <div className="relative">
         {isGroup ? (
-          <span className="grid h-14 w-14 place-items-center rounded-2xl border border-emerald-400/20 bg-gradient-to-br from-emerald-400/15 to-sky-500/10 text-emerald-300">
-            <Hash className="h-6 w-6" aria-hidden="true" />
+          <span
+            className={cn(
+              'grid h-14 w-14 place-items-center rounded-2xl border',
+              publicChannel
+                ? 'border-amber-300/30 bg-gradient-to-br from-amber-300/15 to-sky-500/10 text-amber-200'
+                : 'border-emerald-400/20 bg-gradient-to-br from-emerald-400/15 to-sky-500/10 text-emerald-300',
+            )}
+          >
+            {publicChannel ? <Globe className="h-6 w-6" aria-hidden="true" /> : <Hash className="h-6 w-6" aria-hidden="true" />}
           </span>
         ) : (
           <Avatar name={name} seed={address} size="xl" shape="circle" />
@@ -374,13 +415,19 @@ function ThreadIntro({
         <p className="text-sm font-semibold text-slate-200">{isGroup ? name : name}</p>
         <p className="mt-0.5 text-2xs text-slate-500">{subtitle}</p>
       </div>
-      <Badge tone={isGroup ? 'accent' : 'sky'} icon={isGroup ? ShieldCheck : undefined}>
-        {isGroup ? 'Channel · shared PSK · Ed25519 signed' : `Direct · sealed with static ECDH${nodeRssi != null ? ` · ${nodeRssi} dBm` : ''}`}
+      <Badge tone={publicChannel ? 'amber' : isGroup ? 'accent' : 'sky'} icon={publicChannel || isGroup ? ShieldCheck : undefined}>
+        {publicChannel
+          ? 'Public · anyone can join · Ed25519 signed'
+          : isGroup
+            ? 'Channel · shared PSK · Ed25519 signed'
+            : `Direct · sealed with static ECDH${nodeRssi != null ? ` · ${nodeRssi} dBm` : ''}`}
       </Badge>
       <p className="max-w-sm text-3xs leading-relaxed text-slate-600">
-        {isGroup
-          ? 'Anyone with the channel key can read and write; signatures prove who sent each message.'
-          : 'Only this node and you can decrypt these messages. Relays forward sealed envelopes and never see content.'}
+        {publicChannel
+          ? PUBLIC_CHANNEL_WARNING
+          : isGroup
+            ? 'Anyone with the channel key can read and write; signatures prove who sent each message.'
+            : 'Only this node and you can decrypt these messages. Relays forward sealed envelopes and never see content.'}
       </p>
     </div>
   );

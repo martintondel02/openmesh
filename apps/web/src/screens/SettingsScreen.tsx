@@ -38,6 +38,7 @@ import {
   voiceCapMs,
 } from '../lib/airtime';
 import { buildHttpBaseUrl } from '../lib/ws';
+import { formatBridgeResetCounts, type BridgeResetResult } from '../lib/bridge-admin';
 import { radioStateTone, transportState, transportStateLabel } from '../lib/radio-link';
 import { cn, formatBytes, formatSeconds, formatUptime, formatNodeId } from '../lib/utils';
 import { shortNodeId } from '../lib/display';
@@ -75,7 +76,8 @@ export function SettingsScreen() {
   const saveSettings = useAppStore((state) => state.saveSettings);
   const setDemoMode = useAppStore((state) => state.setDemoMode);
   const retryConnection = useAppStore((state) => state.retryConnection);
-  const resetIdentity = useAppStore((state) => state.resetIdentity);
+  const resetClient = useAppStore((state) => state.resetClient);
+  const resetBridgeData = useAppStore((state) => state.resetBridgeData);
   const pushToast = useAppStore((state) => state.pushToast);
   const uiMode = useAppStore((state) => state.uiMode);
   const setUiMode = useAppStore((state) => state.setUiMode);
@@ -101,9 +103,14 @@ export function SettingsScreen() {
   const [testState, setTestState] = useState<TestState>('idle');
   const [testDetail, setTestDetail] = useState<string | null>(null);
   const [qrOpen, setQrOpen] = useState(false);
-  const [resetOpen, setResetOpen] = useState(false);
-  const [resetText, setResetText] = useState('');
-  const [resetting, setResetting] = useState(false);
+  const [clientResetOpen, setClientResetOpen] = useState(false);
+  const [clientResetText, setClientResetText] = useState('');
+  const [clientResetting, setClientResetting] = useState(false);
+  const [bridgeResetOpen, setBridgeResetOpen] = useState(false);
+  const [bridgeResetText, setBridgeResetText] = useState('');
+  const [bridgeResetting, setBridgeResetting] = useState(false);
+  const [bridgeResetResult, setBridgeResetResult] = useState<BridgeResetResult | null>(null);
+  const [bridgeResetError, setBridgeResetError] = useState<string | null>(null);
   const [savingBridge, setSavingBridge] = useState(false);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -656,28 +663,83 @@ export function SettingsScreen() {
           </div>
         </SectionCard>
 
-        {/* Danger zone */}
+        {/* Danger zone: local browser reset + full bridge/data/identity reset */}
         <section className="rounded-2xl border border-rose-400/20 bg-rose-400/[0.03] p-4 md:p-5">
           <div className="flex items-center gap-2">
             <TriangleAlert className="h-4 w-4 text-rose-400" aria-hidden="true" />
             <h3 className="text-sm font-semibold text-rose-200">Danger zone</h3>
           </div>
-          <div className="mt-3 flex flex-wrap items-center justify-between gap-3">
-            <div className="min-w-0">
-              <p className="text-xs font-medium text-slate-200">Reset node identity</p>
-              <p className="mt-0.5 max-w-xl text-2xs leading-relaxed text-slate-500">
-                Generates a new Ed25519/X25519 keypair. Your node id changes, contacts must re-verify you, and
-                historical direct messages sealed to the old key cannot be recovered. In demo mode this simply
-                reseeds the local dataset.
-              </p>
+
+          <div className="mt-3 space-y-3 divide-y divide-rose-400/10">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div className="min-w-0">
+                <p className="text-xs font-medium text-slate-200">Reset this client</p>
+                <p className="mt-0.5 max-w-xl text-2xs leading-relaxed text-slate-500">
+                  Clears this browser&apos;s saved bridge URL and token, drafts, demo flags and local settings,
+                  then reloads into first-run state. It does <span className="font-medium text-slate-300">not</span>{' '}
+                  erase messages or contacts on the bridge, and does not change the node identity.
+                </p>
+              </div>
+              <Button variant="danger" size="md" icon={RotateCcw} onClick={() => setClientResetOpen(true)}>
+                Reset this client
+              </Button>
             </div>
-            <Button variant="danger" size="md" icon={RotateCcw} onClick={() => setResetOpen(true)}>
-              Reset identity
-            </Button>
+
+            <div className="flex flex-wrap items-center justify-between gap-3 pt-3">
+              <div className="min-w-0">
+                <p className="text-xs font-medium text-slate-200">Factory reset bridge data + new identity</p>
+                <p className="mt-0.5 max-w-xl text-2xs leading-relaxed text-slate-500">
+                  Wipes messages, contacts, channels, nodes, attachments and the activity log on the bridge, then
+                  generates a <span className="font-medium text-slate-300">new bridge node identity</span>. The
+                  Public Mesh channel is re-created and joined automatically. Your bearer token and radio settings
+                  are kept. Old contacts and QR codes become invalid.
+                </p>
+              </div>
+              <Button
+                variant="danger"
+                size="md"
+                icon={TriangleAlert}
+                onClick={() => {
+                  setBridgeResetError(null);
+                  setBridgeResetOpen(true);
+                }}
+                disabled={mode === 'demo'}
+                title={mode === 'demo' ? 'Connect to a real bridge to wipe bridge data' : undefined}
+              >
+                Wipe bridge data
+              </Button>
+            </div>
+            {mode === 'demo' ? (
+              <p className="pt-2 text-3xs leading-relaxed text-slate-600">
+                Bridge reset is disabled in demo mode. Turn demo mode off and connect to the bridge first.
+              </p>
+            ) : null}
           </div>
+
+          {bridgeResetResult ? (
+            <div className="mt-3 rounded-xl border border-emerald-400/25 bg-emerald-400/[0.05] p-3 text-2xs leading-relaxed text-emerald-100/90">
+              <p className="flex items-center gap-1.5 font-medium text-emerald-200">
+                <CheckCircle2 className="h-3.5 w-3.5" aria-hidden="true" />
+                Bridge reset complete{bridgeResetResult.identity_changed ? ' — new identity' : ''}
+              </p>
+              <p className="mt-1">
+                Cleared {formatBridgeResetCounts(bridgeResetResult.counts)}. Public Mesh is re-created and open.
+              </p>
+              {bridgeResetResult.node_id ? (
+                <p className="mt-1">
+                  New node id: <span className="font-mono text-emerald-200">{formatNodeId(bridgeResetResult.node_id)}</span>
+                  {bridgeResetResult.old_node_id ? (
+                    <span className="text-emerald-200/60"> (was {formatNodeId(bridgeResetResult.old_node_id)})</span>
+                  ) : null}
+                  . Re-share your new QR; old contact cards and QR codes no longer work.
+                </p>
+              ) : null}
+            </div>
+          ) : null}
+
           <p className="mt-3 text-3xs leading-relaxed text-slate-600">
-            The bridge v0.1 API has no reset endpoint yet; live resets are done by restarting the bridge with{' '}
-            <InlineCode>--reset-identity</InlineCode>.
+            The bridge reset is an authenticated operation and is irreversible. It is never performed automatically;
+            the Public Mesh channel is public by design and anyone with OpenMesh can read and post there.
           </p>
         </section>
 
@@ -698,60 +760,142 @@ export function SettingsScreen() {
       />
 
       <Modal
-        open={resetOpen}
+        open={clientResetOpen}
         onClose={() => {
-          setResetOpen(false);
-          setResetText('');
+          if (clientResetting) return;
+          setClientResetOpen(false);
+          setClientResetText('');
         }}
-        title="Reset node identity"
-        description="This is irreversible. Type RESET to confirm."
+        title="Reset this client?"
+        description="Clears this browser's saved state and reloads. The bridge and its node identity are not touched."
         icon={RotateCcw}
         size="sm"
-        dismissible={!resetting}
+        dismissible={!clientResetting}
         footer={
           <>
             <Button
               variant="ghost"
               onClick={() => {
-                setResetOpen(false);
-                setResetText('');
+                setClientResetOpen(false);
+                setClientResetText('');
               }}
-              disabled={resetting}
+              disabled={clientResetting}
             >
               Cancel
             </Button>
             <Button
               variant="danger"
               icon={RotateCcw}
-              loading={resetting}
-              disabled={resetText !== 'RESET'}
+              loading={clientResetting}
+              disabled={clientResetText !== 'RESET'}
               onClick={async () => {
-                setResetting(true);
+                setClientResetting(true);
                 try {
-                  await resetIdentity();
-                  setResetOpen(false);
-                  setResetText('');
+                  await resetClient();
                 } finally {
-                  setResetting(false);
+                  setClientResetting(false);
                 }
               }}
             >
-              Reset identity
+              Reset this client
             </Button>
           </>
         }
       >
         <div className="space-y-3">
-          <Callout tone="danger" icon={AlertTriangle} title="Every peer will see a new node">
-            Your contacts will need to re-add the new identity. Messages encrypted to the old key are gone.
+          <Callout tone="danger" icon={AlertTriangle} title="This browser starts from scratch">
+            Your saved bridge URL/token, drafts, demo flags and read markers are removed. Messages, contacts and the
+            node identity on the bridge are unchanged. To create a new identity and wipe bridge history, use the
+            bridge wipe action instead.
           </Callout>
           <Field label="Type RESET to confirm">
             {({ id }) => (
               <TextInput
                 id={id}
-                value={resetText}
-                onChange={(event) => setResetText(event.target.value)}
+                value={clientResetText}
+                onChange={(event) => setClientResetText(event.target.value)}
                 placeholder="RESET"
+                autoComplete="off"
+                className="font-mono"
+              />
+            )}
+          </Field>
+        </div>
+      </Modal>
+
+      <Modal
+        open={bridgeResetOpen}
+        onClose={() => {
+          if (bridgeResetting) return;
+          setBridgeResetOpen(false);
+          setBridgeResetText('');
+          setBridgeResetError(null);
+        }}
+        title="Wipe bridge data and create a new identity?"
+        description="Irreversible: this clears the bridge's mesh data and regenerates its node identity. Type WIPE to confirm."
+        icon={TriangleAlert}
+        size="md"
+        dismissible={!bridgeResetting}
+        footer={
+          <>
+            <Button
+              variant="ghost"
+              onClick={() => {
+                setBridgeResetOpen(false);
+                setBridgeResetText('');
+                setBridgeResetError(null);
+              }}
+              disabled={bridgeResetting}
+            >
+              Cancel
+            </Button>
+            <Button
+              variant="danger"
+              icon={TriangleAlert}
+              loading={bridgeResetting}
+              disabled={bridgeResetText !== 'WIPE'}
+              onClick={async () => {
+                setBridgeResetting(true);
+                setBridgeResetError(null);
+                try {
+                  const result = await resetBridgeData({ newIdentity: true });
+                  setBridgeResetResult(result);
+                  setBridgeResetOpen(false);
+                  setBridgeResetText('');
+                } catch (cause) {
+                  setBridgeResetError(cause instanceof Error ? cause.message : String(cause));
+                } finally {
+                  setBridgeResetting(false);
+                }
+              }}
+            >
+              Wipe and create new identity
+            </Button>
+          </>
+        }
+      >
+        <div className="space-y-3">
+          <Callout tone="danger" icon={AlertTriangle} title="Every contact and QR code will be invalid">
+            <ul className="list-disc space-y-1 pl-4">
+              <li>Messages, contacts, channels, nodes, attachments and the activity log are wiped on the bridge.</li>
+              <li>The bridge gets a new node id and keypair; contacts must re-add and re-verify you.</li>
+              <li>Public Mesh is re-created and joined automatically (it cannot be left or deleted).</li>
+              <li>The bridge bearer token and radio/region settings are kept.</li>
+            </ul>
+          </Callout>
+          {bridgeResetError ? (
+            <p className="flex items-start gap-1.5 text-2xs leading-relaxed text-rose-300">
+              <TriangleAlert className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+              {bridgeResetError}
+            </p>
+          ) : null}
+          <Field label="Type WIPE to confirm">
+            {({ id }) => (
+              <TextInput
+                id={id}
+                value={bridgeResetText}
+                onChange={(event) => setBridgeResetText(event.target.value)}
+                placeholder="WIPE"
                 autoComplete="off"
                 className="font-mono"
               />

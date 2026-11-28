@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Hash, MessageSquarePlus, Plus, Search, ShieldCheck, Users, X } from 'lucide-react';
+import { Globe, Hash, MessageSquarePlus, Plus, Search, ShieldCheck, Users, X } from 'lucide-react';
 import { useAppStore } from '../../store/app';
 import { selectConversations } from '../../store/selectors';
-import { formatRelativeTime } from '../../lib/utils';
+import { cn, formatRelativeTime } from '../../lib/utils';
+import { PUBLIC_CHANNEL_WARNING } from '../../lib/public-channel';
 import { Avatar, EmptyState, IconButton, SectionTitle, SegmentedControl } from '../../components/ui/primitives';
 import { DeliveryTicks } from '../../components/ui/signals';
 import { GetStartedCard } from './GetStartedCard';
@@ -219,19 +220,28 @@ function ConversationRow({
   onSelect: () => void;
 }) {
   const isGroup = conversation.kind === 'group';
+  const isPublic = isGroup && Boolean(conversation.public);
   return (
     <button
       type="button"
       onClick={onSelect}
       aria-current={active ? 'true' : undefined}
+      title={isPublic ? PUBLIC_CHANNEL_WARNING : undefined}
       className={
         'focus-ring relative flex w-full items-start gap-2.5 rounded-lg px-2 py-2 text-left transition-colors ' +
         (active ? 'bg-white/[0.07]' : 'hover:bg-white/[0.035]')
       }
     >
       {isGroup ? (
-        <span className="relative grid h-10 w-10 shrink-0 place-items-center rounded-xl border border-emerald-400/20 bg-gradient-to-br from-emerald-400/20 to-sky-500/10 text-emerald-300">
-          <Hash className="h-4 w-4" aria-hidden="true" />
+        <span
+          className={cn(
+            'relative grid h-10 w-10 shrink-0 place-items-center rounded-xl border',
+            isPublic
+              ? 'border-amber-300/30 bg-gradient-to-br from-amber-300/20 to-sky-500/10 text-amber-200'
+              : 'border-emerald-400/20 bg-gradient-to-br from-emerald-400/20 to-sky-500/10 text-emerald-300',
+          )}
+        >
+          {isPublic ? <Globe className="h-4 w-4" aria-hidden="true" /> : <Hash className="h-4 w-4" aria-hidden="true" />}
         </span>
       ) : (
         <Avatar name={conversation.name} seed={conversation.id} size="md" online={conversation.online} />
@@ -241,6 +251,14 @@ function ConversationRow({
           <span className={'truncate text-[13px] font-medium ' + (conversation.unread > 0 ? 'text-white' : 'text-slate-200')}>
             {conversation.name}
           </span>
+          {isPublic ? (
+            <span
+              className="shrink-0 rounded border border-amber-300/30 bg-amber-300/10 px-1 py-px text-[9px] font-semibold uppercase tracking-[0.08em] text-amber-200"
+              title={PUBLIC_CHANNEL_WARNING}
+            >
+              Public
+            </span>
+          ) : null}
           <span className="ml-auto shrink-0 text-3xs tabular-nums text-slate-500">
             {conversation.lastAt ? formatRelativeTime(conversation.lastAt, now) : ''}
           </span>

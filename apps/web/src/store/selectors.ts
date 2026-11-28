@@ -8,6 +8,7 @@ import type { AppState } from './app';
 import { buildConversations } from './reducers';
 import { formatLastSeen, formatRole } from '../lib/utils';
 import { displayName } from '../lib/display';
+import { PUBLIC_CHANNEL_SUBTITLE, isPublicChannel } from '../lib/public-channel';
 
 type StateSlice = Pick<
   AppState,
@@ -49,12 +50,15 @@ export function selectConversations(state: StateSlice, nowMs = Date.now()): Conv
     const node = state.nodes[row.id];
     const channel = state.channels[row.id];
     const online = row.kind === 'direct' ? (node ? nowMs - node.last_seen_ms < 10 * 60_000 : false) : true;
+    const publicChannel = row.kind === 'group' && isPublicChannel(channel);
     const subtitle =
       row.kind === 'direct'
         ? node
           ? `${formatRole(node.class)} · ${node.hops} ${node.hops === 1 ? 'hop' : 'hops'}${online ? '' : ` · ${formatLastSeen(node.last_seen_ms, nowMs)}`}`
           : 'Direct message'
-        : `${channel ? 'Shared channel' : 'Channel'} · E2E encrypted`;
+        : publicChannel
+          ? PUBLIC_CHANNEL_SUBTITLE
+          : `${channel ? 'Shared channel' : 'Channel'} · E2E encrypted`;
     return {
       id: row.id,
       kind: row.kind,
@@ -69,8 +73,11 @@ export function selectConversations(state: StateSlice, nowMs = Date.now()): Conv
       hops: node?.hops,
       delivery: row.delivery,
       outgoing: row.outgoing,
+      public: row.public,
+      pinned: row.pinned,
     } satisfies Conversation;
-  });
+  })
+    .sort((a, b) => Number(Boolean(b.pinned)) - Number(Boolean(a.pinned)) || b.lastAt - a.lastAt);
 }
 
 export interface ThreadHeaderModel {
@@ -83,6 +90,7 @@ export interface ThreadHeaderModel {
   channel: Channel | null;
   online: boolean;
   address: string;
+  public: boolean;
 }
 
 export function selectThreadHeader(state: StateSlice, nowMs = Date.now()): ThreadHeaderModel | null {
@@ -106,13 +114,17 @@ export function selectThreadHeader(state: StateSlice, nowMs = Date.now()): Threa
       channel: null,
       online,
       address: thread.id,
+      public: false,
     };
   }
   const channel = state.channels[thread.id] ?? null;
   const count = state.groupMessages.filter((m) => m.channel_id === thread.id).length;
+  const publicChannel = isPublicChannel(channel);
   return {
     name: channel?.name ?? thread.id.slice(0, 8),
-    subtitle: `Channel · ${count} ${count === 1 ? 'message' : 'messages'} · signed`,
+    subtitle: publicChannel
+      ? `${PUBLIC_CHANNEL_SUBTITLE} · ${count} ${count === 1 ? 'message' : 'messages'} · signed`
+      : `Channel · ${count} ${count === 1 ? 'message' : 'messages'} · signed`,
     kind: 'group',
     role: null,
     hops: null,
@@ -120,6 +132,7 @@ export function selectThreadHeader(state: StateSlice, nowMs = Date.now()): Threa
     channel,
     online: true,
     address: thread.id,
+    public: publicChannel,
   };
 }
 

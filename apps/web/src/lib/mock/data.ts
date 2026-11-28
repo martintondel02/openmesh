@@ -38,6 +38,7 @@ import { generateChannelPsk } from '../utils';
 import { bytesToBase64, hexToBytes } from '../utils';
 import { mulberry32 } from '../audio';
 import { buildChannelLink, buildContactLink } from '../links';
+import { PUBLIC_CHANNEL_ID, PUBLIC_CHANNEL_NAME, PUBLIC_CHANNEL_PSK } from '../public-channel';
 import { buildBackboneConnectionString, buildFallbackSetup } from '../backbone';
 import { defaultRegulatoryOverride, demoRegulatoryConfigFields } from '../regulatory';
 
@@ -337,6 +338,7 @@ export function createDemoDataset(nowMs: number = Date.now()): DemoDataset {
   const channelPsks: Record<string, string> = {
     [DEMO_CHANNEL_FAMILY]: seededBase64(101, 32),
     [DEMO_CHANNEL_TUR]: seededBase64(202, 32),
+    [PUBLIC_CHANNEL_ID]: PUBLIC_CHANNEL_PSK,
   };
 
   const ownPosition = position(59.9215, 10.758, nowMs - 4 * MINUTE, 61, 7);
@@ -469,6 +471,8 @@ export function createDemoDataset(nowMs: number = Date.now()): DemoDataset {
   const channels: ConfigChannel[] = [
     { channel_id: DEMO_CHANNEL_FAMILY, name: 'familien', psk_set: true },
     { channel_id: DEMO_CHANNEL_TUR, name: 'nordmarka-tur', psk_set: true },
+    // Built-in public channel (appended last so demo indices/history seeds stay stable).
+    { channel_id: PUBLIC_CHANNEL_ID, name: PUBLIC_CHANNEL_NAME, psk_set: true, public: true },
   ];
 
   const trailPhoto: DemoMedia = {

@@ -38,7 +38,7 @@ export function BeginnerSettings({ setMode }: { setMode: (mode: 'beginner' | 'ad
   const announceNow = useAppStore((state) => state.announceNow);
   const ownName = useAppStore((state) => state.ownName);
   const saveSettings = useAppStore((state) => state.saveSettings);
-  const resetIdentity = useAppStore((state) => state.resetIdentity);
+  const setScreen = useAppStore((state) => state.setScreen);
   const openOnboarding = useAppStore((state) => state.openOnboarding);
   const openHelp = useAppStore((state) => state.openHelp);
   const pushToast = useAppStore((state) => state.pushToast);
@@ -394,10 +394,24 @@ export function BeginnerSettings({ setMode }: { setMode: (mode: 'beginner' | 'ad
                 Start over
               </h3>
               <p className="mt-1.5 text-3xs leading-relaxed text-slate-500">
-                Resetting creates a new identity. Contacts must verify you again. Back up first; advanced settings explain the details.
+                A full reset wipes the bridge data and creates a new node identity; contacts and QR codes must be
+                re-verified. It needs a typed confirmation, so it lives in Settings → Danger zone.
               </p>
-              <Button variant="danger" size="sm" fullWidth className="mt-2" onClick={() => void resetIdentity()}>
-                Reset this node…
+              <Button
+                variant="danger"
+                size="sm"
+                fullWidth
+                className="mt-2"
+                onClick={() => {
+                  setScreen('settings');
+                  pushToast({
+                    kind: 'info',
+                    title: 'Full reset lives in Settings',
+                    message: 'Open Settings → Danger zone to reset this client or wipe the bridge and create a new identity (typed confirmation).',
+                  });
+                }}
+              >
+                Go to reset options…
               </Button>
             </section>
           </div>

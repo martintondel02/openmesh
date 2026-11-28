@@ -56,6 +56,23 @@ short fingerprint or scanning a QR proves you have the right public key.
 3. Save. Direct messages to them are now end-to-end encrypted with their key; the app shows the
    verification state in their contact card.
 
+### Factory reset (new identity)
+
+A full reset clears all messages, media, contacts, channels, discovered nodes and the activity log,
+then generates **new identity keys**: your node id and contact QR change, and old contacts/QR codes
+stop reaching you. The radio pairing and the API/bridge token are kept.
+
+* **Bridge/PC:** Settings → Danger zone → **Wipe bridge data** (authenticated `WIPE` confirmation).
+  The bridge creates the new identity in place, re-creates and joins the built-in **Public Mesh**
+  channel, and pushes the fresh state to connected clients; no restart is needed.
+* **Phone:** Settings → Danger zone → **Factory reset** — clears Room/prefs/engine state and the
+  identity seed, then restarts onboarding with fresh keys and Public Mesh.
+
+Resetting **this browser client** is a separate, safer action: it only clears the saved bridge
+URL/token, drafts and local flags, then reloads into first-run state without touching bridge data
+or identity. There is no undo for a full reset — use the identity backup below if you want to keep
+your old identity instead.
+
 ### Back up your identity
 
 1. Settings → Identity → **Back up identity**. Export the encrypted backup (choose a strong
@@ -72,9 +89,12 @@ short fingerprint or scanning a QR proves you have the right public key.
 * **Verification states** — the UI distinguishes "saved", "verified" (fingerprint compared) and
   "TOFU" (first-seen, unverified). A verified badge means "the key has not changed since you
   verified it"; it does not prove the person's legal name.
-* **Identity reset** — a reset is intentionally not an API call: restarting with a fresh
-  `--data-dir` (or removing `identity.key` while the bridge is stopped) creates a new identity.
-  All contacts must re-add you, and your old direct messages become unreadable.
+* **Identity reset** — the bridge exposes an authenticated, confirmation-gated
+  `POST /api/admin/reset` (`{"confirm":"WIPE","new_identity":true}`). It clears the store and
+  regenerates the identity seed in place, re-creates/joins Public Mesh, and pushes fresh `hello`,
+  `channels` and `status` events; clients must drop cached contacts/nodes. `new_identity:false`
+  clears data but keeps the node id. Restarting the bridge afterwards is only needed if a separate
+  integration (for example a backbone identity) must pick up the new identity.
 * **Multiple devices** — each bridge has its own identity. There is no multi-device sync for
   direct messages in this release; channels are the practical way to share across devices until
   multi-device lands. Do not copy `identity.key` onto two simultaneously running bridges — frame

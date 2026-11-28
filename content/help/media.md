@@ -11,10 +11,11 @@ verified by SHA-256 on the other side. The app compresses images, encodes voice,
 **actual size and estimated airtime** before sending.
 
 * **Images** — four tiers: **Tiny** (≤256 px), **Medium** (≤512 px), **High** (≤1024 px) and
-  **Original**. Tiny/Medium/High are compressed: the app prefers **AVIF** (a newer compressed image
-  format) when your browser or device can really create it, and otherwise falls back to **WebP**
-  (or JPEG) with the correct file type. Original is only for backbone/USB transfers or when you
-  explicitly accept the cost.
+  **Original**. Tiny/Medium/High are compressed: the app encodes both **AVIF** (a newer compressed
+  image format) and **WebP** at matching visual quality and sends whichever file is smaller (WebP
+  wins a tie). If the AVIF encoder cannot run on your device, it sends WebP (or JPEG) with the
+  correct file type. Original is only for backbone/USB transfers or when you explicitly accept the
+  cost.
 * **Voice notes** — three tiers:
   * **Tiny** — Codec2 at ~1.3 kbps: an 8-second note is about **1.4 KiB** (robotic but
     intelligible).
@@ -25,21 +26,21 @@ verified by SHA-256 on the other side. The app compresses images, encodes voice,
 
 ## Why it matters
 
-A radio channel is shared. One Medium photo from our test (512 px, about 9 KiB) keeps the air
-busy for around half a minute at the default radio profile, and every relay repeats it. On a 10 %
-duty-cycle band (EU 869.4–869.65 MHz) that is roughly 9 % of your hourly transmit budget; a Tiny
-photo (about 3 KiB) uses about 3 %. On a 1 % band the Medium photo alone is nearly the whole
-hourly budget. Tiny voice exists so a short message can get through even when an image cannot:
-8 seconds of Codec2 costs less than a thumbnail.
+A radio channel is shared. One Medium photo from our test (512 px, about 7 KiB) keeps the air
+busy for around 25 seconds at the default radio profile, and every relay repeats it. On a 10 %
+duty-cycle band (EU 869.4–869.65 MHz) that is roughly 7 % of your hourly transmit budget; a Tiny
+photo (about 2.6 KiB) uses about 2.5 %. On a 1 % band the Medium photo alone is most of the hourly
+budget. Tiny voice exists so a short message can get through even when an image cannot: 8 seconds
+of Codec2 costs less than a thumbnail.
 
 ## Quick start
 
 1. In a chat, tap **attach** and choose a tier — **Tiny** is a good default for photos; for voice,
    **Tiny** is the default on slow profiles.
 2. The app compresses/encodes and shows **actual size, format, estimated airtime and % of the
-   hourly duty budget** before sending. The tier tiles also show which format your browser can
-   produce — AVIF where it can really encode it, otherwise WebP. If the tier is too big for the
-   current radio profile, the app suggests the next smaller one.
+   hourly duty budget** before sending. The tier tiles show the format Auto picked for that image —
+   the smaller of AVIF and WebP. If the tier is too big for the current radio profile, the app
+   suggests the next smaller one.
 3. Send. You will see transfer progress. On the receiving side the bubble shows **Receiving…**
    until the transfer completes, then the image renders inline (tap it for full size) or the voice
    note plays in the thread (tap to play, tap again to stop).
@@ -51,21 +52,21 @@ hourly budget. Tiny voice exists so a short message can get through even when an
 
 | Media tier | What you get | 8 s voice / test-photo size | Airtime at `MEDIUM_FAST` (EU868) |
 | --- | --- | --- | --- |
-| Image Tiny | ≤256 px, AVIF preferred / WebP fallback | ≈3 KiB in our test photo | ~11 s |
-| Image Medium | ≤512 px, AVIF preferred / WebP fallback | ≈9 KiB | ~30 s |
-| Image High | ≤1024 px, AVIF preferred / WebP fallback | ≈17 KiB (larger photos more) | ~1 min |
+| Image Tiny | ≤256 px, Auto (smaller of AVIF/WebP) | ≈2.6 KiB in our test photo | ~9 s |
+| Image Medium | ≤512 px, Auto (smaller of AVIF/WebP) | ≈7.3 KiB | ~24 s |
+| Image High | ≤1024 px, Auto (smaller of AVIF/WebP) | ≈16 KiB (larger photos more) | ~51 s |
 | Voice Tiny | Codec2 1.3 kbps | ≈ 1.4 KiB / 8 s | ~7 s |
 | Voice Medium | Codec2 3.2 kbps | ≈ 3.2 KiB / 8 s | ~13 s |
 | Voice High | Opus 12 kbps | ≈ 12 KiB / 8 s | ~43 s |
 
 The image figures are **measured examples**, not guarantees: one 768×512 test photo in a desktop
-browser (November 2026), with no relays or retries, compressed to roughly 3 KiB / 9 KiB / 17 KiB
+browser (November 2026), with no relays or retries, encoded to roughly 2.6 KiB / 7.3 KiB / 16 KiB
 for Tiny / Medium / High. Your photo and encoder will differ — the app always shows the real bytes
-before sending. On our Android test device the Tiny tier measured 3,406 B for the same fixture
-photo, down from 5,652 B before the smaller tiers. Current desktop Chromium **cannot encode AVIF**
-(`toBlob` returns a PNG blob, which the app rejects); it quietly sends WebP with the correct
-`image/webp` type. Clients that can genuinely encode AVIF use it first, and received AVIF images
-render inline on clients that can decode them.
+before sending. The app downloads its AVIF encoder the first time you send an image (about 400 KiB
+compressed, only once per session, in the background); if that download or your device cannot run
+it, the app sends WebP with the correct `image/webp` type instead. Content-dependent comparison
+means some photos come out smaller as WebP and are sent that way. Received AVIF images render
+inline on clients that can decode them.
 
 The profile's default cap still applies (e.g. 6 KiB on `LONG_FAST`), and voice duration is capped
 at `min(tier max, profile cap / bytes-per-second)` — usually 30 s for Tiny, 20 s for Medium and

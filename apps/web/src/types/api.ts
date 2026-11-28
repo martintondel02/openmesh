@@ -253,6 +253,8 @@ export interface ConfigChannel {
   channel_id: string;
   name: string;
   psk_set: boolean;
+  /** Built-in public channel flag (bridge task-40; older bridges omit it). */
+  public?: boolean;
 }
 
 export interface ConfigData {
@@ -306,6 +308,8 @@ export interface ChannelCreatedData {
   name: string;
   /** Returned exactly once, at creation time. Never returned afterwards. */
   psk?: string;
+  /** False for user channels; the built-in Public Mesh is created by the bridge itself. */
+  public?: boolean;
 }
 
 export interface SendResultData {
@@ -442,6 +446,8 @@ export interface Channel {
   channel_id: string;
   name: string;
   psk_set: boolean;
+  /** Built-in public channel flag (bridge task-40; older bridges omit it). */
+  public?: boolean;
   seeded?: boolean;
 }
 
@@ -467,5 +473,8 @@ export interface Conversation {
   hops?: number;
   delivery?: DeliveryState;
   outgoing?: boolean;
+  /** Pinned to the top of the channel list (the built-in Public Mesh). */
   pinned?: boolean;
+  /** Built-in public channel (no privacy; leave/delete hidden). */
+  public?: boolean;
 }

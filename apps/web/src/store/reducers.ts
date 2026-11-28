@@ -19,6 +19,7 @@ import type {
   Position,
 } from '../types/api';
 import { displayName } from '../lib/display';
+import { PUBLIC_CHANNEL_SUBTITLE, isPublicChannel } from '../lib/public-channel';
 
 /* ------------------------------------------------------------------ */
 /* Messages                                                            */
@@ -384,6 +385,9 @@ export interface ConversationSummary {
   unread: number;
   delivery?: DeliveryState;
   outgoing?: boolean;
+  /** Built-in public channel row (pinned to the top; PUBLIC badge). */
+  public?: boolean;
+  pinned?: boolean;
 }
 
 /**
@@ -424,15 +428,21 @@ export function buildConversations(source: ConversationSource): ConversationSumm
   for (const channel of Object.values(channels)) {
     const channelMessages = groupMessages.filter((m) => m.channel_id === channel.channel_id);
     const last = channelMessages[channelMessages.length - 1];
+    const publicChannel = isPublicChannel(channel);
     rows.push({
       id: channel.channel_id,
       kind: 'group',
       name: channel.name,
       address: channel.channel_id,
       subtitle: `${channelMessages.length} ${channelMessages.length === 1 ? 'message' : 'messages'}`,
-      lastText: last ? describeLastGroupMessage(last) : 'Channel created — say hello',
+      lastText: last
+        ? describeLastGroupMessage(last)
+        : publicChannel
+          ? PUBLIC_CHANNEL_SUBTITLE
+          : 'Channel created — say hello',
       lastAt: last?.sent_at_ms ?? 0,
       unread: last && !last.outgoing ? 1 : 0,
+      ...(publicChannel ? { public: true, pinned: true } : {}),
     });
   }
 

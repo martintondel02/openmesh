@@ -6,13 +6,31 @@ can tell who wrote them. They are the easiest way to bring a family, team or eve
 ## What it is
 
 * **Channel** — an address derived from a shared 32-byte key (PSK), plus a display name.
-* **Invite** — an `openmesh://channel?name=…&id=…&psk=…` link (or QR). Anyone with it can join,
-  read and write. Treat it like a password, not a public URL.
+* **Invite** — an `openmesh://channel?name=…&psk=…` link (or QR; older links may also include an
+  informational `id=`). Anyone with it can join, read and write. Treat it like a password, not a
+  public URL (the built-in Public Mesh is the deliberate exception — its key is published).
 * **Membership** — there is no central member list on radio: your node accepts messages for every
   channel it has a key for. The app shows known senders from their signed messages and announces.
 * **Signatures** — each channel message carries the sender's public key and an Ed25519 signature,
   so members can verify authorship even though the group key is shared. A member can copy another
   member's display name; the signature (and node id) is what actually identifies them.
+
+## Public Mesh (built-in)
+
+Every OpenMesh client ships with one built-in **Public Mesh** channel, so a fresh install can say
+hello even before anyone shares an invite.
+
+* **Canonical address** — the channel id is derived from the published channel key, not a cosmetic
+  invite id: `a16d63142854cef4`. The join URL carries only the name and published PSK
+  (`openmesh://channel?name=Public%20Mesh&psk=…`); the app picks it up automatically and pins it at
+  the top of the channel list with a **PUBLIC** badge.
+* **Public by design** — the channel key is published in the app. **Anyone with OpenMesh can read
+  and post there.** Message signatures still prove which node wrote a message, but there is no
+  privacy: do not post personal data, addresses, or anything you would not put on a public board.
+* **Always present** — it cannot be left or deleted locally; if it is ever missing (fresh install,
+  factory reset, engine state reset) the app re-creates/joins it on the next start.
+* **Use it for** — first contact, mesh-wide notices, testing that a new node can see and be seen.
+  Move private conversations to a direct message or a private channel.
 
 ## Why it matters
 
@@ -37,6 +55,12 @@ the group cannot un-share what they already have.
 1. **Contacts → Import invite**, paste `openmesh://channel?…`, or scan the QR.
 2. Confirm the channel name and join. The app stores the key and starts accepting messages.
 3. Say hello; existing members will see your signed message and can save you as a contact.
+
+### Join the public channel
+
+Public Mesh is already there on a fresh install or after a factory reset — no invite needed. It
+is pinned at the top of the channel list and marked **PUBLIC**. Read the banner before posting:
+anyone with the app can read and post in this channel.
 
 ### Invite flow that respects privacy
 
@@ -64,6 +88,12 @@ the group cannot un-share what they already have.
   channel use text-first on slow profiles and avoid simultaneous media sends.
 * **Moderation** — there are no admins on radio. "Remove member" means re-create the channel with
   a new key. The app can hide a channel locally, but that is cosmetic.
+* **Public Mesh is public by design** — its 32-byte PSK is published, so treat every post there as
+  visible to anyone who installs OpenMesh. Never post addresses, phone numbers, private location
+  details or anything you would not put on a public noticeboard. Signatures prove *which node*
+  wrote a message, not that the sender is trustworthy. The channel has the canonical id
+  `a16d63142854cef4` (derived from the published key); it is pinned to the top, marked PUBLIC, and
+  cannot be left or deleted.
 * **API** — `GET /api/channels` lists joined channels without keys; `POST /api/channels` creates
   one and returns the invite once; `POST /api/channels/join` accepts an invite URL. Writing through
   an agent requires an MCP write tool and is recorded in the activity log.
@@ -77,6 +107,7 @@ the group cannot un-share what they already have.
 | Everyone appears with the same name | Display names are self-chosen and unsigned metadata | Rely on node ids/signatures; save verified contacts. |
 | New member sees no history | Plain repeater/room server does not backfill | Expected; a room server role or recent messages only. |
 | Channel messages cost a lot of airtime | Group fan-out and media | Send text, smaller media, or use a faster profile locally. |
+| "Cannot leave Public Mesh" | The public channel is built in and published | Expected; it cannot be left or deleted and is recreated on the next start. |
 
 ## Related topics
 

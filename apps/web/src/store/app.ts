@@ -77,6 +77,17 @@ import { MockTransport } from '../lib/mock/transport';
 import { createDemoDataset } from '../lib/mock/data';
 import type { DemoDataset } from '../lib/mock/data';
 import { localId } from '../lib/utils';
+import { clearClientLocalState, clientResetUrl } from '../lib/client-reset';
+import { formatBridgeResetCounts, requestBridgeReset, type BridgeResetResult } from '../lib/bridge-admin';
+import {
+  PUBLIC_CHANNEL_ID,
+  PUBLIC_CHANNEL_NAME,
+  PUBLIC_CHANNEL_PSK,
+  findPublicChannel,
+  isPublicChannel,
+  publicChannelLeaveBlocked,
+  shouldAutoSelectPublicChannel,
+} from '../lib/public-channel';
 import { DEFAULT_PROFILE_ID, DEFAULT_REGION_ID } from '../lib/airtime';
 
 export type DemoReason = 'forced' | 'user' | 'offline' | 'none';
@@ -430,7 +441,10 @@ export interface AppState {
   requestChannelInvite: (channelId: string) => Promise<string>;
   clearLastCreatedChannel: () => void;
   clearInvite: () => void;
-  resetIdentity: () => Promise<void>;
+  /** Clear this browser's local state (token/settings/drafts/demo flags/read markers) and reload. */
+  resetClient: () => Promise<void>;
+  /** Authenticated bridge wipe + identity regeneration (task-40); live mode only. */
+  resetBridgeData: (options?: { newIdentity?: boolean }) => Promise<BridgeResetResult>;
   setOwnPositionFromGeo: (position: Position, accuracyM?: number | null) => void;
   loadBackbone: () => Promise<void>;
 
@@ -649,9 +663,55 @@ function findOptimisticGroup(messages: ChatGroupMessage[], data: GroupMessageDat
   );
 }
 
+let publicJoinAttempted = false;
+
+/** True after the user/browser asked for a specific thread via `?thread=` (deep link wins). */
+function hasThreadDeepLink(): boolean {
+  try {
+    return Boolean(new URLSearchParams(window.location.search).get('thread'));
+  } catch {
+    return false;
+  }
+}
+
+/** Legacy-bridge fallback: join the built-in Public Mesh when the channels snapshot omits it. */
+function maybeAutoJoinPublicChannel(get: GetState): void {
+  const state = get();
+  if (publicJoinAttempted || state.mode !== 'live' || !transport) return;
+  if (Object.values(state.channels).some((channel) => isPublicChannel(channel))) return;
+  // Raw send rather than the UI action: join_channel replies with a `channels` snapshot on the
+  // task-40 bridge, so we must not treat that payload as a `channel_created` result.
+  publicJoinAttempted = true;
+  try {
+    transport.send('join_channel', { name: PUBLIC_CHANNEL_NAME, psk: PUBLIC_CHANNEL_PSK });
+  } catch {
+    // Older/offline bridge: the next startup sync or a manual join can still surface it.
+  }
+}
+
+/** On a fresh/empty live client, open the pinned Public Mesh channel automatically. */
+function maybeSelectPublicChannel(set: SetState, get: GetState): void {
+  const state = get();
+  const publicChannel = findPublicChannel(state.channels);
+  if (!publicChannel) return;
+  if (
+    !shouldAutoSelectPublicChannel({
+      mode: state.mode,
+      hasActiveThread: Boolean(state.activeThread),
+      hasThreadDeepLink: hasThreadDeepLink(),
+      messageCount: state.messages.length + state.groupMessages.length,
+      channels: state.channels,
+    })
+  ) {
+    return;
+  }
+  set({ activeThread: { kind: 'group', id: publicChannel.channel_id } });
+}
+
 function attachTransport(set: SetState, get: GetState, next: MeshTransport): void {
   transport?.dispose();
   transport = next;
+  publicJoinAttempted = false;
   next.onEvent((event) => get().handleEvent(event));
   next.onStatus((status) => get().handleStatus(status));
   set({ mode: next.mode });
@@ -1520,8 +1580,16 @@ export const useAppStore = create<AppState>()((set, get) => ({
   },
 
   leaveChannel: (channelId) => {
-    transport?.send('leave_channel', { channel_id: channelId });
     const state = get();
+    if (publicChannelLeaveBlocked(channelId, state.channels)) {
+      get().pushToast({
+        kind: 'warn',
+        title: 'Public Mesh cannot be left',
+        message: 'The built-in public channel is recreated by the bridge and is always available.',
+      });
+      return;
+    }
+    transport?.send('leave_channel', { channel_id: channelId });
     const channels = { ...state.channels };
     delete channels[channelId];
     set({
@@ -1549,26 +1617,69 @@ export const useAppStore = create<AppState>()((set, get) => ({
   clearLastCreatedChannel: () => set({ lastCreatedChannel: null }),
   clearInvite: () => set({ lastInvite: null }),
 
-  resetIdentity: async () => {
-    if (get().mode === 'demo') {
-      const dataset = createDemoDataset();
-      get().hydrateDemo(dataset);
-      set({ activeThread: null, screen: 'settings' });
-      get().pushToast({
-        kind: 'success',
-        title: 'Demo identity reset',
-        message: 'A fresh seeded identity was generated locally.',
-      });
-      return;
+  resetClient: async () => {
+    try {
+      transport?.dispose();
+    } catch {
+      // Best effort: the reload below drops the socket anyway.
     }
-    get().pushToast({
-      kind: 'warn',
-      title: 'Reset from the bridge, not the UI',
-      message:
-        'The bridge API does not expose identity reset yet. Stop the bridge and run it with --reset-identity to generate a new keypair.',
-    });
+    transport = null;
+    clearClientLocalState({ local: window.localStorage, session: window.sessionStorage });
+    try {
+      if (typeof caches !== 'undefined') {
+        const keys = await caches.keys();
+        await Promise.all(keys.map((key) => caches.delete(key)));
+      }
+    } catch {
+      // Cache Storage is optional (Tauri/private mode); localStorage/sessionStorage cleared above.
+    }
+    window.location.replace(clientResetUrl(import.meta.env.BASE_URL || '/', window.location.href));
   },
 
+  resetBridgeData: async (options) => {
+    if (get().mode === 'demo') {
+      throw new Error('Bridge reset is not available in demo mode. Turn demo mode off and connect to the bridge first.');
+    }
+    const result = await requestBridgeReset(get().settings, options);
+    const channelId = result.public_channel?.channel_id ?? PUBLIC_CHANNEL_ID;
+    const publicChannel: Channel = {
+      channel_id: channelId,
+      name: result.public_channel?.name ?? PUBLIC_CHANNEL_NAME,
+      psk_set: true,
+      public: true,
+      ...(result.public_channel ?? {}),
+    };
+    const state = get();
+    set({
+      messages: [],
+      groupMessages: [],
+      contacts: {},
+      nodes: {},
+      channels: { [channelId]: publicChannel },
+      readCursors: {},
+      activeThread: { kind: 'group', id: channelId },
+      lastCreatedChannel: null,
+      lastInvite: null,
+      selectedNodeId: null,
+      ...(result.node_id ? { ownNodeId: result.node_id } : {}),
+      ...(state.config
+        ? {
+            config: {
+              ...state.config,
+              channels: [{ channel_id: channelId, name: publicChannel.name, psk_set: true, public: true }],
+            },
+          }
+        : {}),
+    });
+    get().pushToast({
+      kind: 'success',
+      title: result.identity_changed === false ? 'Bridge data cleared' : 'Bridge reset — new node identity',
+      message: `${formatBridgeResetCounts(result.counts)} cleared. ${
+        result.node_id ? `New node ${result.node_id.slice(0, 8)}… · ` : ''
+      }Public Mesh was re-created; old contacts and QR codes are no longer valid.`,
+    });
+    return result;
+  },
 
   /* -------------------- backbone mode (OBB/1) -------------------- */
 
@@ -2706,6 +2817,7 @@ export const useAppStore = create<AppState>()((set, get) => ({
         if (get().mode === 'demo' || features.includes('backbone')) {
           transport?.send('get_backbone', {});
         }
+        maybeSelectPublicChannel(set, get);
         break;
       }
       case 'nodes': {
@@ -2746,6 +2858,8 @@ export const useAppStore = create<AppState>()((set, get) => ({
           channels[channel.channel_id] = { ...channel, ...(state.channels[channel.channel_id]?.seeded ? { seeded: true } : {}) };
         }
         set({ channels });
+        maybeAutoJoinPublicChannel(get);
+        if (!get().syncing) maybeSelectPublicChannel(set, get);
         break;
       }
       case 'channel_created': {
@@ -2827,6 +2941,7 @@ function applyChannelCreated(set: SetState, get: GetState, data: ChannelCreatedD
     channel_id: data.channel_id,
     name: data.name,
     psk_set: true,
+    ...(data.public ? { public: true } : {}),
   };
   set({
     channels: upsertChannel(state.channels, channel),
@@ -2835,7 +2950,15 @@ function applyChannelCreated(set: SetState, get: GetState, data: ChannelCreatedD
           ...state.config,
           channels: state.config.channels.some((c) => c.channel_id === data.channel_id)
             ? state.config.channels
-            : [...state.config.channels, { channel_id: data.channel_id, name: data.name, psk_set: true }],
+            : [
+                ...state.config.channels,
+                {
+                  channel_id: data.channel_id,
+                  name: data.name,
+                  psk_set: true,
+                  ...(data.public ? { public: true } : {}),
+                },
+              ],
         }
       : state.config,
   });

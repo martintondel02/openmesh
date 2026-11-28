@@ -13,6 +13,7 @@ import {
   Users,
 } from 'lucide-react';
 import { useAppStore } from '../../store/app';
+import { PUBLIC_CHANNEL_NAME } from '../../lib/public-channel';
 import type { Channel } from '../../types/api';
 import { buildChannelLink, isValidPsk, parseOpenMeshLink } from '../../lib/links';
 import { cn, formatNodeId } from '../../lib/utils';
@@ -65,6 +66,10 @@ export function CreateChannelModal({
     }
     if (trimmed.length > 48) {
       setError('Keep the name under 48 characters.');
+      return;
+    }
+    if (trimmed.toLowerCase() === PUBLIC_CHANNEL_NAME.toLowerCase()) {
+      setError(`${PUBLIC_CHANNEL_NAME} is built in with its published key and cannot be recreated with a different key.`);
       return;
     }
     if (duplicate) {

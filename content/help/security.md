@@ -57,6 +57,10 @@ mode. Then do this five-minute checklist:
 
 ### Channel caveats
 
+* **Public Mesh has no privacy.** Its PSK is published with the app, so anyone can join, read and
+  post. Signatures still verify which node wrote a message, but there is no confidentiality: do not
+  post personal data, private locations or anything sensitive there. It is auto-created, pinned and
+  cannot be left/deleted.
 * The channel key is shared: any member can decrypt all channel traffic, and can create messages
   that appear to come from any **display name**. Signatures bind messages to node identities, so
   compare node ids for important decisions.
