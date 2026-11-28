@@ -50,6 +50,8 @@ object MessageMerge {
 
     /** Progress never goes backwards; a delivered copy wins over queued/sent, FAILED is sticky. */
     fun mergeDelivery(existing: DeliveryState, incoming: DeliveryState): DeliveryState = when {
+        // The user cancelled this send; a late retransmit/ack must not resurrect it.
+        existing == DeliveryState.CANCELLED || incoming == DeliveryState.CANCELLED -> DeliveryState.CANCELLED
         incoming == DeliveryState.DELIVERED || existing == DeliveryState.DELIVERED -> DeliveryState.DELIVERED
         existing == DeliveryState.FAILED -> DeliveryState.FAILED
         incoming == DeliveryState.FAILED -> DeliveryState.FAILED

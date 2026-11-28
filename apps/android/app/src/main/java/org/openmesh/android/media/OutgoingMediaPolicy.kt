@@ -31,6 +31,12 @@ data class OutgoingMediaSnapshot(
     val autoRetries: Int = 0,
     /** When the next automatic retry is due; null while no backoff is scheduled. */
     val nextAutoRetryAtMs: Long? = null,
+    /**
+     * Row was restored from disk on app start (not sent in this process): automatic retries are
+     * forbidden until the user explicitly taps Retry (prevents stale uploads contaminating tests
+     * or flooding the companion after a restart).
+     */
+    val manualOnly: Boolean = false,
 )
 
 enum class OutgoingMediaUiState { SENDING, RETRYING, STALLED, AUTO_RETRY_WAIT }
@@ -172,7 +178,7 @@ object OutgoingMediaPolicy {
         snapshot.copy(nextAutoRetryAtMs = nowMs + autoRetryDelayMs(snapshot.autoRetries))
 
     fun autoRetryAllowed(snapshot: OutgoingMediaSnapshot): Boolean =
-        snapshot.autoRetries < MAX_AUTO_RETRIES
+        snapshot.autoRetries < MAX_AUTO_RETRIES && !snapshot.manualOnly
 
     fun isAutoRetryDue(snapshot: OutgoingMediaSnapshot, nowMs: Long): Boolean =
         autoRetryAllowed(snapshot) && snapshot.nextAutoRetryAtMs != null && nowMs >= snapshot.nextAutoRetryAtMs
@@ -204,12 +210,28 @@ object OutgoingMediaPolicy {
             nextAutoRetryAtMs = null,
         )
 
-    /** Manual retry resets the automatic budget so the user can always start a fresh cycle. */
+    /** Manual retry resets the automatic budget and opts a restored row back into live tracking. */
     fun markManualRetry(snapshot: OutgoingMediaSnapshot, nowMs: Long): OutgoingMediaSnapshot =
-        retried(snapshot.copy(autoRetries = 0, nextAutoRetryAtMs = null), nowMs)
+        retried(
+            snapshot.copy(autoRetries = 0, nextAutoRetryAtMs = null, manualOnly = false),
+            nowMs,
+        )
 
     fun isActive(delivery: DeliveryState): Boolean = delivery == DeliveryState.QUEUED ||
         delivery == DeliveryState.SENT
+
+    /** Cancel is only meaningful while the send can still consume airtime. */
+    fun canCancel(delivery: DeliveryState): Boolean = delivery == DeliveryState.QUEUED ||
+        delivery == DeliveryState.SENT || delivery == DeliveryState.FAILED
+
+    /**
+     * Cancel transition: stop scheduling automatic retries and drop any progress. The caller removes
+     * the upload tracker once the core's cancelled event settles the delivery state.
+     */
+    fun cancelled(snapshot: OutgoingMediaSnapshot): OutgoingMediaSnapshot = snapshot.copy(
+        progress = null,
+        nextAutoRetryAtMs = null,
+    )
 
     fun slowHintVisible(ui: OutgoingMediaUi): Boolean =
         ui.state == OutgoingMediaUiState.SENDING && ui.elapsedMs >= SLOW_HINT_AFTER_MS

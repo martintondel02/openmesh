@@ -1,6 +1,7 @@
 package org.openmesh.android.ui.components
 
 import android.net.Uri
+import android.os.Build
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
@@ -33,6 +34,7 @@ import kotlinx.coroutines.withContext
 import org.openmesh.android.data.repository.MediaKind
 import org.openmesh.android.data.repository.MeshRepository
 import org.openmesh.android.media.ImageCompressor
+import org.openmesh.android.media.MediaFormats
 import org.openmesh.android.media.MediaTierPolicy
 import org.openmesh.android.ui.theme.MeshOnSurfaceVariant
 import org.openmesh.android.ui.theme.MeshPrimary
@@ -61,7 +63,7 @@ fun ImageTierSendDialog(
         MediaTierPolicy.estimateImageBytes(MediaTierPolicy.imageTier(presets, defaultTier)) <= cap
     var selected by remember { mutableStateOf(if (defaultFits) defaultTier else suggested) }
     var result by remember { mutableStateOf<ImageCompressor.Result?>(null) }
-    var mime by remember { mutableStateOf("image/webp") }
+    var mime by remember { mutableStateOf(MediaFormats.preferredImageMime(Build.VERSION.SDK_INT)) }
     var dimensions by remember { mutableStateOf<Pair<Int, Int>?>(null) }
     var preparing by remember { mutableStateOf(false) }
     var originalConfirmed by remember { mutableStateOf(false) }
@@ -81,13 +83,19 @@ fun ImageTierSendDialog(
                 ImageCompressor.Result.Success(raw, rawMime, 0, 0)
             } else {
                 val tier = MediaTierPolicy.imageTier(presets, id)
-                mime = tier.mime
+                // Preset target (now image/avif); empty = platform preference. The encoder reports
+                // the real MIME afterwards, so a WebP fallback is labelled honestly.
+                mime = tier.mime.ifBlank { MediaFormats.preferredImageMime(Build.VERSION.SDK_INT) }
                 ImageCompressor.compressTier(
                     context,
                     uri,
                     maxDim = tier.maxDim ?: 1280,
                     quality = tier.quality ?: 0.7,
                     capBytes = cap,
+                    avifEncoder = ImageCompressor.AvifEncoder { rgba, width, height, quality, speed ->
+                        repository.encodeAvif(rgba, width, height, quality, speed)
+                    },
+                    avifSpeed = MediaFormats.avifSpeedForTier(id),
                 )
             }
         }.also { outcome ->
@@ -197,7 +205,7 @@ fun ImageTierSendDialog(
                 onClick = {
                     val data = bytes ?: return@Button
                     scope.launch {
-                        val name = "image-${selected}.${if (mime.contains("webp")) "webp" else "img"}"
+                        val name = MediaFormats.fileNameForTier(selected, mime)
                         repository.sendAttachmentBytes(peerId, name, mime, data, null, isChannel)
                         onDismiss()
                     }

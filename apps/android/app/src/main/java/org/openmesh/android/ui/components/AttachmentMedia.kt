@@ -2,6 +2,8 @@ package org.openmesh.android.ui.components
 
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.ImageDecoder
+import android.os.Build
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -42,6 +44,8 @@ import androidx.compose.ui.window.DialogProperties
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.openmesh.android.media.AttachmentUiPolicy
+import org.openmesh.android.media.MediaMath
+import org.openmesh.android.util.MeshLog
 import org.openmesh.android.ui.theme.MeshOnSurfaceVariant
 import org.openmesh.android.ui.theme.MeshOutline
 import org.openmesh.android.ui.theme.MeshPrimary
@@ -65,13 +69,33 @@ suspend fun decodeAttachmentBitmap(
 ): Bitmap? = withContext(Dispatchers.IO) {
     if (!file.isFile) return@withContext null
     val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-    BitmapFactory.decodeFile(file.absolutePath, bounds)
-    if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return@withContext null
-    val options = BitmapFactory.Options().apply {
-        inSampleSize = AttachmentUiPolicy.inSampleSize(bounds.outWidth, bounds.outHeight, maxEdge)
-        inPreferredConfig = Bitmap.Config.ARGB_8888
+    runCatching { BitmapFactory.decodeFile(file.absolutePath, bounds) }
+    val decoded = if (bounds.outWidth > 0 && bounds.outHeight > 0) {
+        val options = BitmapFactory.Options().apply {
+            inSampleSize = AttachmentUiPolicy.inSampleSize(bounds.outWidth, bounds.outHeight, maxEdge)
+            inPreferredConfig = Bitmap.Config.ARGB_8888
+        }
+        runCatching { BitmapFactory.decodeFile(file.absolutePath, options) }.getOrNull()
+    } else {
+        null
     }
-    runCatching { BitmapFactory.decodeFile(file.absolutePath, options) }.getOrNull()
+    // Received AVIF (and any codec BitmapFactory lacks) goes through the platform ImageDecoder.
+    decoded ?: decodeWithImageDecoder(file, maxEdge)
+}
+
+/** Platform decoder fallback (API 28+); AVIF is supported by the platform decoder on this device. */
+private fun decodeWithImageDecoder(file: java.io.File, maxEdge: Int): Bitmap? {
+    if (Build.VERSION.SDK_INT < 28) return null
+    return runCatching {
+        val source = ImageDecoder.createSource(file)
+        ImageDecoder.decodeBitmap(source) { decoder, info, _ ->
+            decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
+            val (w, h) = MediaMath.scale(info.size.width, info.size.height, maxEdge)
+            if (w != info.size.width || h != info.size.height) decoder.setTargetSize(w, h)
+        }
+    }.onFailure {
+        MeshLog.w("attachment image: ImageDecoder fallback failed (${it.message})")
+    }.getOrNull()
 }
 
 /**

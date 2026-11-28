@@ -163,6 +163,70 @@ conversation (or channel semantics for group chats). Route wording is beginner-f
 link (0 hops)* vs *Via N relays*. A node not heard for 5 minutes is labelled *Offline* even if an old
 RSSI value is cached.
 
+## Image encoding, compression and cancel (v0.7.2)
+
+Image tiers now consume the shared preset `content/presets/media.json` (copied into
+`app/src/main/assets/presets/media.json`): tiny 256 px / q 0.28, medium 512 px / q 0.40, high
+1024 px / q 0.50, target MIME `image/avif` (the strongest compression the user asked for). The
+compressor tries formats in this order and reports the **real** encoded bytes + MIME:
+
+1. **AVIF via the shared Rust encoder** (`OpenMeshNode.encodeAvif`, rav1e/ravif): the app packs the
+   downscaled frame as RGBA8 on a background dispatcher and calls the FFI with **quality-matched**
+   settings (raw WebP tier q 28/40/50 → AVIF q 35/50/62 via the 1.25× calibration) and speed
+   **10/8/8**; output is accepted only if it is a real AVIF file (`ftyp`+`avif`/`avis`). The call is
+   timed with `System.nanoTime()`; logcat shows
+   `image compress: avif q=… speed=… WxH bytes=… real_avif=… encode_ms=…`.
+2. **Size-aware choice**: the same tier is also encoded with platform **WebP lossy**; the app sends
+   the **strictly smaller** output (WebP wins ties) with the MIME/filename of the bytes actually
+   produced, so AVIF wins on typical photos but never regresses airtime on detail-heavy images.
+   Log: `image compress: chose avif|webp avif=…@q… webp=…@q… avif_ms=…`. JPEG remains the last
+   fallback; AVIF is never faked/mislabelled. (The native encoder adds ~1.3–1.8 MB per ABI,
+   accepted for now; ABI splits are a later follow-up.) Received AVIF images decode through the platform decoder (ImageDecoder fallback if
+BitmapFactory cannot read the file) and show a readable placeholder instead of crashing; format
+labels include AVIF.
+
+**Cancel send** is implemented against the core/FFI cancel surface
+(`OpenMeshNode.cancelMessage(msgId): Boolean` + `FfiEvent.MessageCancelled`): uploading/stalled/queued
+outgoing media shows a **Cancel send** action (bubble and message-status dialog). A confirmed cancel
+immediately marks the row terminal `CANCELLED` (no further chunks/retransmissions or automatic
+retries; cancelled rows reject Retry), the engine event on the next tick is idempotent confirmation,
+and a late ACK can never resurrect the send. Locally queued (never handed to the engine) messages are
+removed from the queue when cancelled.
+
+## Public Mesh and factory reset (v0.7.2)
+
+Every client ships with the built-in **Public Mesh** channel. Constants and URL/pinning helpers live
+in `data/model/PublicMesh.kt`: name `Public Mesh`, published base64url PSK
+`-w-KmLkWsRmxrtQqcPT2sXrlcTHTiaCNu1F-Qp_YqZI`, protocol-derived canonical channel id
+`a16d63142854cef4`, and a join URL carrying only name + PSK. The repository **ensures it on every
+engine start** (fresh install, restart, factory reset) by joining via the core, logs the id the core
+derives (warning if it differs from the canonical constant) and pins it at the top of the channel
+lists with a **PUBLIC** badge, globe icon and an explicit privacy warning in the list, the channel
+header and the Channels screen ("anyone with OpenMesh can read/post; senders are signed"). It cannot
+be left/deleted; a missing state simply re-joins it on the next start.
+
+**Factory reset** (Settings → Danger zone, typed `RESET` confirmation) stops the engine/radio,
+wipes Room (messages/contacts/channels/nodes), DataStore prefs, the engine state blob, the identity
+seed/ciphertext, attachments, the frame-sequence floor and all in-memory state, stops the service and
+returns to first-run onboarding. The next setup generates **new identity keys** — new node id/QR,
+old contacts and QR invites invalid — and Public Mesh is re-created automatically. No restored uploads
+survive (and the app also marks uploads seeded from disk as **manual-retry-only**, so the auto-retry
+governor can never revive an old transfer after a restart).
+
+## Frame-sequence persistence (phone→PC media fix)
+## Frame-sequence persistence (phone→PC media fix)
+
+The engine's frame sequence must keep growing across process restarts or peers/bridges deduplicate
+the phone's frames for their TTL (the observed "phone→PC pictures never arrive" bug). The app now:
+
+- persists `node.lastSeq()` to SharedPreferences after every text/attachment send, queue flush and
+  media retry, on startup announce, on `stop()` and on activity/service lifecycle stop; throttled to
+  ~1/s while frames are flowing (never writes a lower value);
+- restores it on start **after** `importState` and **before** any channel heal/announce/send:
+  `applied = max(persisted floor, state.last_seq)`, logged as `sequence floor restored: …`;
+- still exports the full opaque `engine.exportState()` every 12 s while running (message-id counter
+  and contacts cannot rewind either).
+
 ## Outgoing media reliability (v0.7.2)
 
 Attachments are the one transfer type that can stay in flight for minutes, so the thread does not

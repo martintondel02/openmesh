@@ -79,6 +79,7 @@ object DeliveryPresentation {
         DeliveryState.READ -> "Read"
         DeliveryState.STORED_AT_RELAY -> "Stored at relay"
         DeliveryState.FAILED -> "Failed"
+        DeliveryState.CANCELLED -> "Cancelled"
     }
 
     /** Short label shown next to the bubble icon (so status is never icon-only). */
@@ -89,6 +90,7 @@ object DeliveryPresentation {
         DeliveryState.READ -> "Read"
         DeliveryState.STORED_AT_RELAY -> "At relay"
         DeliveryState.FAILED -> "Failed — tap to retry"
+        DeliveryState.CANCELLED -> "Cancelled"
     }
 
     fun tone(state: DeliveryState): RadioTone = when (state) {
@@ -98,6 +100,7 @@ object DeliveryPresentation {
         DeliveryState.READ -> RadioTone.POSITIVE
         DeliveryState.STORED_AT_RELAY -> RadioTone.WARNING
         DeliveryState.FAILED -> RadioTone.ERROR
+        DeliveryState.CANCELLED -> RadioTone.NEUTRAL
     }
 
     /**
@@ -129,6 +132,9 @@ object DeliveryPresentation {
             "A store-and-forward relay is holding it until $peerName (or another relay) can pass it on."
         DeliveryState.FAILED ->
             "Sending failed. Open the message actions to retry, or check the radio link on the Radio screen."
+        DeliveryState.CANCELLED ->
+            "You cancelled this send — no more airtime is being used. The message stays in the " +
+                "thread as a record; send it again if you still want it delivered."
     }
 
     /** Monotonic delivery order: progress never goes backwards on a status update. */
@@ -139,6 +145,7 @@ object DeliveryPresentation {
         DeliveryState.DELIVERED -> 4
         DeliveryState.READ -> 5
         DeliveryState.FAILED -> 0
+        DeliveryState.CANCELLED -> 6
     }
 
     /** Whether a status update should replace the current one (never downgrade delivered/read). */

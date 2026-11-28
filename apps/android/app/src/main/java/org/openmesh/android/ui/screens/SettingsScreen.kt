@@ -20,6 +20,7 @@ import androidx.compose.material.icons.filled.Bluetooth
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Link
 import androidx.compose.material.icons.filled.Usb
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
@@ -29,6 +30,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -80,6 +82,8 @@ fun SettingsScreen(
     val context = LocalContext.current
     var nodeName by remember(settings.nodeName) { mutableStateOf(settings.nodeName) }
     var nameError by remember { mutableStateOf<String?>(null) }
+    var showFactoryReset by remember { mutableStateOf(false) }
+    var resetConfirmText by remember { mutableStateOf("") }
     var nameSaved by remember { mutableStateOf<String?>(null) }
     var showOverrideDialog by remember { mutableStateOf(false) }
 
@@ -511,8 +515,67 @@ fun SettingsScreen(
                     )
                 }
             }
+            SectionTitle("Danger zone")
+            MeshCard {
+                Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text(
+                        "Factory reset",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = MeshError,
+                    )
+                    Text(
+                        "Wipes messages, media, channels and settings on this phone and creates a NEW " +
+                            "identity (new node id/QR — old contacts and QR codes stop working). The radio " +
+                            "and app stay installed; you will go through setup again. Public Mesh is added " +
+                            "automatically after setup. This cannot be undone.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MeshOnSurfaceVariant,
+                    )
+                    OutlinedButton(
+                        onClick = {
+                            resetConfirmText = ""
+                            showFactoryReset = true
+                        },
+                    ) { Text("Factory reset…", color = MeshError) }
+                }
+            }
             Spacer(Modifier.height(24.dp))
         }
+    }
+
+    if (showFactoryReset) {
+        AlertDialog(
+            onDismissRequest = { showFactoryReset = false },
+            title = { Text("Factory reset this phone?") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        "This wipes all app data and generates NEW identity keys. Your current node id " +
+                            "and contact QR become invalid, and anyone who pinned your old QR will not " +
+                            "reach you. The radio stays paired; Public Mesh is re-added after setup.",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                    Text("Type RESET to confirm:", style = MaterialTheme.typography.bodyMedium)
+                    OutlinedTextField(
+                        value = resetConfirmText,
+                        onValueChange = { resetConfirmText = it.take(8) },
+                        singleLine = true,
+                        label = { Text("RESET") },
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    enabled = resetConfirmText == "RESET",
+                    onClick = {
+                        showFactoryReset = false
+                        resetConfirmText = ""
+                        repository.factoryReset()
+                    },
+                ) { Text("Reset & new identity", color = MeshError) }
+            },
+            dismissButton = { TextButton(onClick = { showFactoryReset = false }) { Text("Cancel") } },
+        )
     }
 
     if (showOverrideDialog) {

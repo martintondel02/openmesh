@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Cancel
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.DoneAll
 import androidx.compose.material.icons.filled.Error
@@ -204,6 +205,7 @@ fun DeliveryIcon(state: DeliveryState) {
         DeliveryState.READ -> Icon(Icons.Filled.MarkEmailRead, "read", tint = MeshPrimary, modifier = Modifier.size(14.dp))
         DeliveryState.STORED_AT_RELAY -> Icon(Icons.Filled.Inventory2, "stored at relay", tint = MeshTertiary, modifier = Modifier.size(14.dp))
         DeliveryState.FAILED -> Icon(Icons.Filled.Error, "failed", tint = MeshError, modifier = Modifier.size(14.dp))
+        DeliveryState.CANCELLED -> Icon(Icons.Filled.Cancel, "cancelled", tint = MeshOnSurfaceVariant, modifier = Modifier.size(14.dp))
     }
 }
 

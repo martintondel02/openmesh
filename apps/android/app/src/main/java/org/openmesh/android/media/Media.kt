@@ -55,6 +55,11 @@ object MediaMath {
 
 /** Decode → downscale → JPEG-compress until the bytes fit the profile cap. */
 object ImageCompressor {
+    /** Encoder callback shape: (rgba, width, height, quality, speed) -> complete AVIF bytes or null. */
+    fun interface AvifEncoder {
+        fun encode(rgba: ByteArray, width: Int, height: Int, quality: Int, speed: Int): ByteArray?
+    }
+
     fun compress(context: Context, uri: Uri, capBytes: Int): ByteArray? {
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         context.contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, bounds) }
@@ -101,7 +106,15 @@ object ImageCompressor {
      * profile cap is met. Robust against content URIs that BitmapFactory cannot handle: uses
      * ImageDecoder (API 28+) with a software allocator first, then BitmapFactory sampling.
      */
-    fun compressTier(context: Context, uri: Uri, maxDim: Int, quality: Double, capBytes: Int): Result {
+    fun compressTier(
+        context: Context,
+        uri: Uri,
+        maxDim: Int,
+        quality: Double,
+        capBytes: Int,
+        avifEncoder: AvifEncoder? = null,
+        avifSpeed: Int = 8,
+    ): Result {
         MeshLog.i("image compress: begin uri=$uri maxDim=$maxDim quality=$quality cap=$capBytes")
         var edge = maxDim
         var attempt = 0
@@ -119,7 +132,7 @@ object ImageCompressor {
             val (w, h) = MediaMath.scale(bitmap.width, bitmap.height, edge)
             val scaled = if (w == bitmap.width && h == bitmap.height) bitmap else
                 Bitmap.createScaledBitmap(bitmap, w, h, true).also { if (it !== bitmap) bitmap.recycle() }
-            val encoded = encode(scaled, quality)
+            val encoded = encode(scaled, quality, avifEncoder, avifSpeed)
             if (encoded == null) {
                 lastReason = "could not encode the image (attempt $attempt, ${scaled.width}x${scaled.height})"
                 MeshLog.w("image compress: $lastReason")
@@ -202,30 +215,88 @@ object ImageCompressor {
             null
         }
 
-    /** WebP (lossy where supported) with JPEG fallback; returns bytes + actual MIME or null. */
-    private fun encode(bitmap: Bitmap, quality: Double): Pair<ByteArray, String>? {
-        val q = (quality * 100).toInt().coerceIn(1, 100)
-        val webp = runCatching {
-            val out = ByteArrayOutputStream()
-            val format = if (Build.VERSION.SDK_INT >= 30) Bitmap.CompressFormat.WEBP_LOSSY else
-                @Suppress("DEPRECATION") Bitmap.CompressFormat.WEBP
-            val ok = bitmap.compress(format, q, out)
-            MeshLog.i("image compress: webp q=$q ok=$ok bytes=${out.size()}")
-            if (ok && out.size() > 0) out.toByteArray() to "image/webp" else null
-        }.getOrElse {
+    /**
+     * Shared Rust AVIF encoder first (capability passed in by the repository), then WebP-lossy and
+     * JPEG fallbacks. AVIF output is verified by magic bytes before being labelled image/avif; the
+     * AVIF attempt is timed with nanoTime and compared against WebP at the same quality so the
+     * measured bytes/ms are visible in logcat. The encoder is CPU-bound: callers run this on a
+     * background dispatcher (the tier dialog uses Dispatchers.IO).
+     */
+    private fun encode(
+        bitmap: Bitmap,
+        quality: Double,
+        avifEncoder: AvifEncoder?,
+        avifSpeed: Int,
+    ): Pair<ByteArray, String>? {
+        val webpQ = MediaFormats.avifQuality(quality)
+        // ravif numeric quality is perceptually lower than libwebp; calibrate so the comparison
+        // is quality-matched, then send the smaller output (WebP on ties).
+        val avifQ = MediaFormats.calibratedAvifQuality(webpQ)
+        var avifMs = 0.0
+        val avif = avifEncoder?.let { encoder ->
+            runCatching {
+                val pixels = IntArray(bitmap.width * bitmap.height)
+                bitmap.getPixels(pixels, 0, bitmap.width, 0, 0, bitmap.width, bitmap.height)
+                val rgba = ByteArray(pixels.size * 4)
+                for (i in pixels.indices) {
+                    val argb = pixels[i]
+                    val o = i * 4
+                    rgba[o] = (argb shr 16 and 0xFF).toByte()
+                    rgba[o + 1] = (argb shr 8 and 0xFF).toByte()
+                    rgba[o + 2] = (argb and 0xFF).toByte()
+                    rgba[o + 3] = (argb ushr 24 and 0xFF).toByte()
+                }
+                val startedNs = System.nanoTime()
+                val bytes = encoder.encode(rgba, bitmap.width, bitmap.height, avifQ, avifSpeed)
+                avifMs = (System.nanoTime() - startedNs) / 1_000_000.0
+                val realAvif = bytes != null && bytes.isNotEmpty() && MediaFormats.isAvif(bytes)
+                MeshLog.i(
+                    "image compress: avif q=$avifQ (webp-matched from $webpQ) speed=$avifSpeed " +
+                        "${bitmap.width}x${bitmap.height} bytes=${bytes?.size ?: 0} " +
+                        "real_avif=$realAvif encode_ms=" + "%.1f".format(avifMs),
+                )
+                if (realAvif) bytes else null
+            }.getOrElse {
+                MeshLog.w("image compress: AVIF encoder failed (${it.message}); falling back to WebP")
+                null
+            }
+        }
+        val webp = runCatching { encodeWebp(bitmap, webpQ) }.getOrElse {
             MeshLog.w("image compress: webp threw: ${it.message}")
             null
         }
-        if (webp != null) return webp
+        if (avif != null && webp != null) {
+            val choice = MediaFormats.chooseImageFormat(avif.size, webp.size)
+            MeshLog.i(
+                "image compress: chose ${choice.name.lowercase()} avif=${avif.size}@q$avifQ " +
+                    "webp=${webp.size}@q$webpQ avif_ms=" + "%.1f".format(avifMs),
+            )
+            return when (choice) {
+                MediaFormats.ImageFormatChoice.AVIF -> avif to MediaFormats.AVIF_MIME
+                MediaFormats.ImageFormatChoice.WEBP -> webp to MediaFormats.WEBP_MIME
+            }
+        }
+        if (avif != null) return avif to MediaFormats.AVIF_MIME
+        if (webp != null) return webp to MediaFormats.WEBP_MIME
         return runCatching {
             val out = ByteArrayOutputStream()
-            val ok = bitmap.compress(Bitmap.CompressFormat.JPEG, q, out)
-            MeshLog.i("image compress: jpeg fallback q=$q ok=$ok bytes=${out.size()}")
-            if (ok && out.size() > 0) out.toByteArray() to "image/jpeg" else null
+            val ok = bitmap.compress(Bitmap.CompressFormat.JPEG, webpQ, out)
+            MeshLog.i("image compress: jpeg fallback q=$webpQ ok=$ok bytes=${out.size()}")
+            if (ok && out.size() > 0) out.toByteArray() to MediaFormats.JPEG_MIME else null
         }.getOrElse {
             MeshLog.w("image compress: jpeg threw: ${it.message}")
             null
         }
+    }
+
+    /** WebP lossy on API 30+, legacy WEBP below; null when the platform encoder reports failure. */
+    private fun encodeWebp(bitmap: Bitmap, q: Int): ByteArray? {
+        val out = ByteArrayOutputStream()
+        val format = if (Build.VERSION.SDK_INT >= 30) Bitmap.CompressFormat.WEBP_LOSSY else
+            @Suppress("DEPRECATION") Bitmap.CompressFormat.WEBP
+        val ok = bitmap.compress(format, q, out)
+        MeshLog.i("image compress: webp q=$q ok=$ok bytes=${out.size()}")
+        return if (ok && out.size() > 0) out.toByteArray() else null
     }
 
     /** Original image bytes + resolver MIME; the caller enforces the profile cap and confirmation. */

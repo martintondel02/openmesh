@@ -17,6 +17,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Public
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.HelpOutline
 import androidx.compose.material3.IconButton
@@ -41,12 +42,14 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import org.openmesh.android.data.model.Conversation
+import org.openmesh.android.data.model.PublicMesh
 import org.openmesh.android.data.model.RadioStatus
 import org.openmesh.android.data.repository.MeshRepository
 import org.openmesh.android.ui.components.DeliveryIcon
 import org.openmesh.android.ui.components.EmptyState
 import org.openmesh.android.ui.components.RadioBanner
 import org.openmesh.android.ui.components.SectionTitle
+import org.openmesh.android.ui.components.StatusPill
 import org.openmesh.android.ui.components.relativeTime
 import org.openmesh.android.ui.radio.RadioPresentation
 import org.openmesh.android.ui.theme.MeshOnSurfaceVariant
@@ -132,7 +135,7 @@ fun ChatListScreen(
             }
             item { Spacer(Modifier.height(8.dp)) }
             item { SectionTitle("Channels") }
-            items(channels, key = { it.id }) { channel ->
+            items(PublicMesh.pinFirst(channels), key = { it.id }) { channel ->
                 Row(
                     Modifier
                         .fillMaxWidth()
@@ -142,12 +145,26 @@ fun ChatListScreen(
                         .padding(horizontal = 12.dp, vertical = 12.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Icon(Icons.Filled.Tag, contentDescription = null, tint = MeshPrimary)
+                    Icon(
+                        if (channel.isPublic) Icons.Filled.Public else Icons.Filled.Tag,
+                        contentDescription = null,
+                        tint = if (channel.isPublic) MeshTertiary else MeshPrimary,
+                    )
                     Spacer(Modifier.width(12.dp))
                     Column(Modifier.weight(1f)) {
-                        Text("#${channel.name}", style = MaterialTheme.typography.titleMedium)
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text("#${channel.name}", style = MaterialTheme.typography.titleMedium)
+                            if (channel.isPublic) {
+                                Spacer(Modifier.width(8.dp))
+                                StatusPill("PUBLIC", MeshTertiary)
+                            }
+                        }
                         Text(
-                            if (channel.pskSet) "Shared key channel" else "No key set",
+                            when {
+                                channel.isPublic -> PublicMesh.shortWarning()
+                                channel.pskSet -> "Shared key channel"
+                                else -> "No key set"
+                            },
                             style = MaterialTheme.typography.bodyMedium,
                             color = MeshOnSurfaceVariant,
                         )

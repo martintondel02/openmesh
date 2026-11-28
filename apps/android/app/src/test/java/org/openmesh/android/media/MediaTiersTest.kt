@@ -23,13 +23,15 @@ class MediaTiersTest {
     @Test
     fun `image tiers match the shared asset exactly`() {
         assertEquals(listOf("tiny", "medium", "high", "original"), presets.imageOrder)
-        assertEquals(320, presets.images.getValue("tiny").maxDim)
-        assertEquals(0.35, presets.images.getValue("tiny").quality!!, 0.0001)
-        assertEquals(640, presets.images.getValue("medium").maxDim)
-        assertEquals(0.55, presets.images.getValue("medium").quality!!, 0.0001)
-        assertEquals(1280, presets.images.getValue("high").maxDim)
-        assertEquals(0.70, presets.images.getValue("high").quality!!, 0.0001)
-        assertEquals("image/webp", presets.images.getValue("high").mime)
+        assertEquals(256, presets.images.getValue("tiny").maxDim)
+        assertEquals(0.28, presets.images.getValue("tiny").quality!!, 0.0001)
+        assertEquals(512, presets.images.getValue("medium").maxDim)
+        assertEquals(0.40, presets.images.getValue("medium").quality!!, 0.0001)
+        assertEquals(1024, presets.images.getValue("high").maxDim)
+        assertEquals(0.50, presets.images.getValue("high").quality!!, 0.0001)
+        assertEquals("image/avif", presets.images.getValue("tiny").mime)
+        assertEquals("image/avif", presets.images.getValue("medium").mime)
+        assertEquals("image/avif", presets.images.getValue("high").mime)
         assertEquals("original", presets.images.getValue("original").mime)
         assertEquals(null, presets.images.getValue("original").maxDim)
     }
@@ -145,6 +147,7 @@ class MediaTiersTest {
         assertEquals("Opus · 8 s · 7.0 KiB", MediaTierPolicy.attachmentLabel("audio/ogg; codecs=opus", 8_000, 7_168))
         assertEquals("AAC · 3 s · 1.0 KiB", MediaTierPolicy.attachmentLabel("audio/mp4", 3_000, 1_024))
         assertEquals("WebP · 512 B", MediaTierPolicy.attachmentLabel("image/webp", null, 512))
+        assertEquals("AVIF · 2.0 KiB", MediaTierPolicy.attachmentLabel("image/avif", null, 2_048))
         assertEquals("JPEG · 2.0 KiB", MediaTierPolicy.attachmentLabel("image/jpeg", null, 2_048))
     }
 

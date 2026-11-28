@@ -91,7 +91,11 @@ object AttachmentUiPolicy {
         val trimmed = name?.trim().orEmpty()
         if (trimmed.isNotEmpty() && !trimmed.matches(Regex("att_[-0-9]+"))) return trimmed
         return when (kind) {
-            AttachmentViewKind.IMAGE -> if (mime.contains("webp")) "Photo (WebP)" else "Photo"
+            AttachmentViewKind.IMAGE -> when {
+                mime.contains("webp", ignoreCase = true) -> "Photo (WebP)"
+                mime.contains("avif", ignoreCase = true) -> "Photo (AVIF)"
+                else -> "Photo"
+            }
             AttachmentViewKind.VOICE -> "Voice note"
             AttachmentViewKind.FILE -> "Attachment"
         }

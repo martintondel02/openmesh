@@ -113,6 +113,7 @@ class AttachmentUiPolicyTest {
         assertEquals("voice-1s.c2", AttachmentUiPolicy.displayName("voice-1s.c2", "audio/c2-1300", AttachmentViewKind.VOICE))
         assertEquals("Photo", AttachmentUiPolicy.displayName(null, "image/jpeg", AttachmentViewKind.IMAGE))
         assertEquals("Photo (WebP)", AttachmentUiPolicy.displayName("att_3341274591", "image/webp", AttachmentViewKind.IMAGE))
+        assertEquals("Photo (AVIF)", AttachmentUiPolicy.displayName("att_3341274591", "image/avif", AttachmentViewKind.IMAGE))
         assertEquals("Voice note", AttachmentUiPolicy.displayName("att_-1", "audio/c2-1300", AttachmentViewKind.VOICE))
         assertEquals("Attachment", AttachmentUiPolicy.displayName(" ", "application/cbor", AttachmentViewKind.FILE))
     }

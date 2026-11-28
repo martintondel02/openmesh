@@ -100,6 +100,8 @@ class FriendlyPresentationTest {
         assertEquals("Read", DeliveryPresentation.label(DeliveryState.READ))
         assertEquals("Stored at relay", DeliveryPresentation.label(DeliveryState.STORED_AT_RELAY))
         assertEquals("Failed", DeliveryPresentation.label(DeliveryState.FAILED))
+        assertEquals("Cancelled", DeliveryPresentation.label(DeliveryState.CANCELLED))
+        assertEquals("Cancelled", DeliveryPresentation.bubbleStatus(DeliveryState.CANCELLED))
         assertTrue(DeliveryPresentation.bubbleStatus(DeliveryState.FAILED).contains("retry"))
         assertEquals("Read", DeliveryPresentation.bubbleStatus(DeliveryState.READ))
     }
@@ -130,6 +132,9 @@ class FriendlyPresentationTest {
             DeliveryPresentation.explanation(DeliveryState.FAILED, isChannel = false, peerName = "Alice")
                 .contains("retry", ignoreCase = true),
         )
+        val cancelled = DeliveryPresentation.explanation(DeliveryState.CANCELLED, isChannel = false, peerName = "Alice")
+        assertTrue(cancelled.contains("cancelled", ignoreCase = true))
+        assertTrue(cancelled.contains("airtime", ignoreCase = true))
     }
 
     @Test
@@ -146,6 +151,10 @@ class FriendlyPresentationTest {
         assertTrue(DeliveryPresentation.isUpgrade(DeliveryState.FAILED, DeliveryState.DELIVERED))
         assertFalse(DeliveryPresentation.isUpgrade(DeliveryState.FAILED, DeliveryState.FAILED))
         assertFalse(DeliveryPresentation.isUpgrade(DeliveryState.SENT, DeliveryState.SENT))
+        // A user cancel sticks: late progress/acks must not resurrect the send.
+        assertTrue(DeliveryPresentation.isUpgrade(DeliveryState.SENT, DeliveryState.CANCELLED))
+        assertFalse(DeliveryPresentation.isUpgrade(DeliveryState.CANCELLED, DeliveryState.SENT))
+        assertFalse(DeliveryPresentation.isUpgrade(DeliveryState.CANCELLED, DeliveryState.DELIVERED))
     }
 
     @Test

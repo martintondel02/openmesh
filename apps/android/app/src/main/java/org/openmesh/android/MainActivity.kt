@@ -26,6 +26,13 @@ import org.openmesh.android.ui.theme.OpenMeshTheme
 class MainActivity : ComponentActivity() {
     private var pendingThread = mutableStateOf<Pair<String, Boolean>?>(null)
 
+    override fun onStop() {
+        // Best-effort state export when the app leaves the foreground: keeps the frame sequence
+        // floor ahead of what peers have seen even if the process is later killed.
+        runCatching { MeshGraph.repository().persistStateOnLifecycleStop() }
+        super.onStop()
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val repository = MeshGraph.repository()
@@ -56,8 +63,13 @@ class MainActivity : ComponentActivity() {
                 val radio by repository.radio.collectAsState()
                 var showOnboarding by rememberSaveable { mutableStateOf<Boolean?>(null) }
                 LaunchedEffect(initialized, settings.setupCompleted) {
-                    if (initialized && showOnboarding == null) {
-                        showOnboarding = !settings.setupCompleted
+                    if (!initialized) return@LaunchedEffect
+                    // False after a factory reset too: the app must return to first-run setup with
+                    // the freshly generated identity (never keep showing the old shell).
+                    if (!settings.setupCompleted) {
+                        showOnboarding = true
+                    } else if (showOnboarding == null) {
+                        showOnboarding = false
                     }
                 }
                 var snackbar by remember { mutableStateOf<String?>(null) }

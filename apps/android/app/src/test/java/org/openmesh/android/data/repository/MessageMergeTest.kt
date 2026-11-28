@@ -149,6 +149,14 @@ class MessageMergeTest {
         assertEquals(DeliveryState.DELIVERED, MessageMerge.mergeDelivery(DeliveryState.QUEUED, DeliveryState.DELIVERED))
         assertEquals(DeliveryState.SENT, MessageMerge.mergeDelivery(DeliveryState.QUEUED, DeliveryState.SENT))
         assertEquals(DeliveryState.FAILED, MessageMerge.mergeDelivery(DeliveryState.FAILED, DeliveryState.SENT))
+        assertEquals(
+            DeliveryState.CANCELLED,
+            MessageMerge.mergeDelivery(DeliveryState.SENT, DeliveryState.CANCELLED),
+        )
+        assertEquals(
+            DeliveryState.CANCELLED,
+            MessageMerge.mergeDelivery(DeliveryState.CANCELLED, DeliveryState.DELIVERED),
+        )
     }
 
     @Test

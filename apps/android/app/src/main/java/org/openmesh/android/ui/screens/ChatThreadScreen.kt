@@ -34,6 +34,7 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.AttachFile
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.Public
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.PhotoCamera
 import androidx.compose.material.icons.filled.PlayArrow
@@ -67,6 +68,7 @@ import androidx.compose.ui.unit.dp
 import org.openmesh.android.data.model.DeliveryState
 import org.openmesh.android.data.model.Message
 import org.openmesh.android.data.model.MessageKind
+import org.openmesh.android.data.model.PublicMesh
 import org.openmesh.android.data.repository.MediaKind
 import org.openmesh.android.data.repository.MeshRepository
 import org.openmesh.android.media.AttachmentPlayer
@@ -111,6 +113,8 @@ fun ChatThreadScreen(
     val thread = if (isChannel) channelMessages[peerId].orEmpty() else directMessages[peerId].orEmpty()
     val settings by repository.settings.collectAsState()
     val outgoingMedia by repository.outgoingMediaUi.collectAsState()
+    val channels by repository.channels.collectAsState()
+    val publicChannel = isChannel && channels.firstOrNull { it.id == peerId }?.isPublic == true
     val listState = rememberLazyListState()
 
     var draft by remember { mutableStateOf("") }
@@ -207,7 +211,9 @@ fun ChatThreadScreen(
                     overflow = TextOverflow.Ellipsis,
                 )
                 Text(
-                    if (isChannel) {
+                    if (isChannel && publicChannel) {
+                        PublicMesh.headerSubtitle()
+                    } else if (isChannel) {
                         "Channel · ${settings.profile.replace('_', ' ').lowercase()} · ${settings.region}"
                     } else {
                         "${NamePolicy.shortId(peerId)} · ${settings.profile.replace('_', ' ').lowercase()} · " +
@@ -219,6 +225,32 @@ fun ChatThreadScreen(
             }
             IconButton(onClick = { showPeerDetail = true }) {
                 Icon(Icons.Filled.Info, contentDescription = "Peer details and link quality")
+            }
+        }
+
+        if (publicChannel) {
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .background(MeshTertiary.copy(alpha = 0.10f))
+                    .padding(horizontal = 16.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Icon(
+                    Icons.Filled.Public,
+                    contentDescription = null,
+                    tint = MeshTertiary,
+                    modifier = Modifier.size(16.dp),
+                )
+                Spacer(Modifier.width(8.dp))
+                Column {
+                    Text("PUBLIC channel", style = MaterialTheme.typography.labelMedium, color = MeshTertiary)
+                    Text(
+                        PublicMesh.shortWarning(),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MeshOnSurfaceVariant,
+                    )
+                }
             }
         }
 
@@ -381,6 +413,7 @@ fun ChatThreadScreen(
             isChannel = isChannel,
             peerName = repository.displayNameFor(peerId),
             uploadUi = upload,
+            onCancel = { repository.cancelUpload(message.id) },
             onRetry = {
                 if (stalledUpload != null) {
                     repository.retryUpload(message.id)
@@ -404,9 +437,12 @@ private fun MessageStatusDialog(
     isChannel: Boolean,
     peerName: String,
     uploadUi: OutgoingMediaUi?,
+    onCancel: () -> Unit,
     onRetry: () -> Unit,
     onDismiss: () -> Unit,
 ) {
+    val cancellable = message.outgoing &&
+        (message.delivery == DeliveryState.QUEUED || message.delivery == DeliveryState.SENT)
     val uploadStalled = uploadUi?.state == OutgoingMediaUiState.STALLED &&
         message.delivery == DeliveryState.SENT
     val uploadWaitingRetry = uploadUi?.state == OutgoingMediaUiState.AUTO_RETRY_WAIT &&
@@ -442,6 +478,9 @@ private fun MessageStatusDialog(
             Row {
                 if (message.delivery == DeliveryState.FAILED || uploadStalled || uploadWaitingRetry) {
                     TextButton(onClick = onRetry) { Text("Retry") }
+                }
+                if (cancellable) {
+                    TextButton(onClick = onCancel) { Text("Cancel send", color = MeshError) }
                 }
                 TextButton(onClick = onDismiss) { Text("Close") }
             }
@@ -682,6 +721,11 @@ private fun AttachmentBubble(
         }
     }
     if (outgoing) {
+        if (message.delivery == DeliveryState.QUEUED || message.delivery == DeliveryState.SENT) {
+            TextButton(onClick = { repository.cancelUpload(message.id) }) {
+                Text("Cancel send", color = MeshError)
+            }
+        }
         when {
             message.delivery == DeliveryState.QUEUED -> {
                 Text(

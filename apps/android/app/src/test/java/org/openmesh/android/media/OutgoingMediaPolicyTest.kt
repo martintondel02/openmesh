@@ -29,6 +29,7 @@ class OutgoingMediaPolicyTest {
         sizeBytes: Int = 5_000,
         autoRetries: Int = 0,
         nextAutoRetryAtMs: Long? = null,
+        manualOnly: Boolean = false,
     ) = OutgoingMediaSnapshot(
         isChannel = isChannel,
         mime = mime,
@@ -40,6 +41,7 @@ class OutgoingMediaPolicyTest {
         attempts = attempts,
         autoRetries = autoRetries,
         nextAutoRetryAtMs = nextAutoRetryAtMs,
+        manualOnly = manualOnly,
     )
 
     @Test
@@ -301,6 +303,67 @@ class OutgoingMediaPolicyTest {
         val ui = OutgoingMediaPolicy.uiState(scheduled, now + 31_000)
         assertEquals(OutgoingMediaUiState.STALLED, ui.state)
         assertEquals("Stalled — tap Retry", OutgoingMediaPolicy.statusText(ui))
+    }
+
+    @Test
+    fun `cancel is allowed only while the send can still cost airtime`() {
+        assertTrue(OutgoingMediaPolicy.canCancel(DeliveryState.QUEUED))
+        assertTrue(OutgoingMediaPolicy.canCancel(DeliveryState.SENT))
+        assertTrue(OutgoingMediaPolicy.canCancel(DeliveryState.FAILED))
+        assertFalse(OutgoingMediaPolicy.canCancel(DeliveryState.DELIVERED))
+        assertFalse(OutgoingMediaPolicy.canCancel(DeliveryState.READ))
+        assertFalse(OutgoingMediaPolicy.canCancel(DeliveryState.CANCELLED))
+    }
+
+    @Test
+    fun `cancel transition stops scheduled automatic retries`() {
+        val scheduled = snapshot(
+            sentAtMs = now - 120_000,
+            lastActivityMs = now - 60_000,
+            expectedWindowMs = 5_000,
+            progress = 0.4f,
+        ).let { OutgoingMediaPolicy.scheduleAutoRetry(it, now) }
+        assertEquals(OutgoingMediaUiState.AUTO_RETRY_WAIT, OutgoingMediaPolicy.uiState(scheduled, now).state)
+
+        val cancelled = OutgoingMediaPolicy.cancelled(scheduled)
+        assertNull(cancelled.nextAutoRetryAtMs)
+        assertNull(cancelled.progress)
+        assertEquals(scheduled.autoRetries, cancelled.autoRetries)
+        // No auto retry can be due after cancellation (tracker is removed by the repository).
+        assertFalse(OutgoingMediaPolicy.isAutoRetryDue(cancelled, now + 10 * 60_000))
+    }
+
+    @Test
+    fun `rows restored from disk are manual-retry-only`() {
+        val restored = snapshot(
+            sentAtMs = now - 600_000,
+            lastActivityMs = now - 300_000,
+            expectedWindowMs = 5_000,
+            manualOnly = true,
+        )
+        // Stalled, but never auto-retried or scheduled by the governor.
+        assertEquals(OutgoingMediaUiState.STALLED, OutgoingMediaPolicy.uiState(restored, now).state)
+        assertFalse(OutgoingMediaPolicy.autoRetryAllowed(restored))
+        assertFalse(OutgoingMediaPolicy.isAutoRetryDue(restored, now + 24 * 3600_000L))
+        assertNull(OutgoingMediaPolicy.pickAutoRetryCandidate(mapOf(7L to restored), now))
+
+        // Live uploads in this process stay eligible.
+        assertTrue(OutgoingMediaPolicy.autoRetryAllowed(snapshot(manualOnly = false)))
+    }
+
+    @Test
+    fun `manual retry opts a restored row back into live tracking`() {
+        val restored = snapshot(
+            sentAtMs = now - 600_000,
+            lastActivityMs = now - 300_000,
+            expectedWindowMs = 5_000,
+            manualOnly = true,
+        )
+        val retried = OutgoingMediaPolicy.markManualRetry(restored, now)
+        assertFalse(retried.manualOnly)
+        assertEquals(0, retried.autoRetries)
+        assertTrue(OutgoingMediaPolicy.autoRetryAllowed(retried))
+        assertNull(retried.nextAutoRetryAtMs)
     }
 
     private fun message(delivery: DeliveryState, outgoing: Boolean, kind: MessageKind) = Message(

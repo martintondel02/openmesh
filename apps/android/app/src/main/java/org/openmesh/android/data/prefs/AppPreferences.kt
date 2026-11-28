@@ -139,6 +139,9 @@ class AppPreferences(private val context: Context) {
         if (freqKhz != null) prefs[Keys.overrideFreq] = freqKhz else prefs.remove(Keys.overrideFreq)
         if (reason != null) prefs[Keys.overrideReason] = reason else prefs.remove(Keys.overrideReason)
     }
+    /** Factory reset: wipe every persisted app preference and engine state. */
+    suspend fun clearAll() = edit { it.clear() }
+
     suspend fun setEngineState(bytes: ByteArray) =
         edit { it[Keys.engineState] = Base64.encodeToString(bytes, Base64.NO_WRAP) }
 

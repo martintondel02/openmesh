@@ -49,10 +49,12 @@ import org.openmesh.android.data.model.Message
 import org.openmesh.android.data.model.MessageKind
 import org.openmesh.android.data.model.NodeClass
 import org.openmesh.android.data.model.NodeInfo
+import org.openmesh.android.data.model.PublicMesh
 import org.openmesh.android.data.model.Position
 import org.openmesh.android.data.model.RadioStatus
 import org.openmesh.android.data.notify.Notifications
 import org.openmesh.android.data.prefs.AppPreferences
+import org.openmesh.android.data.prefs.SequenceFloorStore
 import org.openmesh.android.data.prefs.UiMode
 import org.openmesh.android.data.presets.AppliedPreset
 import org.openmesh.android.data.presets.BeginnerAnswers
@@ -219,6 +221,16 @@ class MeshRepository(
     /** True while an automatic upload retry is being started, so only one runs at a time. */
     @Volatile private var autoRetryInFlight = false
 
+    /** Wall-clock of the last successful engine-state export (debounced + periodic writes). */
+    @Volatile private var lastStatePersistMs = 0L
+
+    /** While a factory reset is wiping stores, no persistence may recreate old state. */
+    @Volatile private var factoryResetInProgress = false
+
+    /** Cheap per-send frame sequence floor (SharedPreferences; survives process death). */
+    private val seqFloorStore = SequenceFloorStore(appContext)
+    @Volatile private var lastSeqFloorPersistMs = 0L
+
     // ---- Queued outbound messages (radio not READY): held locally, sent on the next READY link. ----
     private val MAX_QUEUED_MESSAGES = 50
     private val HANDSHAKE_TIMEOUT_MS = 20_000L
@@ -250,6 +262,19 @@ class MeshRepository(
                 val current = _radio.value
                 val health = RadioHealthPolicy.compute(current.phase, current.lastReplyMs, System.currentTimeMillis())
                 if (health != current.health) _radio.value = current.copy(health = health)
+            }
+        }
+        // Keep the persisted engine state (frame sequence floor + message counters) fresh while
+        // running: a process restart must never re-originate frames a peer has already seen.
+        scope.launch {
+            while (isActive) {
+                delay(2_000)
+                val now = System.currentTimeMillis()
+                if (_engineReady.value &&
+                    EngineStatePersistence.shouldPersistPeriodically(lastStatePersistMs, now)
+                ) {
+                    persistEngineState(force = true)
+                }
             }
         }
         // Re-evaluate upload health once a second so stalled uploads flip to "Stalled — tap Retry"
@@ -288,7 +313,14 @@ class MeshRepository(
     }
 
     private suspend fun loadFromDatabase() {
-        val channels = dao.channels().map { Channel(it.id, it.name, pskSet = it.pskSet) }
+        val channels = dao.channels().map {
+            Channel(
+                id = it.id,
+                name = it.name,
+                pskSet = it.pskSet,
+                isPublic = PublicMesh.isPublicChannel(it.id, it.name),
+            )
+        }
         val channelIds = channels.map { it.id }.toSet()
         val all = dao.messages().map { it.toModel() }
         val direct = all.filter { it.peerId !in channelIds }
@@ -323,7 +355,7 @@ class MeshRepository(
                         sizeBytes = attachment.sizeBytes,
                         sentAtMs = message.sentAtMs,
                         expectedWindowMs = expectedMediaWindowMs(attachment.sizeBytes),
-                    )
+                    ).copy(manualOnly = true)
                 }
         }
         add(direct.filter { it.peerId !in channelIds }, false)
@@ -404,6 +436,23 @@ class MeshRepository(
         engine.start(seed, config)
         val state = prefs.engineState()
         if (state != null && state.isNotEmpty()) runCatching { engine.importState(state) }
+        // Restore the frame sequence floor BEFORE any channel heal/announce/send. The persisted
+        // per-send floor wins over a stale full-state export so peers never see a reused (src, seq).
+        val importedFloor = EngineStatePersistence.sequenceFloorFromState(state)
+        val persistedFloor = seqFloorStore.read()
+        val restoredFloor = EngineStatePersistence.restoredSequenceFloor(persistedFloor, importedFloor)
+        if (restoredFloor > 0L) {
+            runCatching { engine.setSequenceFloor(restoredFloor) }
+                .onFailure { MeshLog.w("setSequenceFloor($restoredFloor) failed: ${it.message}") }
+            lastSeqFloorPersistMs = System.currentTimeMillis()
+            val seqAfter = runCatching { engine.lastSeq() }.getOrNull()
+            MeshLog.i(
+                "sequence floor restored: persisted=$persistedFloor import=${importedFloor ?: 0} " +
+                    "-> applied=$restoredFloor seq_after=$seqAfter (next frame must be > $restoredFloor)",
+            )
+        } else {
+            MeshLog.i("sequence floor restored: none persisted yet (fresh install)")
+        }
         // Heal channel keys after a process restart. Engine state is exported on stop(); if the
         // process was killed (or the app updated) channels joined earlier can be missing from the
         // engine even though they are persisted in the DB, which made sending fail with UnknownNode.
@@ -416,6 +465,7 @@ class MeshRepository(
                 engine.joinChannel(invite.name, invite.pskBase64)
             }
         }.onFailure { MeshLog.w("channel restore failed: ${it.message}") }
+        ensurePublicMesh()
         _selfNodeId.value = engine.nodeIdHex()
         _selfIdentity.value = engine.publicIdentityB64()
         _engineStatus.value = engine.status.value
@@ -430,6 +480,10 @@ class MeshRepository(
                 MeshLog.i("radio tx frame size=${out.frame.size} peer=${out.directPeerHex ?: "broadcast"}")
                 runCatching { c.sendFrame(out.frame) }
                     .onFailure { MeshLog.w("radio tx failed: ${it.message}", it) }
+                // Every originated frame consumes a sequence number; keep the cheap floor fresh
+                // (throttled to ~1/s) and the full state on its slower periodic schedule.
+                persistSequenceFloor()
+                persistEngineState()
             }
         }
         engineJobs += scope.launch { engine.status.collect { _engineStatus.value = it } }
@@ -445,6 +499,7 @@ class MeshRepository(
         }
         applyResourcePaceHint()
         runCatching { engine.announce(System.currentTimeMillis()) }
+        persistSequenceFloor(force = true)
         if (saved.demoMode) seedDemo()
         _engineReady.value = true
         // Messages written while the engine/link was not ready are sent now (if the link is READY).
@@ -459,8 +514,8 @@ class MeshRepository(
         _engineReady.value = false
         tickJob?.cancel()
         tickJob = null
-        val export = runCatching { engine.exportState() }.getOrNull()
-        if (export != null && export.isNotEmpty()) scope.launch { prefs.setEngineState(export) }
+        persistSequenceFloor(force = true)
+        scope.launch { persistEngineStateNow() }
         engineJobs.forEach { it.cancel() }
         engineJobs = mutableListOf()
         disconnectCompanion()
@@ -530,6 +585,8 @@ class MeshRepository(
         )
         appendMessage(peerId, message, channel)
         scope.launch { dao.upsertMessage(MessageEntity.fromModel(message)) }
+        persistEngineState()
+        persistSequenceFloor(force = true)
         if (engine.isDemo()) simulateAck(peerId, id, channel)
         return id
     }
@@ -602,6 +659,8 @@ class MeshRepository(
         scope.launch { dao.upsertMessage(MessageEntity.fromModel(message)) }
         trackOutgoingMedia(message, channel)
         lastResourceActivityMs = System.currentTimeMillis()
+        persistEngineState()
+        persistSequenceFloor(force = true)
         if (engine.isDemo()) simulateAck(peerId, id, channel)
         // Keep the local file reference for playback/retry.
         local.absolutePath
@@ -812,6 +871,8 @@ class MeshRepository(
         )
         appendMessage(queued.peerId, message, queued.channel)
         trackOutgoingMedia(message, queued.channel)
+        persistEngineState(force = true)
+        persistSequenceFloor(force = true)
         scope.launch {
             dao.deleteMessage(queued.localId)
             dao.upsertMessage(MessageEntity.fromModel(message))
@@ -988,7 +1049,9 @@ class MeshRepository(
         _messages.value = mapThreads(_messages.value)
         _channelMessages.value = mapThreads(_channelMessages.value)
         rebuildConversations()
-        if (state == DeliveryState.DELIVERED || state == DeliveryState.READ || state == DeliveryState.FAILED) {
+        if (state == DeliveryState.DELIVERED || state == DeliveryState.READ ||
+            state == DeliveryState.FAILED || state == DeliveryState.CANCELLED
+        ) {
             clearOutgoingMedia(id)
         }
         scope.launch {
@@ -1023,6 +1086,104 @@ class MeshRepository(
             )
         } else {
             MeshLog.i("resource pace: helper unavailable; keeping core default")
+        }
+    }
+
+    // ---------------------------------------------------------------- public mesh / factory reset
+
+    /**
+     * Idempotently join the built-in Public Mesh channel on every engine start (fresh install,
+     * restart, factory reset). The core derives the canonical channel address; the returned id must
+     * match [PublicMesh.CANONICAL_CHANNEL_ID] (logged if not, so drift is visible).
+     */
+    private fun ensurePublicMesh() {
+        if (engine.isDemo()) return
+        val result = engine.joinChannel(PublicMesh.NAME, PublicMesh.PSK_BASE64URL)
+        result.onSuccess { invite ->
+            val id = invite.channelIdHex.lowercase()
+            val channel = Channel(
+                id = id,
+                name = PublicMesh.NAME,
+                pskSet = true,
+                isPublic = true,
+            )
+            _channels.value = _channels.value.filterNot { it.id == id } + channel
+            if (id != PublicMesh.CANONICAL_CHANNEL_ID) {
+                MeshLog.w(
+                    "public mesh: engine channel id=$id does not match canonical " +
+                        PublicMesh.CANONICAL_CHANNEL_ID,
+                )
+            }
+            MeshLog.i("public mesh ensured id=$id name=${PublicMesh.NAME}")
+            scope.launch { dao.upsertChannel(ChannelEntity(id, PublicMesh.NAME, true, invite.inviteUrl)) }
+            persistEngineState(force = true)
+        }.onFailure {
+            // Already-present channel can still fail on some engines; at least keep it pinned/public.
+            MeshLog.w("public mesh ensure failed: ${it.message}")
+            _channels.value = _channels.value.map {
+                if (PublicMesh.isPublicChannel(it.id, it.name)) it.copy(isPublic = true) else it
+            }
+        }
+    }
+
+    /** Join URL for the Public Mesh channel (name + published PSK only; no cosmetic id). */
+    fun publicMeshJoinUrl(): String = PublicMesh.JOIN_URL
+
+    /**
+     * Full factory reset: stop the engine/radio, wipe Room + prefs + engine state + identity keys,
+     * attachments and the frame-sequence floor, then leave the app in first-run/onboarding state.
+     * The next onboarding/start generates a NEW identity (node id/QR changes; old contacts/QRs are
+     * invalid) and [ensurePublicMesh] re-creates the public channel.
+     */
+    fun factoryReset() {
+        MeshLog.i("factory reset: begin (wipe DB/prefs/identity/state)")
+        factoryResetInProgress = true
+        synchronized(startedLock) { started = false }
+        _engineReady.value = false
+        tickJob?.cancel()
+        tickJob = null
+        engineJobs.forEach { it.cancel() }
+        engineJobs = mutableListOf()
+        companionJob?.cancel()
+        companionJob = null
+        scope.launch {
+            runCatching { engine.stop() }
+            runCatching { disconnectCompanion() }
+            synchronized(queueLock) {
+                outboundQueue.clear()
+                nextLocalMessageId = -1L
+            }
+            runCatching { database.clearAllTables() }
+            runCatching { File(appContext.filesDir, "attachments").deleteRecursively() }
+            runCatching { identityStore.clear(prefs) }
+            runCatching { prefs.clearAll() }
+            seqFloorStore.clear()
+            latestPrefs = org.openmesh.android.data.prefs.LocalPrefs()
+            // Reset in-memory state so no old rows/uploads/floors survive in this process.
+            _settings.value = AppSettings()
+            _nodes.value = emptyList()
+            _contacts.value = emptyList()
+            _channels.value = emptyList()
+            _messages.value = emptyMap()
+            _channelMessages.value = emptyMap()
+            _conversations.value = emptyList()
+            _outgoingMedia.value = emptyMap()
+            _outgoingMediaUi.value = emptyMap()
+            _radio.value = RadioStatus()
+            _stats.value = CoreStats()
+            _engineStatus.value = CoreStatus()
+            _selfNodeId.value = null
+            _selfIdentity.value = null
+            lastSeqFloorPersistMs = 0L
+            lastStatePersistMs = 0L
+            factoryResetInProgress = false
+            runCatching {
+                appContext.stopService(android.content.Intent(appContext, org.openmesh.android.service.MeshService::class.java))
+            }
+            _uiEvents.tryEmit(
+                UiEvent.Snackbar("Factory reset complete — set up your node again (new identity/QR)."),
+            )
+            MeshLog.i("factory reset: complete (fresh identity on next start; public mesh will be re-added)")
         }
     }
 
@@ -1133,7 +1294,12 @@ class MeshRepository(
         val found = findMessageWithThread(messageId) ?: return
         val (peerId, channel, message) = found
         if (!message.outgoing || message.kind != MessageKind.ATTACHMENT) return
-        if (message.delivery == DeliveryState.DELIVERED || message.delivery == DeliveryState.READ) return
+        if (message.delivery == DeliveryState.DELIVERED ||
+            message.delivery == DeliveryState.READ ||
+            message.delivery == DeliveryState.CANCELLED
+        ) {
+            return
+        }
         if (shouldQueueLocally()) {
             _uiEvents.tryEmit(UiEvent.Snackbar("Connect a radio to retry this upload."))
             return
@@ -1239,10 +1405,58 @@ class MeshRepository(
             runCatching { dao.deleteMessage(old.id) }
             runCatching { dao.upsertMessage(MessageEntity.fromModel(replacement)) }
         }
+        persistEngineState()
+        persistSequenceFloor(force = true)
         MeshLog.i(
             "outgoing media retried old_id=${old.id} new_id=$newId bytes=${bytes.size} " +
                 "written=$written channel=$channel",
         )
+    }
+
+    /**
+     * Cancel an outgoing send (in-flight attachment resource or a locally queued message).
+     *
+     * Sets the terminal [DeliveryState.CANCELLED] immediately when the engine confirms, clears the
+     * upload tracker (no auto retry) and persists. The engine's MessageCancelled event is
+     * idempotent confirmation on the next tick. Cancelled rows reject Retry.
+     */
+    fun cancelUpload(messageId: Long) {
+        val found = findMessageWithThread(messageId) ?: return
+        val (peerId, channel, message) = found
+        if (!message.outgoing) return
+        if (message.delivery == DeliveryState.DELIVERED ||
+            message.delivery == DeliveryState.READ ||
+            message.delivery == DeliveryState.CANCELLED
+        ) {
+            _uiEvents.tryEmit(UiEvent.Snackbar("This send already finished — it can't be cancelled."))
+            return
+        }
+        if (messageId < 0L) {
+            // A locally queued message the engine never saw: drop it from the queue and settle it.
+            val removed = synchronized(queueLock) {
+                outboundQueue.removeAll { it.localId == messageId }
+            }
+            if (removed) {
+                updateDeliveryAnywhere(messageId, DeliveryState.CANCELLED, channel)
+                clearOutgoingMedia(messageId)
+                refreshQueuedCount()
+                persistEngineState(force = true)
+                MeshLog.i("queued send cancelled local_id=$messageId channel=$channel")
+                _uiEvents.tryEmit(UiEvent.Snackbar("Queued send cancelled."))
+            }
+            return
+        }
+        val cancelled = runCatching { engine.cancelMessage(messageId) }.getOrDefault(false)
+        if (cancelled) {
+            updateDeliveryAnywhere(messageId, DeliveryState.CANCELLED, channel)
+            clearOutgoingMedia(messageId)
+            persistEngineState(force = true)
+            MeshLog.i("send cancelled msg_id=$messageId channel=$channel")
+            _uiEvents.tryEmit(UiEvent.Snackbar("Send cancelled — no more airtime is used."))
+        } else {
+            MeshLog.i("send cancel declined msg_id=$messageId (already complete/unknown)")
+            _uiEvents.tryEmit(UiEvent.Snackbar("This send already finished — it can't be cancelled."))
+        }
     }
 
     private fun findMessageWithThread(id: Long): Triple<String, Boolean, Message>? {
@@ -1715,15 +1929,55 @@ class MeshRepository(
 
     // ---------------------------------------------------------------- contacts / invites / channels
 
-    /** Persist engine state after mutations (channels/contacts) so a later process death cannot
-     * lose keys that only exist in memory. */
-    private fun persistEngineState() {
-        scope.launch {
-            runCatching { engine.exportState() }
-                .getOrNull()
-                ?.takeIf { it.isNotEmpty() }
-                ?.let { prefs.setEngineState(it) }
-        }
+    /**
+     * Persist the engine state (frame sequence floor, message-id counters, contacts/channels).
+     *
+     * Triggered after sends/frames (debounced to at most every [EngineStatePersistence.SEND_DEBOUNCE_MS]),
+     * periodically while running, after channel/contact mutations (force) and from lifecycle stop.
+     * Without this a process restart restores a stale `last_seq`, reuses `(src, seq)` numbers and the
+     * bridge/peer silently deduplicates the phone's frames for its dedup TTL (the phone→PC media bug).
+     */
+    private fun persistEngineState(force: Boolean = false) {
+        if (factoryResetInProgress) return
+        val now = System.currentTimeMillis()
+        if (!force && !EngineStatePersistence.shouldPersistAfterSend(lastStatePersistMs, now)) return
+        lastStatePersistMs = now
+        scope.launch { persistEngineStateNow() }
+    }
+
+    private suspend fun persistEngineStateNow() {
+        val export = runCatching { engine.exportState() }.getOrNull()
+            ?.takeIf { it.isNotEmpty() }
+            ?: return
+        prefs.setEngineState(export)
+        MeshLog.i(
+            "engine state persisted: bytes=${export.size} " +
+                "seq_floor=${EngineStatePersistence.sequenceFloorFromState(export)}",
+        )
+    }
+
+    /** Called from the activity/service lifecycle: persist immediately (best effort). */
+    fun persistStateOnLifecycleStop() {
+        if (!_engineReady.value) return
+        MeshLog.i("engine state persist: lifecycle stop")
+        persistSequenceFloor(force = true)
+        persistEngineState(force = true)
+    }
+
+    /**
+     * Persist the engine's current frame sequence number as a cheap floor (SharedPreferences).
+     * Forced after sends/stops; throttled to ~1/s while frames flow. Never writes a lower value.
+     */
+    private fun persistSequenceFloor(force: Boolean = false) {
+        if (factoryResetInProgress) return
+        val seq = runCatching { engine.lastSeq() }.getOrNull()?.takeIf { it > 0L } ?: return
+        val now = System.currentTimeMillis()
+        if (!force && !EngineStatePersistence.shouldPersistSequenceFloor(lastSeqFloorPersistMs, now)) return
+        val previous = seqFloorStore.read()
+        lastSeqFloorPersistMs = now
+        if (seq <= previous) return
+        seqFloorStore.write(seq)
+        MeshLog.i("frame sequence floor persisted: lastSeq=$seq (was $previous)")
     }
 
 
@@ -1758,7 +2012,12 @@ class MeshRepository(
             QrInvite.Kind.CHANNEL -> {
                 val joined = engine.joinChannel(invite.name, invite.pskBase64)
                 val channelId = joined.getOrNull()?.channelIdHex ?: invite.nodeId
-                val channel = Channel(channelId, invite.name, pskSet = invite.pskBase64.isNotEmpty())
+                val channel = Channel(
+                    channelId,
+                    invite.name,
+                    pskSet = invite.pskBase64.isNotEmpty(),
+                    isPublic = PublicMesh.isPublicChannel(channelId, invite.name),
+                )
                 if (_channels.value.none { it.id == channelId }) {
                     _channels.value = _channels.value + channel
                 }
@@ -1767,7 +2026,7 @@ class MeshRepository(
                 }
             }
         }
-        persistEngineState()
+        persistEngineState(force = true)
         _uiEvents.tryEmit(UiEvent.InviteImported(invite.name, invite.kind == QrInvite.Kind.CHANNEL))
         invite
     }
@@ -1778,10 +2037,14 @@ class MeshRepository(
         result.getOrNull()?.let { invite ->
             MeshLog.i("channel created ${invite.channelIdHex} name=${invite.name}")
             _lastChannelInvite.value = invite.inviteUrl
-            val channel = Channel(invite.channelIdHex, invite.name)
+            val channel = Channel(
+                invite.channelIdHex,
+                invite.name,
+                isPublic = PublicMesh.isPublicChannel(invite.channelIdHex, invite.name),
+            )
             _channels.value = _channels.value.filterNot { it.id == channel.id } + channel
             scope.launch { dao.upsertChannel(ChannelEntity(channel.id, channel.name, true, invite.inviteUrl)) }
-            persistEngineState()
+            persistEngineState(force = true)
         }
         return result
     }
@@ -1790,10 +2053,14 @@ class MeshRepository(
         val result = engine.joinChannel(name, pskBase64)
         result.getOrNull()?.let { invite ->
             _lastChannelInvite.value = invite.inviteUrl
-            val channel = Channel(invite.channelIdHex, invite.name)
+            val channel = Channel(
+                invite.channelIdHex,
+                invite.name,
+                isPublic = PublicMesh.isPublicChannel(invite.channelIdHex, invite.name),
+            )
             _channels.value = _channels.value.filterNot { it.id == channel.id } + channel
             scope.launch { dao.upsertChannel(ChannelEntity(channel.id, channel.name, true, invite.inviteUrl)) }
-            persistEngineState()
+            persistEngineState(force = true)
         }
         return result
     }
@@ -2074,6 +2341,14 @@ class MeshRepository(
     }
 
     fun mediaCapBytes(): Int = MediaMath.capBytes(_settings.value.profile)
+
+    /**
+     * Encode RGBA8 pixels to a complete AVIF file through the shared Rust encoder. CPU-bound:
+     * callers must use a background dispatcher (the tier dialog uses Dispatchers.IO). Null means
+     * fall back to the platform WebP/JPEG encoder and label the payload honestly.
+     */
+    fun encodeAvif(rgba: ByteArray, width: Int, height: Int, quality: Int, speed: Int): ByteArray? =
+        runCatching { engine.encodeAvif(rgba, width, height, quality, speed) }.getOrNull()
 
     fun maxVoiceSeconds(): Int = MediaMath.maxVoiceSeconds(_settings.value.profile)
 

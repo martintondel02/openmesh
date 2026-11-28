@@ -160,6 +160,29 @@ interface EngineBridge {
     fun retryMessage(msgId: Long, nowMs: Long = System.currentTimeMillis()): Result<Unit>
     fun markRead(msgId: Long, nowMs: Long = System.currentTimeMillis()): Result<Unit>
 
+    /**
+     * Sequence number of the most recently originated frame (null when unsupported/demo).
+     * Persist this as a cheap floor after sends so a restart cannot rewind `(src, seq)` numbers.
+     */
+    fun lastSeq(): Long? = null
+
+    /** Raise the engine frame-sequence floor; the next originated frame has seq > [floor]. */
+    fun setSequenceFloor(floor: Long) {}
+
+    /**
+     * Cancel an in-flight resource transfer / queued direct message. True when something was
+     * cancelled; false for unknown/already-complete ids. The cancelled event arrives on the next
+     * tick and is idempotent with the immediate local CANCELLED state.
+     */
+    fun cancelMessage(msgId: Long): Boolean = false
+
+    /**
+     * Encode raw RGBA8 pixels to a complete AVIF file with the shared Rust encoder (heavy, CPU-bound:
+     * call from a background dispatcher). Returns null on demo/unsupported engine or encoder failure;
+     * callers then keep the platform WebP/JPEG fallback and must not mislabel it as AVIF.
+     */
+    fun encodeAvif(rgba: ByteArray, width: Int, height: Int, quality: Int, speed: Int): ByteArray? = null
+
     fun addContact(identityB64: String, name: String)
     fun removeContact(nodeIdHex: String)
     fun createChannel(name: String): Result<ChannelInvite>
@@ -306,6 +329,36 @@ class UniFfiEngineBridge : EngineBridge {
 
     override fun markRead(msgId: Long, nowMs: Long): Result<Unit> = runEngine {
         dispatch(it.markRead(msgId, nowMs))
+    }
+
+    override fun lastSeq(): Long? = withNode { it.lastSeq().toLong() }
+
+    override fun setSequenceFloor(floor: Long) {
+        val bounded = floor.coerceIn(0L, UInt.MAX_VALUE.toLong()).toUInt()
+        withNode { it.setSequenceFloor(bounded) }
+    }
+
+    override fun cancelMessage(msgId: Long): Boolean {
+        val bounded = msgId.coerceIn(0L, UInt.MAX_VALUE.toLong()).toUInt()
+        return withNode { it.cancelMessage(bounded) } ?: false
+    }
+
+    override fun encodeAvif(rgba: ByteArray, width: Int, height: Int, quality: Int, speed: Int): ByteArray? {
+        val current = node ?: return null
+        if (rgba.isEmpty() || width <= 0 || height <= 0) return null
+        return synchronized(lock) {
+            // Keep encoder failures quiet here: the compressor logs the fallback and the UI stays
+            // honest (image/webp) rather than surfacing a snackbar for every unsupported image.
+            runCatching {
+                current.encodeAvif(
+                    rgba = rgba,
+                    width = width.toUInt(),
+                    height = height.toUInt(),
+                    quality = quality.coerceIn(1, 100).toUByte(),
+                    speed = speed.coerceIn(0, 10).toUByte(),
+                )
+            }.getOrNull()
+        }
     }
 
     override fun addContact(identityB64: String, name: String) {
@@ -465,6 +518,7 @@ class UniFfiEngineBridge : EngineBridge {
         )
 
         is FfiEvent.AttachmentSent -> CoreEvent.DeliveryChanged(event.msgId, DeliveryState.DELIVERED)
+        is FfiEvent.MessageCancelled -> CoreEvent.DeliveryChanged(event.msgId, DeliveryState.CANCELLED)
         is FfiEvent.StoreOffer -> CoreEvent.StoreOffer(event.relay, event.count.toInt())
         is FfiEvent.Error -> CoreEvent.CoreError(event.message)
     }

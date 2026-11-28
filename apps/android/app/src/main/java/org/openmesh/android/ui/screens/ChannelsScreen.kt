@@ -3,6 +3,8 @@ package org.openmesh.android.ui.screens
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -11,6 +13,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Public
 import androidx.compose.material.icons.filled.QrCodeScanner
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -34,6 +37,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.launch
+import org.openmesh.android.data.model.PublicMesh
 import org.openmesh.android.data.repository.MeshRepository
 import org.openmesh.android.ui.components.InviteQr
 import org.openmesh.android.ui.theme.MeshOnSurfaceVariant
@@ -74,7 +78,27 @@ fun ChannelsScreen(
             Modifier.fillMaxSize().padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            items(channels, key = { it.id }) { channel ->
+            item {
+                Card(
+                    colors = CardDefaults.cardColors(containerColor = MeshSurfaceHigh.copy(alpha = 0.7f)),
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(Icons.Filled.Public, contentDescription = null, tint = MaterialTheme.colorScheme.tertiary)
+                            Spacer(Modifier.width(6.dp))
+                            Text("Public Mesh", style = MaterialTheme.typography.titleMedium)
+                        }
+                        Text(PublicMesh.warning(), style = MaterialTheme.typography.bodySmall, color = MeshOnSurfaceVariant)
+                        Text(
+                            "Joining URL: ${PublicMesh.JOIN_URL}",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MeshOnSurfaceVariant,
+                        )
+                    }
+                }
+            }
+            items(PublicMesh.pinFirst(channels), key = { it.id }) { channel ->
                 Card(
                     onClick = { onOpenThread(channel.id) },
                     colors = CardDefaults.cardColors(containerColor = MeshSurfaceHigh),
@@ -82,8 +106,22 @@ fun ChannelsScreen(
                 ) {
                     Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
                         Column(Modifier.weight(1f)) {
-                            Text("#${channel.name}", style = MaterialTheme.typography.titleMedium)
-                            Text("Channel ${channel.id.take(8)}… · key set", style = MaterialTheme.typography.bodySmall, color = MeshOnSurfaceVariant)
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text("#${channel.name}", style = MaterialTheme.typography.titleMedium)
+                                if (channel.isPublic) {
+                                    Spacer(Modifier.width(6.dp))
+                                    Text(PublicMesh.BADGE, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.tertiary)
+                                }
+                            }
+                            Text(
+                                if (channel.isPublic) {
+                                    "Public · anyone can join · canonical id ${channel.id.take(8)}…"
+                                } else {
+                                    "Channel ${channel.id.take(8)}… · key set"
+                                },
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MeshOnSurfaceVariant,
+                            )
                         }
                         if (channel.unreadCount > 0) Text("${channel.unreadCount} new", color = MaterialTheme.colorScheme.primary)
                     }

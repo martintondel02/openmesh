@@ -12,7 +12,8 @@ data class ImageTier(
     val id: String = "",
     @SerialName("max_dim") val maxDim: Int? = null,
     val quality: Double? = null,
-    val mime: String = "image/webp",
+    /** Target MIME from the shared preset; empty means "platform preference" (AVIF on API 30+). */
+    val mime: String = "",
 )
 
 @Serializable
@@ -119,6 +120,7 @@ object MediaTierPolicy {
             mime.startsWith("audio/c2-3200") -> "Codec2 3.2k"
             mime.contains("opus") -> "Opus"
             mime.startsWith("audio/mp4") -> "AAC"
+            mime.startsWith("image/avif") -> "AVIF"
             mime.startsWith("image/webp") -> "WebP"
             mime.startsWith("image/jpeg") -> "JPEG"
             mime.startsWith("image/") -> "Image"

@@ -108,6 +108,8 @@ class MeshService : Service() {
     }
 
     override fun onDestroy() {
+        // Persist the engine state before the service (and possibly the process) goes away.
+        runCatching { MeshGraph.repository().persistStateOnLifecycleStop() }
         observer?.cancel()
         scope.cancel()
         super.onDestroy()

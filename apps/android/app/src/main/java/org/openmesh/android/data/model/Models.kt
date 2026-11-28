@@ -39,7 +39,7 @@ enum class NodeClass {
 
 enum class MessageKind { TEXT, POSITION, ATTACHMENT, TELEMETRY }
 
-enum class DeliveryState { QUEUED, SENT, DELIVERED, READ, FAILED, STORED_AT_RELAY }
+enum class DeliveryState { QUEUED, SENT, DELIVERED, READ, FAILED, STORED_AT_RELAY, CANCELLED }
 
 data class Position(
     val lat: Double,
@@ -112,6 +112,8 @@ data class Channel(
     val name: String,
     val unreadCount: Int = 0,
     val pskSet: Boolean = true,
+    /** Built-in public channel (pinned, no leave/delete, PUBLIC badge + privacy warning). */
+    val isPublic: Boolean = false,
 )
 
 data class Conversation(

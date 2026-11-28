@@ -33,16 +33,31 @@ data class QrInvite(
             }
             val params = parseQuery(uri.rawQuery)
             val id = params["node_id"] ?: params["id"]
-                ?: throw IllegalArgumentException("Invite is missing a node/channel id")
-            require(id.length == 16 && Hex.decodeOrNull(id) != null) {
-                "Invite id must be 16 hex characters"
+            val name = params["name"]?.takeIf { it.isNotBlank() }
+            val psk = params["psk"].orEmpty()
+            if (id != null) {
+                require(id.length == 16 && Hex.decodeOrNull(id) != null) {
+                    "Invite id must be 16 hex characters"
+                }
+            } else {
+                require(kind == "CHANNEL") { "Contact invites need a node id" }
+                require(!name.isNullOrBlank() && psk.isNotBlank()) {
+                    "Channel invite needs name + PSK (or an id)"
+                }
+            }
+            val resolvedName = name ?: id!!.take(8)
+            val nodeId = when {
+                id != null -> id.lowercase()
+                resolvedName == org.openmesh.android.data.model.PublicMesh.NAME -> 
+                    org.openmesh.android.data.model.PublicMesh.CANONICAL_CHANNEL_ID
+                else -> "" // derived by the engine on join
             }
             return QrInvite(
                 kind = Kind.valueOf(kind),
-                nodeId = id.lowercase(),
-                name = (params["name"] ?: id.take(8)).take(32),
+                nodeId = nodeId,
+                name = resolvedName.take(32),
                 identityBase64 = params["identity"].orEmpty(),
-                pskBase64 = params["psk"].orEmpty(),
+                pskBase64 = psk,
                 profile = params["profile"],
                 region = params["region"],
             )
