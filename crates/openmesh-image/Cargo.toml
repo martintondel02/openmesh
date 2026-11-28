@@ -1,0 +1,21 @@
+[package]
+name = "openmesh-image"
+description = "Shared bundled AVIF image encoder for the OpenMesh web and Android clients (ravif/rav1e)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+rgb = "0.8"
+thiserror = { workspace = true }
+
+# `asm` (nasm) stays off; the pure-Rust encoder is fast enough and builds on every host.
+# Native/Android builds use rav1e's threading; the WASM build stays single-threaded.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+ravif = { version = "0.13", default-features = false, features = ["threading"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+ravif = { version = "0.13", default-features = false }

@@ -1,0 +1,16 @@
+[package]
+name = "openmesh-image-wasm"
+description = "WASM C-ABI wrapper around openmesh-image for the OpenMesh web client (bundled AVIF encoder)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[lib]
+name = "openmesh_image_wasm"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+openmesh-image = { workspace = true }

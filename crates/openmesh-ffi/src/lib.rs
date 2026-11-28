@@ -681,6 +681,28 @@ impl OpenMeshNode {
         cancelled
     }
 
+    /// Encode an RGBA8 buffer to AVIF using the bundled encoder.
+    ///
+    /// `quality` is the ravif 1–100 scale (`qualityFromFraction`: 0.28→28, 0.40→40, 0.50→50) and
+    /// `speed` is 1–10 (tiny 10, medium/high 8). Returns complete `ftypavif` file bytes with MIME
+    /// `image/avif`. The Android client should call this from a background thread/coroutine; the
+    /// platform WebP/JPEG path remains the fallback on error and must not be labelled AVIF.
+    pub fn encode_avif(
+        &self,
+        rgba: Vec<u8>,
+        width: u32,
+        height: u32,
+        quality: u8,
+        speed: u8,
+    ) -> Result<Vec<u8>, FfiError> {
+        openmesh_image::encode_avif_rgba_with_speed(&rgba, width, height, quality, speed).map_err(
+            |error| match error {
+                openmesh_image::ImageError::Encode(_) => FfiError::internal(error.to_string()),
+                _ => FfiError::invalid(error.to_string()),
+            },
+        )
+    }
+
     /// Feed one complete OMP frame received from the radio.
     pub fn ingest_frame(&self, frame: Vec<u8>, now_ms: i64) -> Result<FfiProcessed, FfiError> {
         if frame.is_empty() {
@@ -1943,6 +1965,28 @@ mod tests {
             restarted.last_seq() > fresh_floor,
             "frames after a stale-state restore must never reuse an old sequence number"
         );
+    }
+
+    #[test]
+    fn encode_avif_produces_a_deterministic_avif_or_a_validation_error() {
+        let node = node("avif", 41);
+        let mut rgba = Vec::with_capacity(32 * 24 * 4);
+        for y in 0..24u32 {
+            for x in 0..32u32 {
+                rgba.extend_from_slice(&[x as u8, y as u8, (x ^ y) as u8, 255]);
+            }
+        }
+        let first = node.encode_avif(rgba.clone(), 32, 24, 40, 8).expect("avif");
+        let second = node.encode_avif(rgba.clone(), 32, 24, 40, 8).expect("avif");
+        assert_eq!(first, second, "bundled encoder must be deterministic");
+        assert_eq!(&first[4..12], b"ftypavif");
+
+        assert!(
+            node.encode_avif(rgba, 32, 24, 0, 11).is_ok(),
+            "quality/speed are clamped"
+        );
+        assert!(node.encode_avif(vec![0; 8], 2, 2, 40, 8).is_err());
+        assert!(node.encode_avif(Vec::new(), 0, 0, 40, 8).is_err());
     }
 
     #[test]

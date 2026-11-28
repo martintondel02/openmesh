@@ -40,6 +40,20 @@ were studied as prior art and for hardware pin-map facts, and are credited here.
   dependency. If you redistribute binaries, keep the LGPL notice and the offer/means to relink
   against a modified Codec2; no Codec2 source files are modified here.
 
+### Bundled AVIF encoder — `ravif` / `rav1e`
+
+- `ravif` 0.13 (crates.io, <https://github.com/kornelski/cavif-rs>) — **BSD-3-Clause**.
+- `rav1e` 0.8 / `v_frame` / `av1-grain` (crates.io, <https://github.com/xiph/rav1e/>) —
+  **BSD-2-Clause**.
+- `avif-serialize` 0.8 — **BSD-3-Clause**; `rgb` — **MIT**; remaining transitive crates are
+  MIT/Apache-2.0/Zlib/CC0 permutations.
+- Linked statically into `openmesh-image`, `openmesh-image-wasm` and `openmesh-ffi` (host, WASM
+  and Android builds) to provide AVIF encoding when platform encoders are unavailable. No files
+  are modified.
+- **AV1 patent policy:** AV1 is covered by the AOMedia royalty-free patent policy
+  (<https://aomedia.org/license/patent-license/>); this is noted for downstream distributors and
+  is not legal advice.
+
 Rust crates are licensed under their respective terms (Apache-2.0/MIT/BSD), listed in each
 crate's Cargo metadata. The outbound gateway webhook client uses `reqwest` (Apache-2.0/MIT) with
 `rustls` (Apache-2.0/ISC/MIT) and `ring` (ISC); no system OpenSSL is linked. Firmware libraries (RadioLib, Adafruit nRF52 core, arduino-esp32) are

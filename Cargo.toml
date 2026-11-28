@@ -8,6 +8,8 @@ members = [
     "crates/openmesh-ffi",
     "crates/openmesh-voice",
     "crates/openmesh-voice-wasm",
+    "crates/openmesh-image",
+    "crates/openmesh-image-wasm",
 ]
 
 [workspace.package]
@@ -52,6 +54,7 @@ anyhow = "1"
 # internal
 openmesh-core = { path = "crates/openmesh-core", version = "0.7.1" }
 openmesh-voice = { path = "crates/openmesh-voice", version = "0.7.0" }
+openmesh-image = { path = "crates/openmesh-image", version = "0.7.1" }
 
 [profile.release]
 lto = "thin"
