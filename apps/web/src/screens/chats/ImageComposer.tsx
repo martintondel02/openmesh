@@ -4,7 +4,6 @@ import { useAppStore } from '../../store/app';
 import type { ActiveThread } from '../../store/app';
 import {
   compressImageToTier,
-  detectImageEncoderSupport,
   encodedImageUploadName,
   readImageDimensions,
   validateImageFile,
@@ -13,6 +12,7 @@ import {
 import { estimateAttachment, getProfile, getRegion, hourlyAirtimeBudgetMs, maxAttachmentBytes } from '../../lib/airtime';
 import {
   IMAGE_TIERS,
+  imageFormatLabel,
   imageTierPolicy,
   suggestImageTier,
   tierAirtimeSummary,
@@ -55,21 +55,8 @@ export function ImageComposerModal({ open, file, thread, onClose }: ImageCompose
   const [caption, setCaption] = useState('');
   const [originalConfirmed, setOriginalConfirmed] = useState(false);
   const [sending, setSending] = useState(false);
-  const [encoderLabel, setEncoderLabel] = useState('WebP');
   const previousUrl = useRef<string | null>(null);
   const requestRef = useRef(0);
-
-  useEffect(() => {
-    if (!open) return;
-    let cancelled = false;
-    void detectImageEncoderSupport().then((support) => {
-      if (cancelled) return;
-      setEncoderLabel(support.avif ? 'AVIF' : support.webp ? 'WebP' : support.jpeg ? 'JPEG' : 'PNG');
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [open]);
 
   useEffect(() => {
     if (!open) return;
@@ -150,6 +137,14 @@ export function ImageComposerModal({ open, file, thread, onClose }: ImageCompose
     };
   }, [open, file, tier, policy.originalAllowed, suggestion?.suggested]);
 
+  // Label the format actually produced by Auto (strictly smaller of AVIF/WebP; WebP wins ties).
+  const encoderLabel = compressed ? imageFormatLabel(compressed.mime) : busy ? 'Encoding…' : 'Auto';
+  const encodingComparison = useMemo(() => {
+    const alternatives = compressed?.alternatives ?? [];
+    if (alternatives.length < 2) return null;
+    const sizes = alternatives.map((option) => `${imageFormatLabel(option.mime)} ${formatBytes(option.bytes)}`).join(' · ');
+    return `${sizes} — sent ${imageFormatLabel(compressed?.mime)}`;
+  }, [compressed]);
   const effectiveBytes = compressed?.blob.size ?? 0;
   const estimate = useMemo(
     () => estimateAttachment(Math.max(1, effectiveBytes), profileId, regionId),
@@ -210,7 +205,7 @@ export function ImageComposerModal({ open, file, thread, onClose }: ImageCompose
       open={open}
       onClose={onClose}
       title="Send an image over LoRa"
-      description={`Choose a tier; the measured bytes and airtime are shown before sending (${formatBytes(cap)} cap on ${profile.label}).`}
+      description={`Choose a tier; Auto encodes AVIF and WebP at matching visual quality and sends the smaller file (WebP wins a tie). The measured bytes and airtime are shown before sending (${formatBytes(cap)} cap on ${profile.label}).`}
       icon={ImageIcon}
       size="lg"
       dismissible={!sending}
@@ -276,7 +271,9 @@ export function ImageComposerModal({ open, file, thread, onClose }: ImageCompose
                   </span>
                   <span className="mt-0.5 block text-3xs text-slate-500">{option.targetLabel}</span>
                   <span className="mt-0.5 block text-3xs text-slate-600">
-                    {option.id === 'original' ? 'needs confirm' : encoderLabel}
+                    <span title={option.id === 'original' ? undefined : encodingComparison ?? undefined}>
+                      {option.id === 'original' ? 'needs confirm' : encoderLabel}
+                    </span>
                   </span>
                 </button>
               );
@@ -316,13 +313,15 @@ export function ImageComposerModal({ open, file, thread, onClose }: ImageCompose
               <div className="absolute inset-0 grid place-items-center bg-ink-950/40">
                 <span className="flex items-center gap-2 rounded-full border border-white/10 bg-ink-900/90 px-3 py-1.5 text-2xs text-slate-300">
                   <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
-                  Encoding {tier}…
+                  Optimising image…
                 </span>
               </div>
             ) : null}
             {compressed ? (
               <span className="absolute right-1.5 top-1.5 rounded-md bg-ink-950/75 px-1.5 py-0.5 text-3xs text-slate-300 backdrop-blur">
-                {compressed.width}×{compressed.height} · {formatBytes(compressed.blob.size)}
+                <span title={encodingComparison ?? undefined}>
+                  {compressed.width}×{compressed.height} · {formatBytes(compressed.blob.size)}
+                </span>
               </span>
             ) : null}
           </div>

@@ -85,16 +85,46 @@ describe('media presets: single source + tiers', () => {
     expect(imageEncodeOrderForTier('original', { avif: true, webp: true, jpeg: true })).toEqual([]);
   });
 
-  it('prefers AVIF whenever it is available, then WebP, then JPEG', () => {
-    const avif = { mime: 'image/avif' as const, bytes: 1_200 };
-    const webp = { mime: 'image/webp' as const, bytes: 900 };
+  it('sends the strictly smaller of AVIF and WebP, with WebP winning a tie', () => {
+    const avif = { mime: 'image/avif' as const, bytes: 900 };
+    const webp = { mime: 'image/webp' as const, bytes: 1_200 };
+    expect(selectPreferredImageEncoding([avif, webp])).toBe('image/avif');
+    expect(selectPreferredImageEncoding([{ mime: 'image/avif', bytes: 1_200 }, { mime: 'image/webp', bytes: 900 }])).toBe(
+      'image/webp',
+    );
+    expect(selectPreferredImageEncoding([{ mime: 'image/avif', bytes: 1_000 }, { mime: 'image/webp', bytes: 1_000 }])).toBe(
+      'image/webp',
+    );
+    // JPEG is only part of the comparison when WebP could not be produced.
     const jpeg = { mime: 'image/jpeg' as const, bytes: 700 };
-    // AVIF is mandatory-preferred even when another format happens to be smaller.
-    expect(selectPreferredImageEncoding([avif, webp, jpeg])).toBe('image/avif');
-    expect(selectPreferredImageEncoding([webp, jpeg])).toBe('image/webp');
+    expect(selectPreferredImageEncoding([avif, jpeg])).toBe('image/jpeg');
+    expect(selectPreferredImageEncoding([{ mime: 'image/webp', bytes: 500 }, jpeg])).toBe('image/webp');
+    expect(selectPreferredImageEncoding([webp, jpeg])).toBe('image/jpeg');
     expect(selectPreferredImageEncoding([jpeg])).toBe('image/jpeg');
-    expect(selectPreferredImageEncoding([webp])).toBe('image/webp');
+    expect(selectPreferredImageEncoding([{ mime: 'image/webp', bytes: 1_000 }, { mime: 'image/jpeg', bytes: 1_000 }])).toBe(
+      'image/webp',
+    );
     expect(selectPreferredImageEncoding([])).toBeNull();
+  });
+
+  it('chooses the MIME from the winning bytes and derives the matching upload filename', () => {
+    const avifWins = selectPreferredImageEncoding([
+      { mime: 'image/avif', bytes: 900 },
+      { mime: 'image/webp', bytes: 1_000 },
+    ]);
+    const webpWins = selectPreferredImageEncoding([
+      { mime: 'image/avif', bytes: 1_200 },
+      { mime: 'image/webp', bytes: 900 },
+    ]);
+    const tie = selectPreferredImageEncoding([
+      { mime: 'image/avif', bytes: 900 },
+      { mime: 'image/webp', bytes: 900 },
+    ]);
+    expect(avifWins).toBe('image/avif');
+    expect(encodedImageFilename('holiday.png', avifWins!)).toBe('holiday.avif');
+    expect(webpWins).toBe('image/webp');
+    expect(encodedImageFilename('holiday.png', webpWins!)).toBe('holiday.webp');
+    expect(tie).toBe('image/webp');
   });
 
   it('derives extensions and upload filenames from the bytes actually encoded', () => {

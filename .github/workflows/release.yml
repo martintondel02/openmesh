@@ -99,6 +99,8 @@ jobs:
           key: voice-wasm
       - name: Build Codec2 WASM (tiny voice)
         run: scripts/build-voice-wasm.sh
+      - name: Build AVIF WASM (bundled image encoder)
+        run: crates/openmesh-image-wasm/build-wasm.sh
       - run: pnpm --dir apps/web build
       - run: tar -czf openmesh-web-${GITHUB_REF_NAME}.tar.gz -C apps/web dist
       - uses: actions/upload-artifact@v4

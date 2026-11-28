@@ -97,18 +97,35 @@ export function imageEncodeOrderForTier(tierInput: ImageTierId, support: ImageEn
 }
 
 /**
- * Pick the first validated candidate in preference order: AVIF > WebP > JPEG.
- * AVIF is the mandatory preferred encoder whenever the browser can produce real
- * `image/avif` bytes; callers only pass candidates whose `blob.type` matched, so
- * a silent PNG fallback can never be selected.
+ * Choose the validated encoding with the fewest bytes. A byte-size tie prefers WebP, then JPEG,
+ * then AVIF: the quality-matched AVIF candidate only wins when it is strictly smaller, matching
+ * `docs/design/media-tiers.md` §1.2. Callers pass only candidates whose `blob.type` matched the
+ * requested format, so a silent browser fallback cannot be selected.
  */
 export function selectPreferredImageEncoding(
   candidates: readonly ImageEncodingCandidate[],
 ): ImageEncodeMime | null {
-  for (const mime of IMAGE_ENCODE_MIMES) {
-    if (candidates.some((candidate) => candidate.mime === mime)) return mime;
-  }
-  return null;
+  if (candidates.length === 0) return null;
+  const tieRank: Record<ImageEncodeMime, number> = {
+    'image/webp': 0,
+    'image/jpeg': 1,
+    'image/avif': 2,
+  };
+  return [...candidates].sort(
+    (a, b) => a.bytes - b.bytes || tieRank[a.mime] - tieRank[b.mime],
+  )[0]!.mime;
+}
+/** Short display label for the image MIME that was actually produced. */
+export function imageFormatLabel(mime: string | null | undefined): string {
+  if (!mime) return 'Image';
+  if (mime === 'image/avif') return 'AVIF';
+  if (mime === 'image/webp') return 'WebP';
+  if (mime === 'image/jpeg' || mime === 'image/jpg') return 'JPEG';
+  if (mime === 'image/png') return 'PNG';
+  if (mime === 'image/gif') return 'GIF';
+  if (mime === 'image/svg+xml') return 'SVG';
+  const subtype = mime.split('/')[1] ?? 'image';
+  return subtype.toUpperCase();
 }
 
 /** File extension for the actual encoded MIME (never the requested-but-unused one). */

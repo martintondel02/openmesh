@@ -53,7 +53,7 @@ open "http://127.0.0.1:5173/?demo=1&screen=agents&mode=advanced"
 open "http://127.0.0.1:5173/?demo=1&screen=settings&mode=beginner"
 open "http://127.0.0.1:5173/help/getting-started?demo=1"  # Help Center deep link
 
-pnpm --dir apps/web test         # vitest (119 unit tests)
+pnpm --dir apps/web test         # vitest (30 suites / 379 unit tests)
 pnpm --dir apps/web build        # tsc -b && vite build
 pnpm --dir apps/web preview      # serve the production build
 ```
@@ -77,6 +77,17 @@ uploads use `Authorization: Bearer <token>`.
 (17 topics + index) into the gitignored `apps/web/public/help/`. Demo/offline mode fetches that
 bundle; a connected bridge serves the same content from `GET /api/help` (with a bundled fallback).
 Never edit `public/help/` by hand — edit `content/help/` and let the build copy.
+
+### Bundled AVIF encoder (web build)
+
+`pnpm dev` and `pnpm build` also run `scripts/build-image-wasm.mjs`: if
+`public/image/openmesh_image.wasm` is missing it reuses
+`crates/openmesh-image-wasm/build-wasm.sh`, otherwise it skips the Rust build. The artifact is
+gitignored (~1.3 MB raw / ~406 KB gzip-9) and CI/release build it explicitly before the web build.
+On a machine without Rust or the `wasm32-unknown-unknown` target the script warns and lets the
+web build continue; the client then lazily falls back to canvas WebP/JPEG and keeps the real MIME,
+so AVIF is never mislabelled. The WASM is fetched in a Worker only on the first image encode, not
+at app startup.
 
 ### Demo mode
 
@@ -168,7 +179,7 @@ Screenshot flow (all demo, no backend):
 | **Identity & display name** | "You are <name> · <short id>" card (copy id, My QR) in beginner and advanced Settings; 1–32-byte name validation with counter; Save applies the config and immediately fires an announce so peers see the new name. Announced name → pinned contact alias → `node <first8>` fallback everywhere (chats, thread headers, sender labels, nodes, map, contacts, search). |
 | **Delivery & peer link** | Explicit delivery labels plus a Message details dialog (direct: delivered/read semantics; channel: "Sent to channel" with no per-recipient receipt; failed → retry). Direct-thread header quality chip (Strong/OK/Weak/Offline · dBm · hops) opening a peer & link modal with role, RSSI/SNR, last heard, contact state and your radio's own state/device/profile; the node inspector shows the same quality strip. |
 | **Groups** | Create channel (generated 256-bit PSK shown once with copy + `openmesh://channel` invite link + QR), join via pasted link or name+PSK, channel invite modal (QR + share sheet), per-message Ed25519 signature badge, leave channel with confirmation. |
-| **Images** | File picker / drag-drop / paste → canvas downscale, then encode with the preferred format the browser can actually produce (AVIF when a `toBlob` capability probe yields real `image/avif` bytes — mandatory preference where supported — else WebP, then JPEG; a silent PNG fallback is rejected and can never be mislabelled) with an encode loop until the target size fits the profile cap; slider from 1 KiB to the profile cap with Fastest/Balanced/Max presets; chunks, airtime, transfer time and % of the region duty-cycle budget shown before sending; progress overlay for incoming resources. |
+| **Images** | File picker / drag-drop / paste → canvas downscale, then Auto-encode quality-matched AVIF (lazy bundled WASM Worker, first image send only) and WebP (canvas), sending the strictly smaller file (WebP on a tie; JPEG fallback when WebP is unavailable; every candidate's MIME is verified, so a silent PNG fallback can never be mislabelled) with an encode loop until the target size fits the profile cap; slider from 1 KiB to the profile cap with Fastest/Balanced/Max presets; chunks, airtime, transfer time and % of the region duty-cycle budget shown before sending; progress overlay for incoming resources. |
 | **Voice** | `MediaRecorder` with `audio/ogg;codecs=opus` preferred (WebM fallback), live timer + waveform from a WebAudio analyser, auto-stop at the profile voice cap, review with playback, then bubble with waveform bars, seek, playback progress and duration. |
 | **Beginner/Advanced + help (v0.3)** | Mode toggle (persisted + synced to `features.ui_mode`), nav/field gating with plain-language copy, 3-screen secure onboarding wire-compatible with `/api/setup/*`, resumable Get-started checklist, Help Center with search/audience/ToC/related/deep links, central `HelpTip` + 35-term glossary, guided empty states, actionable error toasts, insecurity/no-radio banners, composer draft preservation. |
 | **Agents (v0.3)** | MCP snippets (Claude/Cursor/DSH/generic), beginner/advanced system prompt copy, read-only explainer, activity table with source badges and failures, bridge-token revocation guidance, security notes; demo seeds one connected agent plus eight real-looking write actions. |

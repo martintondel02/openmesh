@@ -4,6 +4,8 @@
  * `compression.ts`; this file only touches DOM APIs.
  */
 
+import { encodeAvifRgba } from '../image/avif-encoder';
+import { AVIF_MIME } from '../image/avif-protocol';
 import { planCompression, planDimensions, type CompressionPlan } from './compression';
 import {
   encodedImageFilename,
@@ -16,10 +18,17 @@ import {
   type ImageTierId,
 } from './media-tiers';
 
+export interface ImageEncodingOption {
+  mime: string;
+  bytes: number;
+}
+
 export interface CompressedImage {
   blob: Blob;
   objectUrl: string;
   mime: string;
+  /** Every validated candidate that was encoded (AVIF/WebP/JPEG) with its byte size. */
+  alternatives?: ImageEncodingOption[];
   width: number;
   height: number;
   quality: number;
@@ -102,18 +111,44 @@ export function detectImageEncoderSupport(): Promise<ImageEncoderSupport> {
 
 interface EncodedCanvasImage {
   blob: Blob;
-  /** MIME actually produced by the browser (verified via `blob.type`). */
+  /** MIME actually produced by the encoder (verified via `blob.type` / AVIF header). */
   mime: ImageEncodeMime | string;
+  /** All validated candidates that were compared for this canvas. */
+  alternatives: ImageEncodingOption[];
+}
+
+interface AvifCanvasCandidate {
+  blob: Blob;
+  mime: 'image/avif';
 }
 
 /**
- * Encode one canvas with the browser-preferred format.
+ * Encode the canvas with the bundled Rust AVIF encoder (lazy WASM in a Worker). Returns null
+ * when the module is unavailable or fails, so the caller falls back to canvas WebP/JPEG and
+ * labels the result with the MIME the browser actually produced.
+ */
+async function encodeWasmAvif(canvas: HTMLCanvasElement, quality: number): Promise<AvifCanvasCandidate | null> {
+  try {
+    const context = canvas.getContext('2d');
+    if (!context) return null;
+    const imageData = context.getImageData(0, 0, canvas.width, canvas.height);
+    const encoded = await encodeAvifRgba(imageData.data, canvas.width, canvas.height, quality);
+    const blob = new Blob([encoded.bytes.buffer as ArrayBuffer], { type: AVIF_MIME });
+    if (blob.type !== AVIF_MIME || blob.size === 0) return null;
+    return { blob, mime: AVIF_MIME };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Encode one canvas as AVIF (bundled WASM) and WebP (canvas), then keep the smaller.
  *
- * - Only formats that pass the probe are attempted.
- * - Every blob's `type` is verified before it can become the chosen MIME, so a
- *   PNG fallback can never be sent as "AVIF/WebP".
- * - The first verified format wins in preference order (AVIF when the browser can
- *   really encode it, else WebP, else JPEG).
+ * - Every candidate is validated by `blob.type` (browser) or the AVIF file header (WASM),
+ *   so a PNG fallback can never be sent under an AVIF/WebP label.
+ * - AVIF is attempted first and the lazy Worker is loaded here (first image encode only).
+ * - WebP is always encoded when available; JPEG is only attempted if WebP fails.
+ * - A byte-size tie chooses AVIF, then WebP, then JPEG.
  */
 async function encodeCanvasImage(
   canvas: HTMLCanvasElement,
@@ -121,29 +156,52 @@ async function encodeCanvasImage(
   support: ImageEncoderSupport,
   tierId: ImageTierId,
 ): Promise<EncodedCanvasImage> {
-  const order = imageEncodeOrderForTier(tierId, support);
   const candidates: Array<{ blob: Blob; mime: ImageEncodeMime; bytes: number }> = [];
 
+  if (tierId !== 'original') {
+    const avif = await encodeWasmAvif(canvas, quality);
+    if (avif) candidates.push({ blob: avif.blob, mime: avif.mime, bytes: avif.blob.size });
+  }
+
+  // Canvas AVIF is skipped when the WASM encoder already produced a real AVIF candidate;
+  // the bundled encoder is the client's AVIF path, canvas stays the fallback for AVIF-less
+  // browsers (which normally cannot produce AVIF anyway — the type check catches that).
+  const hasAvif = candidates.some((candidate) => candidate.mime === 'image/avif');
+  const order = imageEncodeOrderForTier(tierId, support).filter(
+    (mime) => !(mime === 'image/avif' && hasAvif),
+  );
   for (const mime of order) {
     try {
       const blob = await canvasToBlob(canvas, mime, quality);
       if (blob.type !== mime) continue; // browser silently fell back; never mislabel
-      // AVIF is the mandatory preference: the first verified encoder wins.
       candidates.push({ blob, mime, bytes: blob.size });
-      break;
+      if (mime === 'image/webp') break; // JPEG is only needed when WebP failed
     } catch {
       continue;
     }
   }
 
-  if (!candidates.length) {
+  if (candidates.length === 0) {
     throw new Error('The browser could not encode this image in a supported format');
   }
   const preferredMime = selectPreferredImageEncoding(candidates) ?? candidates[0]!.mime;
   const chosen = candidates.find((candidate) => candidate.mime === preferredMime) ?? candidates[0]!;
-  return { blob: chosen.blob, mime: chosen.mime };
+  if (candidates.length > 1) {
+    console.info(
+      `[openmesh-image-select] ${JSON.stringify({
+        tier: tierId,
+        quality: Number(quality.toFixed(2)),
+        candidates: candidates.map(({ mime, bytes }) => ({ mime, bytes })),
+        chosen: chosen.mime,
+      })}`,
+    );
+  }
+  return {
+    blob: chosen.blob,
+    mime: chosen.mime,
+    alternatives: candidates.map(({ mime, bytes }) => ({ mime, bytes })),
+  };
 }
-
 interface DecodedImage {
   source: ImageBitmap | HTMLImageElement;
   width: number;
@@ -211,7 +269,14 @@ export async function compressImage(blob: Blob, options: CompressOptions): Promi
       maxDimension: options.maxDimension ?? 1600,
     });
     let attempts = 0;
-    let best: { blob: Blob; mime: string; width: number; height: number; quality: number } | null = null;
+    let best: {
+      blob: Blob;
+      mime: string;
+      alternatives: ImageEncodingOption[];
+      width: number;
+      height: number;
+      quality: number;
+    } | null = null;
 
     for (let round = 0; round < MAX_ATTEMPTS; round += 1) {
       attempts += 1;
@@ -223,7 +288,14 @@ export async function compressImage(blob: Blob, options: CompressOptions): Promi
       context.imageSmoothingQuality = 'high';
       context.drawImage(decoded.source, 0, 0, plan.width, plan.height);
       const encoded = await encodeCanvasImage(canvas, plan.quality, support, 'high');
-      best = { blob: encoded.blob, mime: encoded.mime, width: plan.width, height: plan.height, quality: plan.quality };
+      best = {
+        blob: encoded.blob,
+        mime: encoded.mime,
+        alternatives: encoded.alternatives,
+        width: plan.width,
+        height: plan.height,
+        quality: plan.quality,
+      };
       if (encoded.blob.size <= target) break;
 
       // Still too large: shrink and drop quality, then retry from the real size.
@@ -243,6 +315,7 @@ export async function compressImage(blob: Blob, options: CompressOptions): Promi
       blob: best.blob,
       objectUrl,
       mime: best.mime,
+      alternatives: best.alternatives,
       width: best.width,
       height: best.height,
       quality: best.quality,
@@ -314,6 +387,7 @@ export async function compressImageToTier(blob: Blob, tierId: ImageTierId): Prom
         blob,
         objectUrl: URL.createObjectURL(blob),
         mime: blob.type || 'application/octet-stream',
+        alternatives: [{ mime: blob.type || 'application/octet-stream', bytes: blob.size }],
         width: decoded.width,
         height: decoded.height,
         quality: 1,
@@ -348,6 +422,7 @@ export async function compressImageToTier(blob: Blob, tierId: ImageTierId): Prom
       blob: encoded.blob,
       objectUrl: URL.createObjectURL(encoded.blob),
       mime: encoded.mime,
+      alternatives: encoded.alternatives,
       width: dims.width,
       height: dims.height,
       quality,
@@ -413,7 +488,7 @@ export async function createDemoImageFile(width = 1600, height = 1067): Promise<
     encoded = await encodeCanvasImage(canvas, 0.86, support, 'high');
   } catch {
     const blob = await canvasToBlob(canvas, 'image/webp', 0.86);
-    encoded = { blob, mime: blob.type || 'image/webp' };
+    encoded = { blob, mime: blob.type || 'image/webp', alternatives: [{ mime: blob.type || 'image/webp', bytes: blob.size }] };
   }
   return new File([encoded.blob], `demo-ridge.${imageExtensionForMime(encoded.mime)}`, {
     type: encoded.mime,

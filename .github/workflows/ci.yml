@@ -57,6 +57,8 @@ jobs:
           key: voice-wasm
       - name: Build Codec2 WASM (tiny voice)
         run: scripts/build-voice-wasm.sh
+      - name: Build AVIF WASM (bundled image encoder)
+        run: crates/openmesh-image-wasm/build-wasm.sh
       - name: Type-check and build
         run: pnpm --dir apps/web build
       - name: Test
