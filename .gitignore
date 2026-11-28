@@ -47,3 +47,6 @@ apps/web/public/voice/openmesh_voice.wasm
 
 # Generated AVIF WASM (crates/openmesh-image-wasm/build-wasm.sh)
 apps/web/public/image/openmesh_image.wasm
+
+# Separate target dir used for the real-serial bridge build
+target-serial/
