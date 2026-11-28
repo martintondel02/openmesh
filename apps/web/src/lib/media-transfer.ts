@@ -25,7 +25,7 @@ export const MEDIA_STALL_MS = 75_000;
 /** Estimated wall-clock transfer above this shows the "slow media" honesty hint. */
 export const SLOW_MEDIA_WALL_CLOCK_MS = 60_000;
 
-export type OutgoingMediaPhase = 'preparing' | 'transferring' | 'stalled' | 'sent' | 'delivered' | 'failed';
+export type OutgoingMediaPhase = 'preparing' | 'transferring' | 'stalled' | 'sent' | 'delivered' | 'cancelled' | 'failed';
 
 export interface OutgoingMediaState {
   phase: OutgoingMediaPhase;
@@ -129,6 +129,17 @@ export function describeOutgoingMedia(input: OutgoingMediaInput): OutgoingMediaS
       label: 'Upload failed',
       hint: input.error ? `${input.error} ${RETRY_HINT}` : RETRY_HINT,
       canRetry,
+      slow: isSlow,
+    };
+  }
+
+  if (input.delivery === 'cancelled') {
+    return {
+      phase: 'cancelled',
+      progress,
+      label: 'Cancelled — no more airtime will be used',
+      hint: null,
+      canRetry: false,
       slow: isSlow,
     };
   }

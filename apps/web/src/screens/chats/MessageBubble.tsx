@@ -19,13 +19,14 @@ import { formatClockTime, cn, formatDuration, truncateGraphemes } from '../../li
 import { deliveryPresentation, displayName } from '../../lib/display';
 import { DEFAULT_PROFILE_ID, DEFAULT_REGION_ID, estimateAttachment } from '../../lib/airtime';
 import { describeOutgoingMedia, mediaWallClockMs } from '../../lib/media-transfer';
+import { cancelAvailability } from '../../lib/message-cancel';
 import type { OutgoingMediaState } from '../../lib/media-transfer';
 import { speechWaveform } from '../../lib/audio';
 import { Avatar, IconButton } from '../../components/ui/primitives';
 import { DeliveryStatus, SignalBars } from '../../components/ui/signals';
 import { Modal } from '../../components/ui/overlay';
 import { HelpLink } from '../../components/ui/help';
-import { codec2PayloadDurationMs, isCodec2Mime, voiceAttachmentLabel, voiceTierForMime } from '../../lib/media-tiers';
+import { codec2PayloadDurationMs, imageExtensionForMime, isCodec2Mime, voiceAttachmentLabel, voiceTierForMime } from '../../lib/media-tiers';
 import { playCodec2Payload } from '../../voice/pcm';
 
 export type AnyChatMessage = ChatMessage | ChatGroupMessage;
@@ -107,6 +108,8 @@ function ImageAttachment({ message, own = false }: { message: AnyChatMessage; ow
   const transferring = progress < 1;
 
   if (!attachment) return null;
+  const saveName =
+    attachment.name?.trim() || `openmesh-image.${imageExtensionForMime(attachment.mime)}`;
 
   return (
     <>
@@ -155,7 +158,7 @@ function ImageAttachment({ message, own = false }: { message: AnyChatMessage; ow
           src ? (
             <a
               href={src}
-              download={attachment.name ?? 'openmesh-image'}
+              download={saveName}
               className="btn-base h-9 gap-2 rounded-xl border border-white/10 bg-white/[0.05] px-3.5 text-[13px] text-slate-200 hover:bg-white/[0.08]"
             >
               <Download className="h-4 w-4" aria-hidden="true" />
@@ -530,16 +533,17 @@ export interface MessageBubbleProps {
   resolveReply: (msgId: number) => { name: string; text: string } | null;
   onReply: (message: AnyChatMessage) => void;
   onRetry: (msgId: number) => void;
+  onCancel: (msgId: number) => void;
   onJumpTo: (msgId: number) => void;
   nowMs?: number;
 }
 
-export function MessageBubble({ message, peerName, showAvatar, showSender, resolveReply, onReply, onRetry, onJumpTo, nowMs = Date.now() }: MessageBubbleProps) {
+export function MessageBubble({ message, peerName, showAvatar, showSender, resolveReply, onReply, onRetry, onCancel, onJumpTo, nowMs = Date.now() }: MessageBubbleProps) {
   const own = message.outgoing;
   const group = isGroupMessage(message);
   const nodes = useAppStore((state) => state.nodes);
   const contacts = useAppStore((state) => state.contacts);
-  const delivery: DeliveryState = !group && 'delivery' in message ? (message.delivery as DeliveryState) : own ? 'sent' : 'sent';
+  const delivery: DeliveryState = group ? message.delivery ?? 'sent' : 'delivery' in message ? (message.delivery as DeliveryState) : 'sent';
   const senderName = own
     ? 'You'
     : group
@@ -556,8 +560,9 @@ export function MessageBubble({ message, peerName, showAvatar, showSender, resol
   const replyToId = 'reply_to' in message ? message.reply_to : null;
   const reply = replyToId !== null ? resolveReply(replyToId) : null;
   const isRecent = nowMs - message.sent_at_ms < 90_000;
-  const failed = delivery === 'failed' || Boolean(message.error);
-  const pending = delivery === 'pending';
+  const cancelled = delivery === 'cancelled';
+  const failed = !cancelled && (delivery === 'failed' || Boolean(message.error));
+  const pending = !cancelled && delivery === 'pending';
   const [detailsOpen, setDetailsOpen] = useState(false);
   const deliveryInfo = deliveryPresentation({
     state: delivery,
@@ -610,6 +615,20 @@ export function MessageBubble({ message, peerName, showAvatar, showSender, resol
     config?.radio.region,
     config?.radio.duty_cycle_pct,
   ]);
+  const cancelSupport = useAppStore((state) => state.cancelSupport);
+  const cancelInfo = cancelAvailability({
+    outgoing: own,
+    msgId: message.msg_id,
+    delivery,
+    cancelRequested: message.cancelRequested,
+    error: message.error,
+    group,
+    sentAtMs: message.sent_at_ms,
+    nowMs,
+    hasAttachment: Boolean(message.attachment),
+    attachmentProgress: message.attachment?.progress ?? null,
+    bridgeSupportsCancel: cancelSupport === 'unavailable' ? false : null,
+  });
   const detailsRows: Array<{ label: string; value: string }> = [
     { label: 'Direction', value: own ? `You → ${group ? `#${message.channel_name}` : peerName ?? 'peer'}` : `${senderName} → You` },
     { label: 'Sent', value: `${formatClockTime(message.sent_at_ms)} · ${new Date(message.sent_at_ms).toLocaleString()}` },
@@ -673,7 +692,7 @@ export function MessageBubble({ message, peerName, showAvatar, showSender, resol
                 ? 'rounded-br-md border-emerald-300/15 bg-gradient-to-br from-emerald-400/[0.16] to-emerald-500/[0.09] text-slate-100'
                 : 'rounded-bl-md border-white/[0.06] bg-ink-800/85 text-slate-200',
               failed && 'border-rose-400/40 bg-rose-500/[0.07]',
-              pending && 'opacity-75',
+              (pending || cancelled) && 'opacity-75',
             )}
           >
             {reply ? (
@@ -723,10 +742,22 @@ export function MessageBubble({ message, peerName, showAvatar, showSender, resol
               >
                 {formatClockTime(message.sent_at_ms)}
               </time>
-              {own && !group ? (
-                <DeliveryStatus state={delivery} peerName={peerName} error={message.error} />
+              {own ? <DeliveryStatus state={delivery} peerName={peerName} error={message.error} group={group} /> : null}
+              {own && cancelInfo.state !== 'hidden' ? (
+                <button
+                  type="button"
+                  onClick={() => onCancel(message.msg_id)}
+                  disabled={!cancelInfo.canCancel}
+                  title={cancelInfo.title}
+                  aria-label={`${cancelInfo.label}. ${cancelInfo.title}`}
+                  className={cn(
+                    'focus-ring rounded px-1 py-0.5 text-3xs font-medium',
+                    cancelInfo.canCancel ? 'text-slate-300 hover:bg-white/[0.08] hover:text-white' : 'text-slate-500',
+                  )}
+                >
+                  {cancelInfo.label}
+                </button>
               ) : null}
-              {own && group ? <DeliveryStatus state="sent" group /> : null}
               <button
                 type="button"
                 onClick={() => setDetailsOpen(true)}

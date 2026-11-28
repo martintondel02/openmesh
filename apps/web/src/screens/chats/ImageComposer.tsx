@@ -4,9 +4,10 @@ import { useAppStore } from '../../store/app';
 import type { ActiveThread } from '../../store/app';
 import {
   compressImageToTier,
+  detectImageEncoderSupport,
+  encodedImageUploadName,
   readImageDimensions,
   validateImageFile,
-  fallbackImageName,
   type TierCompressedImage,
 } from '../../lib/attachments';
 import { estimateAttachment, getProfile, getRegion, hourlyAirtimeBudgetMs, maxAttachmentBytes } from '../../lib/airtime';
@@ -54,8 +55,21 @@ export function ImageComposerModal({ open, file, thread, onClose }: ImageCompose
   const [caption, setCaption] = useState('');
   const [originalConfirmed, setOriginalConfirmed] = useState(false);
   const [sending, setSending] = useState(false);
+  const [encoderLabel, setEncoderLabel] = useState('WebP');
   const previousUrl = useRef<string | null>(null);
   const requestRef = useRef(0);
+
+  useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+    void detectImageEncoderSupport().then((support) => {
+      if (cancelled) return;
+      setEncoderLabel(support.avif ? 'AVIF' : support.webp ? 'WebP' : support.jpeg ? 'JPEG' : 'PNG');
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [open]);
 
   useEffect(() => {
     if (!open) return;
@@ -169,7 +183,7 @@ export function ImageComposerModal({ open, file, thread, onClose }: ImageCompose
         {
           blob: compressed.blob,
           mime: compressed.mime,
-          filename: fallbackImageName(file),
+          filename: encodedImageUploadName(file, compressed.mime),
           localUrl: compressed.objectUrl,
           width: compressed.width,
           height: compressed.height,
@@ -262,7 +276,7 @@ export function ImageComposerModal({ open, file, thread, onClose }: ImageCompose
                   </span>
                   <span className="mt-0.5 block text-3xs text-slate-500">{option.targetLabel}</span>
                   <span className="mt-0.5 block text-3xs text-slate-600">
-                    {option.id === 'original' ? 'needs confirm' : 'WebP'}
+                    {option.id === 'original' ? 'needs confirm' : encoderLabel}
                   </span>
                 </button>
               );

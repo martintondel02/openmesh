@@ -74,6 +74,12 @@ describe('display: delivery wording', () => {
     const failed = deliveryPresentation({ state: 'failed', peerName: 'Ada', error: 'Radio busy' });
     expect(failed.label).toBe('Not delivered');
     expect(failed.explanation).toContain('Radio busy');
+    const cancelled = deliveryPresentation({ state: 'cancelled', peerName: 'Ada' });
+    expect(cancelled.label).toBe('Cancelled');
+    expect(cancelled.tone).toBe('slate');
+    expect(cancelled.hasReceipt).toBe(false);
+    expect(cancelled.explanation).toContain('cancelled');
+    expect(deliveryPresentation({ state: 'cancelled', group: true }).label).toBe('Cancelled');
   });
 
   it('explains that channel messages have no per-recipient receipt', () => {

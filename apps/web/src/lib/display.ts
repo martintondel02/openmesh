@@ -166,6 +166,15 @@ export function deliveryPresentation(input: {
   error?: string | null;
   hasReceipts?: boolean;
 }): DeliveryPresentation {
+  if (input.state === 'cancelled') {
+    return {
+      state: 'cancelled',
+      label: 'Cancelled',
+      explanation: 'You cancelled this send. No more radio airtime is used for it and it is not retried.',
+      tone: 'slate',
+      hasReceipt: false,
+    };
+  }
   if (input.group) {
     const failed = input.state === 'failed' || Boolean(input.error);
     return {

@@ -26,7 +26,7 @@ import { displayName } from '../lib/display';
 
 /** Derive the UI delivery state from the bridge flags + local bookkeeping. */
 export function deriveDelivery(message: Pick<MessageData, 'outgoing' | 'delivered' | 'read'>, local?: DeliveryState): DeliveryState {
-  if (local === 'pending' || local === 'failed') return local;
+  if (local === 'pending' || local === 'failed' || local === 'cancelled') return local;
   if (!message.outgoing) return 'sent';
   if (message.read) return 'read';
   if (message.delivered) return 'delivered';
@@ -34,12 +34,24 @@ export function deriveDelivery(message: Pick<MessageData, 'outgoing' | 'delivere
 }
 
 function normalizeMessage(input: MessageData, existing?: ChatMessage): ChatMessage {
+  // Cancel contract (task-30): a bridge update may carry `delivery: "cancelled"`
+  // and/or `cancelled: true`. Cancellation wins over derived delivery states.
+  const cancellation = input as MessageData & { cancelled?: boolean; delivery?: DeliveryState };
+  const explicitlyCancelled =
+    cancellation.cancelled === true ||
+    (cancellation.delivery === 'cancelled' && !input.delivered && !input.read);
   // A failed send stays failed until the bridge reports delivery progress; every
-  // other transition is derived from the authoritative bridge flags.
-  const delivery: DeliveryState =
-    existing?.delivery === 'failed' && !input.delivered && !input.read
-      ? 'failed'
-      : deriveDelivery(input);
+  // other transition is derived from the authoritative bridge flags. A cancelled
+  // send stays cancelled unless the bridge later reports a real delivery/read.
+  const delivery: DeliveryState = explicitlyCancelled
+    ? 'cancelled'
+    : input.delivered || input.read
+      ? deriveDelivery(input)
+      : existing?.delivery === 'cancelled'
+        ? 'cancelled'
+        : existing?.delivery === 'failed'
+          ? 'failed'
+          : deriveDelivery(input);
   return {
     ...input,
     // A bridge echo may omit media fields the optimistic row already knows about.
@@ -50,6 +62,7 @@ function normalizeMessage(input: MessageData, existing?: ChatMessage): ChatMessa
     ...(existing?.localUrl ? { localUrl: existing.localUrl } : {}),
     ...(existing?.waveform ? { waveform: existing.waveform } : {}),
     ...(typeof existing?.mediaActivityAtMs === 'number' ? { mediaActivityAtMs: existing.mediaActivityAtMs } : {}),
+    ...(existing?.cancelRequested && !explicitlyCancelled ? { cancelRequested: true } : {}),
     ...(existing?.error ? { error: existing.error } : {}),
     ...(existing?.seeded ? { seeded: true } : {}),
   };
@@ -69,6 +82,42 @@ export function upsertMessage(messages: ChatMessage[], incoming: MessageData, te
     return next;
   }
   return [...messages, normalizeMessage(incoming)];
+}
+
+/** Mark a local cancel request as in flight for one message id. */
+export function markCancelRequested<T extends { msg_id: number; cancelRequested?: boolean }>(
+  items: T[],
+  msgId: number,
+): T[] {
+  return items.map((item) => (item.msg_id === msgId ? { ...item, cancelRequested: true } : item));
+}
+
+/** Drop the in-flight cancel marker (failed/unsupported cancel attempt). */
+export function clearCancelRequested<T extends { msg_id: number; cancelRequested?: boolean }>(
+  items: T[],
+  msgId: number,
+): T[] {
+  return items.map((item) => {
+    if (item.msg_id !== msgId || !item.cancelRequested) return item;
+    const { cancelRequested: _drop, ...rest } = item;
+    return rest as T;
+  });
+}
+
+/** Settle one message row as cancelled (bridge confirmed or local fallback). */
+export function settleCancelledMessage<
+  T extends { msg_id: number; cancelRequested?: boolean; delivery?: DeliveryState; error?: string },
+>(items: T[], msgId: number): T[] {
+  return items.map((item) =>
+    item.msg_id === msgId
+      ? {
+          ...item,
+          delivery: 'cancelled' as DeliveryState,
+          ...(item.cancelRequested ? { cancelRequested: undefined } : {}),
+          ...(item.error ? { error: undefined } : {}),
+        }
+      : item,
+  );
 }
 
 /** Apply a `message_update` event, merging only the fields that changed. */
@@ -99,6 +148,7 @@ export function applyGroupMessageUpdate(messages: ChatGroupMessage[], update: Me
   const index = messages.findIndex((m) => m.msg_id === update.msg_id && m.msg_id !== 0);
   if (index < 0) return messages;
   const existing = messages[index]!;
+  const cancelled = update.cancelled === true || update.delivery === 'cancelled';
   const next = messages.slice();
   next[index] = {
     ...existing,
@@ -106,6 +156,11 @@ export function applyGroupMessageUpdate(messages: ChatGroupMessage[], update: Me
     ...(update.attachment !== undefined ? { attachment: update.attachment } : {}),
     ...(update.text !== undefined ? { text: update.text } : {}),
     ...(update.kind !== undefined ? { kind: update.kind } : {}),
+    ...(cancelled
+      ? { delivery: 'cancelled' as const, cancelRequested: undefined }
+      : update.delivery !== undefined
+        ? { delivery: update.delivery }
+        : {}),
   };
   return next;
 }
@@ -221,11 +276,23 @@ export function upsertGroupMessage(messages: ChatGroupMessage[], incoming: Group
       ...(existing.localUrl ? { localUrl: existing.localUrl } : {}),
       ...(existing.waveform ? { waveform: existing.waveform } : {}),
       ...(typeof existing.mediaActivityAtMs === 'number' ? { mediaActivityAtMs: existing.mediaActivityAtMs } : {}),
+      ...(incoming.cancelled
+        ? { delivery: 'cancelled' as DeliveryState, cancelRequested: undefined }
+        : existing.delivery
+          ? { delivery: existing.delivery }
+          : {}),
       ...(existing.seeded ? { seeded: true } : {}),
     };
     return next;
   }
-  return [...messages, { ...incoming, ...(tempId ? { tempId } : {}) }];
+  return [
+    ...messages,
+    {
+      ...incoming,
+      ...(tempId ? { tempId } : {}),
+      ...(incoming.cancelled ? { delivery: 'cancelled' as DeliveryState } : {}),
+    },
+  ];
 }
 
 /* ------------------------------------------------------------------ */

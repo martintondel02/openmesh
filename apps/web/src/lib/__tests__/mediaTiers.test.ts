@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest';
 import {
   DEFAULT_IMAGE_TIER,
   DEFAULT_VOICE_TIER,
+  IMAGE_ENCODE_MIMES,
   IMAGE_TIERS,
   IMAGE_TIER_ORDER,
   MEDIA_PRESETS,
@@ -13,10 +14,15 @@ import {
   codec2FrameBytes,
   codec2PayloadDurationMs,
   codec2TierIndex,
+  encodedImageFilename,
   estimateImageTierBytes,
   estimateVoiceTierBytes,
+  imageEncodeOrder,
+  imageEncodeOrderForTier,
+  imageExtensionForMime,
   imageTier,
   imageTierPolicy,
+  selectPreferredImageEncoding,
   isCodec2Mime,
   isImageTierId,
   isVoiceTierId,
@@ -47,13 +53,62 @@ describe('media presets: single source + tiers', () => {
 
   it('exposes the four image tiers with contract dimensions and quality', () => {
     expect(IMAGE_TIER_ORDER).toEqual(['tiny', 'medium', 'high', 'original']);
-    expect(imageTier('tiny')).toMatchObject({ maxDim: 320, quality: 0.35, mime: 'image/webp' });
-    expect(imageTier('medium')).toMatchObject({ maxDim: 640, quality: 0.55 });
-    expect(imageTier('high')).toMatchObject({ maxDim: 1280, quality: 0.7 });
+    expect(imageTier('tiny')).toMatchObject({ maxDim: 256, quality: 0.28, mime: 'image/avif' });
+    expect(imageTier('medium')).toMatchObject({ maxDim: 512, quality: 0.4, mime: 'image/avif' });
+    expect(imageTier('high')).toMatchObject({ maxDim: 1024, quality: 0.5, mime: 'image/avif' });
     expect(imageTier('original')).toMatchObject({ maxDim: null, quality: null, mime: 'original' });
     expect(IMAGE_TIERS).toHaveLength(4);
     expect(isImageTierId('tiny')).toBe(true);
     expect(isImageTierId('huge')).toBe(false);
+  });
+
+  it('declares AVIF-first encode order per image tier with unchanged geometry', () => {
+    expect(IMAGE_ENCODE_MIMES).toEqual(['image/avif', 'image/webp', 'image/jpeg']);
+    for (const id of ['tiny', 'medium', 'high'] as const) {
+      const tier = imageTier(id);
+      expect(tier.encodeMimes).toEqual(['image/avif', 'image/webp', 'image/jpeg']);
+      // The shared preset declares AVIF as the preferred MIME; fallbacks stay available.
+      expect(tier.mime).toBe('image/avif');
+      expect(tier.maxDim).toBe(MEDIA_PRESETS.images[id].max_dim);
+      expect(tier.quality).toBe(MEDIA_PRESETS.images[id].quality);
+    }
+    expect(imageTier('original').encodeMimes).toEqual([]);
+  });
+
+  it('filters the encode order by real browser capability', () => {
+    expect(imageEncodeOrder({ avif: true, webp: true, jpeg: true })).toEqual(['image/avif', 'image/webp', 'image/jpeg']);
+    // Chromium 159 cannot encode AVIF from canvas → WebP first, exactly the pre-AVIF behaviour.
+    expect(imageEncodeOrder({ avif: false, webp: true, jpeg: true })).toEqual(['image/webp', 'image/jpeg']);
+    expect(imageEncodeOrder({ avif: false, webp: false, jpeg: true })).toEqual(['image/jpeg']);
+    expect(imageEncodeOrder({ avif: false, webp: false, jpeg: false })).toEqual([]);
+    expect(imageEncodeOrderForTier('tiny', { avif: true, webp: false, jpeg: true })).toEqual(['image/avif', 'image/jpeg']);
+    expect(imageEncodeOrderForTier('original', { avif: true, webp: true, jpeg: true })).toEqual([]);
+  });
+
+  it('prefers AVIF whenever it is available, then WebP, then JPEG', () => {
+    const avif = { mime: 'image/avif' as const, bytes: 1_200 };
+    const webp = { mime: 'image/webp' as const, bytes: 900 };
+    const jpeg = { mime: 'image/jpeg' as const, bytes: 700 };
+    // AVIF is mandatory-preferred even when another format happens to be smaller.
+    expect(selectPreferredImageEncoding([avif, webp, jpeg])).toBe('image/avif');
+    expect(selectPreferredImageEncoding([webp, jpeg])).toBe('image/webp');
+    expect(selectPreferredImageEncoding([jpeg])).toBe('image/jpeg');
+    expect(selectPreferredImageEncoding([webp])).toBe('image/webp');
+    expect(selectPreferredImageEncoding([])).toBeNull();
+  });
+
+  it('derives extensions and upload filenames from the bytes actually encoded', () => {
+    expect(imageExtensionForMime('image/avif')).toBe('avif');
+    expect(imageExtensionForMime('image/webp')).toBe('webp');
+    expect(imageExtensionForMime('image/jpeg')).toBe('jpg');
+    expect(imageExtensionForMime('image/jpg')).toBe('jpg');
+    expect(imageExtensionForMime('image/png')).toBe('png');
+    expect(imageExtensionForMime('image/svg+xml')).toBe('svg');
+    expect(imageExtensionForMime(null)).toBe('img');
+    expect(encodedImageFilename('photo.jpg', 'image/avif')).toBe('photo.avif');
+    expect(encodedImageFilename('IMG_1234.JPG', 'image/webp')).toBe('IMG_1234.webp');
+    expect(encodedImageFilename('no-extension', 'image/avif')).toBe('no-extension.avif');
+    expect(encodedImageFilename(null, 'image/avif')).toMatch(/^image-[a-z0-9]+\.avif$/);
   });
 
   it('exposes the three voice tiers with codec, mime and caps from the JSON', () => {

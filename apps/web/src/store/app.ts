@@ -23,6 +23,9 @@ import type {
   ErrorData,
   GroupMessageData,
   HelloData,
+  CancelResultData,
+  DeliveryState,
+  MessageCancelledData,
   MessageData,
   MessageUpdateData,
   NodeData,
@@ -55,6 +58,7 @@ import type { BackboneLink, BackboneLinkInput, GatewayConfigInput, GatewayConnec
 import { GATEWAYS_HELP_TOPIC } from '../lib/ops';
 import { normalizeActivityPayload } from '../lib/agents';
 import { parseHelpRoute } from '../lib/help';
+import { cancelAvailability } from '../lib/message-cancel';
 import type { RegulatoryOverride } from '../types/regulatory';
 import {
   buildRegulatoryOverridePatch,
@@ -66,7 +70,7 @@ import {
 } from '../lib/regulatory';
 import { ConfigApiError, patchBridgeConfig } from '../lib/config-api';
 import type { ConfigPatch } from './reducers';
-import { deriveDelivery, mergeConfig, removeContact as removeContactReducer, upsertChannel, upsertGroupMessage, upsertMessage, upsertNode, applyAck, applyMessageUpdate, applyGroupMessageUpdate, applyResourceProgress, markMediaActivity, resourceProgressFraction, appendPositionHistory } from './reducers';
+import { deriveDelivery, mergeConfig, removeContact as removeContactReducer, upsertChannel, upsertGroupMessage, upsertMessage, upsertNode, applyAck, applyMessageUpdate, applyGroupMessageUpdate, applyResourceProgress, markMediaActivity, markCancelRequested, clearCancelRequested, settleCancelledMessage, resourceProgressFraction, appendPositionHistory } from './reducers';
 import type { MeshTransport, TransportStatus } from '../lib/transport';
 import { LiveTransport, buildHttpBaseUrl } from '../lib/ws';
 import { MockTransport } from '../lib/mock/transport';
@@ -340,6 +344,8 @@ export interface AppState {
   lastInvite: { kind: 'contact' | 'channel'; url: string } | null;
   commandError: string | null;
   selectedNodeId: string | null;
+  /** Whether this bridge supports cancelling sends: unknown until first attempt. */
+  cancelSupport: 'unknown' | 'supported' | 'unavailable';
   resolveAttachmentUrl: (attachmentId: string, mime?: string | null) => Promise<string>;
   inspectNode: (nodeId: string | null) => void;
 
@@ -409,6 +415,7 @@ export interface AppState {
   sendGroupText: (text: string) => Promise<void>;
   sendAttachment: (draft: AttachmentDraft, thread?: ActiveThread) => Promise<void>;
   retryMessage: (msgId: number) => void;
+  cancelMessage: (msgId: number) => Promise<void>;
   markActiveThreadRead: () => void;
   sharePosition: (target: { channelId?: string; peer?: string }) => Promise<void>;
   updateConfig: (patch: ConfigPatch) => void;
@@ -695,6 +702,40 @@ function watchdogPendingSend(set: SetState, get: GetState, commandId: string, te
   }, COMMAND_TIMEOUT_MS);
 }
 
+type CancelOutcome = 'cancelled' | 'already_finished' | 'unavailable';
+
+/**
+ * REST fallback for cancel (task-30 contract: POST /api/messages/{id}/cancel).
+ *
+ * - 2xx + `cancelled: true` → cancelled (idempotent repeats included)
+ * - 400 (inbound / already delivered) and 404 (unknown id) → already finished
+ * - anything else (no route, auth, network) → unavailable
+ */
+async function cancelMessageViaRest(settings: AppSettings, msgId: number): Promise<CancelOutcome> {
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 6000);
+    const response = await fetch(`${buildHttpBaseUrl(settings.bridgeUrl)}/api/messages/${msgId}/cancel`, {
+      method: 'POST',
+      signal: controller.signal,
+      headers: {
+        Accept: 'application/json',
+        'X-OpenMesh-Client': 'web',
+        ...(settings.token ? { Authorization: `Bearer ${settings.token}` } : {}),
+      },
+    });
+    clearTimeout(timer);
+    if (response.ok) {
+      const data = (await response.json().catch(() => null)) as CancelResultData | null;
+      return data && data.cancelled ? 'cancelled' : 'unavailable';
+    }
+    if (response.status === 400 || response.status === 404) return 'already_finished';
+    return 'unavailable';
+  } catch {
+    return 'unavailable';
+  }
+}
+
 /* ------------------------------------------------------------------ */
 /* Store                                                              */
 /* ------------------------------------------------------------------ */
@@ -736,6 +777,7 @@ export const useAppStore = create<AppState>()((set, get) => ({
   lastInvite: null,
   commandError: null,
   selectedNodeId: null,
+  cancelSupport: 'unknown',
 
   backboneConfig: null,
   backboneStatus: null,
@@ -1219,6 +1261,7 @@ export const useAppStore = create<AppState>()((set, get) => ({
     const state = get();
     const target = state.messages.find((m) => m.msg_id === msgId) ?? state.groupMessages.find((m) => m.msg_id === msgId);
     if (!target || !target.outgoing || !transport) return;
+    if (target.cancelled || ('delivered' in target && target.delivered)) return;
     const atMs = Date.now();
     const isMedia = Boolean(target.attachment);
     const previousTimer = pendingRetries.get(msgId);
@@ -1275,6 +1318,100 @@ export const useAppStore = create<AppState>()((set, get) => ({
     }, COMMAND_TIMEOUT_MS);
     pendingRetries.set(msgId, timer);
     get().pushToast({ kind: 'info', title: 'Retrying', message: 'Asking the bridge to resend…' });
+  },
+
+  cancelMessage: async (msgId) => {
+    const state = get();
+    const target = state.messages.find((m) => m.msg_id === msgId) ?? state.groupMessages.find((m) => m.msg_id === msgId);
+    if (!target || !target.outgoing || !transport) return;
+    const group = 'channel_id' in target;
+    const delivery: DeliveryState = group ? target.delivery ?? 'sent' : target.delivery;
+    const availability = cancelAvailability({
+      outgoing: true,
+      msgId,
+      delivery,
+      cancelRequested: target.cancelRequested,
+      error: target.error,
+      group,
+      sentAtMs: target.sent_at_ms,
+      nowMs: Date.now(),
+      hasAttachment: Boolean(target.attachment),
+      attachmentProgress: target.attachment?.progress ?? null,
+      bridgeSupportsCancel: state.cancelSupport === 'unavailable' ? false : null,
+    });
+    if (!availability.canCancel) return;
+
+    set({
+      messages: markCancelRequested(state.messages, msgId),
+      groupMessages: markCancelRequested(state.groupMessages, msgId),
+    });
+
+    const isCancelledNow = () => {
+      const current = get();
+      const direct = current.messages.find((m) => m.msg_id === msgId);
+      if (direct) return direct.delivery === 'cancelled';
+      const channel = current.groupMessages.find((m) => m.msg_id === msgId);
+      return channel?.delivery === 'cancelled';
+    };
+
+    const refreshRow = () => {
+      const direct = get().messages.find((m) => m.msg_id === msgId);
+      if (direct) {
+        transport?.send('get_messages', { peer: direct.peer, limit: 20 });
+        return;
+      }
+      const channel = get().groupMessages.find((m) => m.msg_id === msgId);
+      if (channel) transport?.send('get_messages', { channel_id: channel.channel_id, limit: 20 });
+    };
+
+    let outcome: CancelOutcome = 'unavailable';
+    try {
+      const commandId = transport.send('cancel_message', { msg_id: msgId });
+      const data = await registerCommand<CancelResultData>(commandId, 8000);
+      outcome = data.cancelled || data.already_cancelled ? 'cancelled' : 'already_finished';
+    } catch {
+      outcome = isCancelledNow() ? 'cancelled' : 'unavailable';
+    }
+    if (outcome === 'unavailable') {
+      // REST fallback for bridge builds that expose the endpoint but not the WS command.
+      outcome = isCancelledNow() ? 'cancelled' : await cancelMessageViaRest(get().settings, msgId);
+    }
+
+    const current = get();
+    if (outcome === 'cancelled') {
+      set({
+        cancelSupport: 'supported',
+        messages: settleCancelledMessage(current.messages, msgId),
+        groupMessages: settleCancelledMessage(current.groupMessages, msgId),
+      });
+      get().pushToast({
+        kind: 'info',
+        title: 'Send cancelled',
+        message: 'No more radio airtime will be used for this message.',
+      });
+      return;
+    }
+
+    const after = get();
+    set({
+      messages: clearCancelRequested(after.messages, msgId),
+      groupMessages: clearCancelRequested(after.groupMessages, msgId),
+      ...(outcome === 'already_finished' ? { cancelSupport: 'supported' as const } : { cancelSupport: 'unavailable' as const }),
+    });
+    if (outcome === 'already_finished') {
+      get().pushToast({
+        kind: 'info',
+        title: 'Already finished',
+        message: 'This message was delivered or is no longer queued, so there was nothing to cancel.',
+      });
+      refreshRow();
+      return;
+    }
+    get().pushToast({
+      kind: 'warn',
+      title: 'Cancel unavailable',
+      message: 'This bridge does not support cancelling a send yet. Update the bridge to stop in-flight media.',
+    });
   },
 
   markActiveThreadRead: () => markThreadRead(set, get),
@@ -2376,15 +2513,23 @@ export const useAppStore = create<AppState>()((set, get) => ({
         const data = event.data as MessageUpdateData;
         const atMs = Date.now();
         const touchesMedia = data.attachment !== undefined;
+        const cancelledUpdate = data.cancelled === true || data.delivery === 'cancelled';
+        const nextMessages = applyMessageUpdate(state.messages, data);
+        const nextGroups = applyGroupMessageUpdate(state.groupMessages, data);
         set({
-          messages: touchesMedia
-            ? markMediaActivity(applyMessageUpdate(state.messages, data), data.msg_id, atMs)
-            : applyMessageUpdate(state.messages, data),
+          messages: cancelledUpdate
+            ? settleCancelledMessage(nextMessages, data.msg_id)
+            : touchesMedia
+              ? markMediaActivity(nextMessages, data.msg_id, atMs)
+              : nextMessages,
           // Channel attachments arrive through `message_update` (the group_message event has no
           // attachment yet), so merge into both message lists.
-          groupMessages: touchesMedia
-            ? markMediaActivity(applyGroupMessageUpdate(state.groupMessages, data), data.msg_id, atMs)
-            : applyGroupMessageUpdate(state.groupMessages, data),
+          groupMessages: cancelledUpdate
+            ? settleCancelledMessage(nextGroups, data.msg_id)
+            : touchesMedia
+              ? markMediaActivity(nextGroups, data.msg_id, atMs)
+              : nextGroups,
+          ...(cancelledUpdate ? { cancelSupport: 'supported' as const } : {}),
         });
         break;
       }
@@ -2411,6 +2556,27 @@ export const useAppStore = create<AppState>()((set, get) => ({
           pendingRetries.delete(data.msg_id);
         }
         set({ messages: applyAck(state.messages, data.msg_id, data.kind) });
+        break;
+      }
+      case 'cancel_result': {
+        const data = event.data as CancelResultData;
+        if (event.id) resolveCommand(event.id, data);
+        if (data.cancelled !== false) {
+          set({
+            cancelSupport: 'supported',
+            messages: settleCancelledMessage(state.messages, data.msg_id),
+            groupMessages: settleCancelledMessage(state.groupMessages, data.msg_id),
+          });
+        }
+        break;
+      }
+      case 'message_cancelled': {
+        const data = event.data as MessageCancelledData;
+        set({
+          cancelSupport: 'supported',
+          messages: settleCancelledMessage(state.messages, data.msg_id),
+          groupMessages: settleCancelledMessage(state.groupMessages, data.msg_id),
+        });
         break;
       }
       case 'position': {

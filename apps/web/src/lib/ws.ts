@@ -36,6 +36,8 @@ const KNOWN_WS_TYPES = new Set([
   'channels',
   'channel_created',
   'send_result',
+  'cancel_result',
+  'message_cancelled',
   'contact_url',
   'channel_url',
   'error',

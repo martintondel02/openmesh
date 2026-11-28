@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import {
   AlertTriangle,
+  Ban,
   Battery,
   BatteryFull,
   BatteryLow,
@@ -167,6 +168,8 @@ export function DeliveryTicks({ state, className }: { state: DeliveryState; clas
       return <CheckCheck className={cn(base, 'text-sky-400')} aria-label="Read" />;
     case 'failed':
       return <AlertTriangle className={cn(base, 'text-rose-400')} aria-label="Failed to send" />;
+    case 'cancelled':
+      return <Ban className={cn(base, 'text-slate-500')} aria-label="Cancelled" />;
     default:
       return null;
   }

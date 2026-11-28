@@ -70,6 +70,15 @@ describe('outgoing media: progress wording', () => {
     expect(media?.label).toBe('Sent over the radio — waiting for delivery confirmation');
   });
 
+  it('settles cancelled media without offering retry or progress', () => {
+    const media = describeOutgoingMedia(
+      input({ attachment: attachment({ progress: 0.4 }), delivery: 'cancelled' }),
+    );
+    expect(media?.phase).toBe('cancelled');
+    expect(media?.canRetry).toBe(false);
+    expect(media?.label).toContain('Cancelled');
+  });
+
   it('reports delivered for direct messages and keeps channel semantics', () => {
     expect(
       describeOutgoingMedia(input({ attachment: attachment({ progress: 1 }), delivery: 'delivered' }))?.phase,

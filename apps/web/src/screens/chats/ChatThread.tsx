@@ -26,6 +26,7 @@ export function ChatThread() {
   const closeThread = useAppStore((state) => state.closeThread);
   const setReplyTo = useAppStore((state) => state.setReplyTo);
   const retryMessage = useAppStore((state) => state.retryMessage);
+  const cancelMessage = useAppStore((state) => state.cancelMessage);
   const inspectNode = useAppStore((state) => state.inspectNode);
   const sharePosition = useAppStore((state) => state.sharePosition);
   const leaveChannel = useAppStore((state) => state.leaveChannel);
@@ -281,6 +282,7 @@ export function ChatThread() {
                               setReplyTo(target.msg_id);
                             }}
                             onRetry={(msgId) => retryMessage(msgId)}
+                            onCancel={(msgId) => void cancelMessage(msgId)}
                             onJumpTo={jumpTo}
                           />
                         );

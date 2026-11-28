@@ -81,6 +81,7 @@ export class MockTransport implements MeshTransport {
   private timers = new Set<ReturnType<typeof setTimeout>>();
   private objectUrls = new Map<string, string>();
   private uploadedMeta = new Map<string, { size: number; mime: string; name: string | null }>();
+  private cancelledMessages = new Set<number>();
   private connected = false;
   private disposed = false;
   private nextMsgId: number;
@@ -497,6 +498,15 @@ export class MockTransport implements MeshTransport {
       case 'retry':
         this.handleRetry(data);
         return;
+      case 'cancel_message': {
+        const msgId = Number(data.msg_id ?? 0);
+        if (msgId > 0) this.cancelledMessages.add(msgId);
+        this.later(() => this.emit('cancel_result', { ok: true, msg_id: msgId, cancelled: msgId > 0 }, commandId), 120);
+        if (msgId > 0) {
+          this.later(() => this.emit('message_update', { msg_id: msgId, delivered: false, cancelled: true, delivery: 'cancelled' }), 220);
+        }
+        return;
+      }
       case 'delete_message':
         return;
       case 'add_contact':
@@ -571,6 +581,7 @@ export class MockTransport implements MeshTransport {
         outgoing: true,
         delivered: false,
         read: false,
+        cancelled: false,
         reply_to: replyTo,
         thread: null,
         attachment: this.mockAttachment(attachmentId),
@@ -617,7 +628,8 @@ export class MockTransport implements MeshTransport {
     const resId = Number.parseInt(attachment.id.replace(/\D/g, '').slice(-8) || '1', 16) || 1;
     steps.forEach((received, index) => {
       this.later(
-        () =>
+        () => {
+          if (this.cancelledMessages.has(msgId)) return;
           this.emit('resource_progress', {
             peer,
             msg_id: msgId,
@@ -625,18 +637,21 @@ export class MockTransport implements MeshTransport {
             received,
             total: 100,
             direction: 'out',
-          }),
+          });
+        },
         400 + index * 1_200,
       );
     });
     if (!group) {
       this.later(
-        () =>
+        () => {
+          if (this.cancelledMessages.has(msgId)) return;
           this.emit('message_update', {
             msg_id: msgId,
             delivered: true,
             attachment: { ...attachment, progress: 1 },
-          }),
+          });
+        },
         400 + steps.length * 1_200 + 300,
       );
     }
@@ -659,6 +674,7 @@ export class MockTransport implements MeshTransport {
         text: (typeof data.text === 'string' && data.text) || null,
         sent_at_ms: Date.now(),
         outgoing: true,
+        cancelled: false,
         signature_valid: true,
         attachment: this.mockAttachment(typeof data.attachment_id === 'string' ? data.attachment_id : null),
         position: null,

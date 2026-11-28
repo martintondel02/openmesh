@@ -5,7 +5,16 @@
  */
 
 import { planCompression, planDimensions, type CompressionPlan } from './compression';
-import { imageTier, type ImageTierId } from './media-tiers';
+import {
+  encodedImageFilename,
+  imageEncodeOrderForTier,
+  imageExtensionForMime,
+  imageTier,
+  selectPreferredImageEncoding,
+  type ImageEncodeMime,
+  type ImageEncoderSupport,
+  type ImageTierId,
+} from './media-tiers';
 
 export interface CompressedImage {
   blob: Blob;
@@ -49,6 +58,90 @@ async function canvasToBlob(canvas: HTMLCanvasElement, mime: string, quality: nu
   });
   if (!blob) throw new Error('The browser could not encode this image');
   return blob;
+}
+
+let encoderSupportProbe: Promise<ImageEncoderSupport> | null = null;
+
+/** Encode a 2x2 canvas and confirm the browser really produced the requested format. */
+async function probeEncoder(mime: ImageEncodeMime): Promise<boolean> {
+  try {
+    const canvas = createCanvas(2, 2);
+    const context = canvas.getContext('2d');
+    if (!context) return false;
+    context.fillStyle = '#808080';
+    context.fillRect(0, 0, 2, 2);
+    const blob = await new Promise<Blob | null>((resolve) => {
+      canvas.toBlob((result) => resolve(result), mime, 0.8);
+    });
+    // Chromium falls back to image/png for unsupported types; that must never pass.
+    if (!blob) return false;
+    return blob.type === mime;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Capability probe for browser canvas encoders. Cached for the session.
+ * Chromium (checked: Chrome for Testing 159) cannot encode AVIF from canvas and
+ * silently returns image/png — the `blob.type` check keeps that path off.
+ */
+export function detectImageEncoderSupport(): Promise<ImageEncoderSupport> {
+  if (!encoderSupportProbe) {
+    encoderSupportProbe = (async () => {
+      const [avif, webp, jpeg] = await Promise.all([
+        probeEncoder('image/avif'),
+        probeEncoder('image/webp'),
+        probeEncoder('image/jpeg'),
+      ]);
+      return { avif, webp, jpeg };
+    })();
+  }
+  return encoderSupportProbe;
+}
+
+interface EncodedCanvasImage {
+  blob: Blob;
+  /** MIME actually produced by the browser (verified via `blob.type`). */
+  mime: ImageEncodeMime | string;
+}
+
+/**
+ * Encode one canvas with the browser-preferred format.
+ *
+ * - Only formats that pass the probe are attempted.
+ * - Every blob's `type` is verified before it can become the chosen MIME, so a
+ *   PNG fallback can never be sent as "AVIF/WebP".
+ * - The first verified format wins in preference order (AVIF when the browser can
+ *   really encode it, else WebP, else JPEG).
+ */
+async function encodeCanvasImage(
+  canvas: HTMLCanvasElement,
+  quality: number,
+  support: ImageEncoderSupport,
+  tierId: ImageTierId,
+): Promise<EncodedCanvasImage> {
+  const order = imageEncodeOrderForTier(tierId, support);
+  const candidates: Array<{ blob: Blob; mime: ImageEncodeMime; bytes: number }> = [];
+
+  for (const mime of order) {
+    try {
+      const blob = await canvasToBlob(canvas, mime, quality);
+      if (blob.type !== mime) continue; // browser silently fell back; never mislabel
+      // AVIF is the mandatory preference: the first verified encoder wins.
+      candidates.push({ blob, mime, bytes: blob.size });
+      break;
+    } catch {
+      continue;
+    }
+  }
+
+  if (!candidates.length) {
+    throw new Error('The browser could not encode this image in a supported format');
+  }
+  const preferredMime = selectPreferredImageEncoding(candidates) ?? candidates[0]!.mime;
+  const chosen = candidates.find((candidate) => candidate.mime === preferredMime) ?? candidates[0]!;
+  return { blob: chosen.blob, mime: chosen.mime };
 }
 
 interface DecodedImage {
@@ -112,13 +205,13 @@ export async function compressImage(blob: Blob, options: CompressOptions): Promi
   options.onProgress?.('decode', 0);
   const decoded = await decodeImage(blob);
   try {
-    const mime = options.mime === 'image/webp' || (options.mime !== 'image/jpeg' && supportsWebp()) ? 'image/webp' : 'image/jpeg';
+    const support = await detectImageEncoderSupport();
     const target = Math.max(1024, Math.floor(options.targetBytes));
     let plan = planCompression(decoded.width, decoded.height, target, {
       maxDimension: options.maxDimension ?? 1600,
     });
     let attempts = 0;
-    let best: { blob: Blob; width: number; height: number; quality: number } | null = null;
+    let best: { blob: Blob; mime: string; width: number; height: number; quality: number } | null = null;
 
     for (let round = 0; round < MAX_ATTEMPTS; round += 1) {
       attempts += 1;
@@ -129,9 +222,9 @@ export async function compressImage(blob: Blob, options: CompressOptions): Promi
       context.imageSmoothingEnabled = true;
       context.imageSmoothingQuality = 'high';
       context.drawImage(decoded.source, 0, 0, plan.width, plan.height);
-      const encoded = await canvasToBlob(canvas, mime, plan.quality);
-      best = { blob: encoded, width: plan.width, height: plan.height, quality: plan.quality };
-      if (encoded.size <= target) break;
+      const encoded = await encodeCanvasImage(canvas, plan.quality, support, 'high');
+      best = { blob: encoded.blob, mime: encoded.mime, width: plan.width, height: plan.height, quality: plan.quality };
+      if (encoded.blob.size <= target) break;
 
       // Still too large: shrink and drop quality, then retry from the real size.
       const nextWidth = Math.max(64, Math.round(plan.width * 0.82));
@@ -149,7 +242,7 @@ export async function compressImage(blob: Blob, options: CompressOptions): Promi
     return {
       blob: best.blob,
       objectUrl,
-      mime,
+      mime: best.mime,
       width: best.width,
       height: best.height,
       quality: best.quality,
@@ -176,9 +269,17 @@ export async function readImageDimensions(blob: Blob): Promise<{ width: number; 
 
 /** Validate a dropped/picked file before we spend CPU on it. */
 export function validateImageFile(file: File): string | null {
-  if (!file.type.startsWith('image/')) return 'Only images (JPEG, PNG, WebP, GIF, SVG) can be sent from the web client.';
+  if (!file.type.startsWith('image/')) return 'Only images (JPEG, PNG, WebP, AVIF, GIF, SVG) can be sent from the web client.';
   if (file.size > 32 * 1024 * 1024) return 'That image is larger than 32 MiB — pick something smaller.';
   return null;
+}
+
+/**
+ * Upload filename that matches the bytes actually encoded: the source base name
+ * with the real extension (a photo picked as JPEG but sent as AVIF becomes .avif).
+ */
+export function encodedImageUploadName(file: Pick<File, 'name'>, mime: string): string {
+  return encodedImageFilename(file.name, mime);
 }
 
 /** Human-readable file name fallback for pasted/dropped images. */
@@ -198,7 +299,9 @@ export interface TierCompressedImage extends CompressedImage {
 
 /**
  * Compress to one of the shared tiers (Tiny/Medium/High) or pass the original through.
- * Contract: downscale to `max_dim`, encode WebP at `quality`; actual bytes are shown later.
+ * Contract: downscale to `max_dim`, then encode at `quality` with the best format this
+ * browser can actually produce (AVIF when it wins, else WebP, else JPEG); the measured
+ * bytes and real MIME are shown later.
  */
 export async function compressImageToTier(blob: Blob, tierId: ImageTierId): Promise<TierCompressedImage> {
   const tier = imageTier(tierId);
@@ -236,15 +339,15 @@ export async function compressImageToTier(blob: Blob, tierId: ImageTierId): Prom
     context.imageSmoothingEnabled = true;
     context.imageSmoothingQuality = 'high';
     context.drawImage(decoded.source, 0, 0, dims.width, dims.height);
-    const mime = supportsWebp() ? 'image/webp' : 'image/jpeg';
+    const support = await detectImageEncoderSupport();
     const quality = tier.quality ?? 0.6;
-    const encoded = await canvasToBlob(canvas, mime, quality);
+    const encoded = await encodeCanvasImage(canvas, quality, support, tier.id);
     return {
       tier: tier.id,
       original: false,
-      blob: encoded,
-      objectUrl: URL.createObjectURL(encoded),
-      mime,
+      blob: encoded.blob,
+      objectUrl: URL.createObjectURL(encoded.blob),
+      mime: encoded.mime,
       width: dims.width,
       height: dims.height,
       quality,
@@ -255,7 +358,7 @@ export async function compressImageToTier(blob: Blob, tierId: ImageTierId): Prom
         width: dims.width,
         height: dims.height,
         quality,
-        estimatedBytes: encoded.size,
+        estimatedBytes: encoded.blob.size,
         scale: dims.width / Math.max(1, decoded.width),
         iterations: 1,
         atFloor: false,
@@ -304,6 +407,15 @@ export async function createDemoImageFile(width = 1600, height = 1067): Promise<
   context.fillStyle = 'rgba(226,232,240,0.85)';
   context.font = `${Math.round(height * 0.035)}px sans-serif`;
   context.fillText('Demo ridge · tier preview', width * 0.055, height * 0.91);
-  const encoded = await canvasToBlob(canvas, 'image/webp', 0.86);
-  return new File([encoded], 'demo-ridge.webp', { type: encoded.type || 'image/webp' });
+  const support = await detectImageEncoderSupport();
+  let encoded: EncodedCanvasImage;
+  try {
+    encoded = await encodeCanvasImage(canvas, 0.86, support, 'high');
+  } catch {
+    const blob = await canvasToBlob(canvas, 'image/webp', 0.86);
+    encoded = { blob, mime: blob.type || 'image/webp' };
+  }
+  return new File([encoded.blob], `demo-ridge.${imageExtensionForMime(encoded.mime)}`, {
+    type: encoded.mime,
+  });
 }

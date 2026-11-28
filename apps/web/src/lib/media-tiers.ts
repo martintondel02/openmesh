@@ -18,7 +18,14 @@ export interface ImageTier {
   label: string;
   maxDim: number | null;
   quality: number | null;
+  /** Declared fallback MIME from `content/presets/media.json` (currently image/webp). */
   mime: string;
+  /**
+   * Browser encode preference for this tier, best first: AVIF when the browser
+   * can actually encode it, then WebP, then JPEG. All formats share the same
+   * `maxDim`/`quality` targets, so the tier geometry does not change with MIME.
+   */
+  encodeMimes: ImageEncodeMime[];
   description: string;
   targetLabel: string;
 }
@@ -53,6 +60,102 @@ const VOICE_LABELS: Record<VoiceTierId, { label: string; description: string }> 
 export const IMAGE_TIER_ORDER: ImageTierId[] = ['tiny', 'medium', 'high', 'original'];
 export const VOICE_TIER_ORDER: VoiceTierId[] = ['tiny', 'medium', 'high'];
 
+/* ------------------------------------------------------------------ */
+/* Browser image encoders (AVIF where supported, WebP/JPEG fallbacks)  */
+/* ------------------------------------------------------------------ */
+
+/** Browser canvas encoders in preference order (best compression first). */
+export const IMAGE_ENCODE_MIMES = ['image/avif', 'image/webp', 'image/jpeg'] as const;
+export type ImageEncodeMime = (typeof IMAGE_ENCODE_MIMES)[number];
+
+/** Result of a canvas `toBlob` capability probe (verified by `blob.type`). */
+export interface ImageEncoderSupport {
+  avif: boolean;
+  webp: boolean;
+  jpeg: boolean;
+}
+
+export interface ImageEncodingCandidate {
+  mime: ImageEncodeMime;
+  bytes: number;
+}
+
+/** Supported encoders in preference order (AVIF only when the probe verified it). */
+export function imageEncodeOrder(support: ImageEncoderSupport): ImageEncodeMime[] {
+  return IMAGE_ENCODE_MIMES.filter((mime) =>
+    mime === 'image/avif' ? support.avif : mime === 'image/webp' ? support.webp : support.jpeg,
+  );
+}
+
+/** Preferred encoders for one tier, filtered by what this browser can encode. */
+export function imageEncodeOrderForTier(tierInput: ImageTierId, support: ImageEncoderSupport): ImageEncodeMime[] {
+  const tier = imageTier(tierInput);
+  if (tier.id === 'original') return [];
+  return tier.encodeMimes.filter((mime) =>
+    mime === 'image/avif' ? support.avif : mime === 'image/webp' ? support.webp : support.jpeg,
+  );
+}
+
+/**
+ * Pick the first validated candidate in preference order: AVIF > WebP > JPEG.
+ * AVIF is the mandatory preferred encoder whenever the browser can produce real
+ * `image/avif` bytes; callers only pass candidates whose `blob.type` matched, so
+ * a silent PNG fallback can never be selected.
+ */
+export function selectPreferredImageEncoding(
+  candidates: readonly ImageEncodingCandidate[],
+): ImageEncodeMime | null {
+  for (const mime of IMAGE_ENCODE_MIMES) {
+    if (candidates.some((candidate) => candidate.mime === mime)) return mime;
+  }
+  return null;
+}
+
+/** File extension for the actual encoded MIME (never the requested-but-unused one). */
+export function imageExtensionForMime(mime: string | null | undefined): string {
+  const value = (mime ?? '').split(';')[0]?.trim().toLowerCase() ?? '';
+  switch (value) {
+    case 'image/avif':
+      return 'avif';
+    case 'image/webp':
+      return 'webp';
+    case 'image/jpeg':
+    case 'image/jpg':
+      return 'jpg';
+    case 'image/png':
+      return 'png';
+    case 'image/gif':
+      return 'gif';
+    case 'image/svg+xml':
+      return 'svg';
+    case 'image/heic':
+      return 'heic';
+    case 'image/heif':
+      return 'heif';
+    default: {
+      const subtype = value.startsWith('image/') ? value.slice('image/'.length).replace(/[^a-z0-9]+/g, '') : '';
+      return subtype || 'img';
+    }
+  }
+}
+
+/**
+ * Filename for the bytes actually uploaded: keep the source base name but use the
+ * real encoded extension (`photo.jpg` picked as AVIF becomes `photo.avif`).
+ */
+export function encodedImageFilename(
+  sourceName: string | null | undefined,
+  mime: string,
+  fallbackPrefix = 'image',
+): string {
+  const extension = imageExtensionForMime(mime);
+  const name = (sourceName ?? '').trim();
+  if (!name) return `${fallbackPrefix}-${Date.now().toString(36)}.${extension}`;
+  const dot = name.lastIndexOf('.');
+  const base = dot > 0 ? name.slice(0, dot) : name;
+  return `${base || fallbackPrefix}.${extension}`;
+}
+
 export const IMAGE_TIERS: ImageTier[] = IMAGE_TIER_ORDER.map((id) => {
   const preset = mediaPresets.images[id];
   return {
@@ -61,6 +164,7 @@ export const IMAGE_TIERS: ImageTier[] = IMAGE_TIER_ORDER.map((id) => {
     maxDim: preset.max_dim,
     quality: preset.quality,
     mime: preset.mime,
+    encodeMimes: id === 'original' ? [] : [...IMAGE_ENCODE_MIMES],
     description: IMAGE_LABELS[id].description,
     targetLabel:
       id === 'original'
@@ -139,7 +243,7 @@ export function estimateImageTierBytes(
     tier.maxDim ?? 1600,
     tier.maxDim ?? 1600,
   );
-  // Match compression.ts' empirical WebP estimate.
+  // Match compression.ts' empirical WebP/JPEG estimate (AVIF only makes it smaller).
   const bytesPerPixel = 0.05 + 0.32 * (tier.quality ?? 0.5) ** 2;
   return Math.max(256, Math.round(dims.width * dims.height * bytesPerPixel));
 }

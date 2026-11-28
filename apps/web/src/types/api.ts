@@ -161,6 +161,8 @@ export interface MessageData {
   outgoing: boolean;
   delivered: boolean;
   read: boolean;
+  /** Bridge cancel contract (task-30): true after the user cancelled this send. */
+  cancelled?: boolean;
   reply_to: number | null;
   thread: string | null;
   attachment: Attachment | null;
@@ -168,7 +170,28 @@ export interface MessageData {
 }
 
 /** `message_update`: same shape as `message`, only changed fields + msg_id (§3.5). */
-export type MessageUpdateData = Partial<MessageData> & { msg_id: number };
+export type MessageUpdateData = Partial<MessageData> & {
+  msg_id: number;
+  /** Expected cancel contract (task-30): `delivery: "cancelled"` and/or a boolean flag. */
+  delivery?: DeliveryState;
+  cancelled?: boolean;
+};
+
+/** Response to the `cancel_message` WS command / REST cancel (task-30 contract). */
+export interface CancelResultData {
+  ok?: boolean;
+  msg_id: number;
+  cancelled: boolean;
+  /** Idempotent repeat: the send was already cancelled. */
+  already_cancelled?: boolean;
+  reason?: string | null;
+}
+
+/** Expected bridge broadcast when a send is cancelled (task-30 contract). */
+export interface MessageCancelledData {
+  msg_id: number;
+  reason?: string | null;
+}
 
 export interface GroupMessageData {
   msg_id: number;
@@ -182,6 +205,8 @@ export interface GroupMessageData {
   sent_at_ms: number;
   outgoing: boolean;
   signature_valid: boolean;
+  /** Bridge cancel contract (task-30): true after the user cancelled this send. */
+  cancelled?: boolean;
   attachment: Attachment | null;
   position: Position | null;
 }
@@ -348,6 +373,8 @@ export interface ServerEventMap {
   channels: ChannelsEventData;
   channel_created: ChannelCreatedData;
   send_result: SendResultData;
+  cancel_result: CancelResultData;
+  message_cancelled: MessageCancelledData;
   contact_url: ContactUrlData;
   channel_url: ChannelUrlData;
   error: ErrorData;
@@ -373,11 +400,13 @@ export type TransportMode = 'live' | 'demo';
  * Delivery state derived from the bridge flags. `sent` means the bridge echoed
  * the message but no delivery ack has arrived yet.
  */
-export type DeliveryState = 'pending' | 'sent' | 'delivered' | 'read' | 'failed';
+export type DeliveryState = 'pending' | 'sent' | 'delivered' | 'read' | 'failed' | 'cancelled';
 
 /** A direct message plus local-only UI bookkeeping. */
 export interface ChatMessage extends MessageData {
   delivery: DeliveryState;
+  /** Local-only: a cancel request is in flight (bubble shows "Cancelling…"). */
+  cancelRequested?: boolean;
   /** Locally generated id used to reconcile an optimistic message with its echo. */
   tempId?: string;
   /** Blob/data URL for media that is local-only (optimistic send, demo dataset). */
@@ -396,6 +425,10 @@ export interface ChatMessage extends MessageData {
 }
 
 export interface ChatGroupMessage extends GroupMessageData {
+  /** Local-only delivery state for channel sends (channels have no delivered/read ack). */
+  delivery?: DeliveryState;
+  /** Local-only: a cancel request is in flight. */
+  cancelRequested?: boolean;
   tempId?: string;
   localUrl?: string;
   waveform?: number[];

@@ -5,7 +5,10 @@ import {
   applyGroupMessageUpdate,
   applyMessageUpdate,
   applyResourceProgress,
+  clearCancelRequested,
+  markCancelRequested,
   markMediaActivity,
+  settleCancelledMessage,
   resourceProgressFraction,
   buildConversations,
   deriveDelivery,
@@ -387,6 +390,39 @@ describe('reducers: group messages', () => {
     expect(optimistic.mediaActivityAtMs).toBeUndefined();
     const stamped = { ...optimistic, mediaActivityAtMs: 4321 };
     expect(upsertGroupMessage([stamped], echoed, 'local_1')[0]!.mediaActivityAtMs).toBe(4321);
+  });
+});
+
+describe('reducers: cancel send', () => {
+  it('marks, clears and settles a local cancel request by msg_id only', () => {
+    const a = direct({ msg_id: 7, peer: 'peer', outgoing: true });
+    const b = direct({ msg_id: 8, peer: 'other', outgoing: true });
+    const marked = markCancelRequested([a, b], 7);
+    expect(marked[0]!.cancelRequested).toBe(true);
+    expect(marked[1]!.cancelRequested).toBeUndefined();
+    const cleared = clearCancelRequested(marked, 7);
+    expect(cleared[0]!.cancelRequested).toBeUndefined();
+    const settled = settleCancelledMessage(marked, 7);
+    expect(settled[0]!.delivery).toBe('cancelled');
+    expect(settled[0]!.cancelRequested).toBeUndefined();
+    expect(settled[1]!.delivery).toBe('sent');
+  });
+
+  it('derives the cancelled delivery state and keeps it after a bridge echo', () => {
+    expect(deriveDelivery({ outgoing: true, delivered: false, read: false }, 'cancelled')).toBe('cancelled');
+    const current = direct({ msg_id: 9, peer: 'peer', outgoing: true, delivery: 'cancelled' });
+    const echoed = upsertMessage([current], direct({ msg_id: 9, peer: 'peer', outgoing: true }), undefined);
+    expect(echoed[0]!.delivery).toBe('cancelled');
+    // A later real delivery acknowledgement wins over a stale cancelled mark.
+    const updated = applyMessageUpdate([current], { msg_id: 9, delivered: true });
+    expect(updated[0]!.delivery).toBe('delivered');
+  });
+
+  it('settles a channel message from a cancelled message_update', () => {
+    const gm = group({ msg_id: 11, kind: 'attachment', attachment: attachment({ id: 'att_1', progress: 0.2 }) });
+    const updated = applyGroupMessageUpdate([gm], { msg_id: 11, delivery: 'cancelled', cancelled: true });
+    expect(updated[0]!.delivery).toBe('cancelled');
+    expect(updated[0]!.attachment?.progress).toBeCloseTo(0.2);
   });
 });
 
