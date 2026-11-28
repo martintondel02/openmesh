@@ -17,8 +17,9 @@ use tokio::sync::{RwLock, broadcast, mpsc};
 use openmesh_core::regulatory;
 use openmesh_core::services::{caps, group_signature_payload};
 use openmesh_core::{
-    Ack, AckKind, AppMessage, Engine, EngineConfig, Event, MessageKind, NodeClass, NodeId,
-    Processed, PublicIdentity, RelayConfig, ResourceKind, ResourceManifest, Role, Target, util,
+    Ack, AckKind, AppMessage, Engine, EngineConfig, Event, Identity, MessageKind, NodeClass,
+    NodeId, Processed, PublicIdentity, RelayConfig, ResourceKind, ResourceManifest, Role, Target,
+    public_channel, util,
 };
 
 use crate::attachments::AttachmentStore;
@@ -180,6 +181,11 @@ pub enum CommandKind {
     CreateChannel(ChannelCreateData),
     JoinChannel(ChannelCreateData),
     LeaveChannel(ChannelIdData),
+    /// Confirmed factory reset: clear all user data and optionally rotate the node identity.
+    ResetData {
+        new_identity: bool,
+        activity_cleared: usize,
+    },
     SetConfig(serde_json::Value),
     Announce,
     /// Inbound gateway webhook message (gateways, remote-operations.md §2).
@@ -340,6 +346,8 @@ pub struct CoreRuntime {
     pub gateways: Arc<GatewayManager>,
     /// Message ids injected by an inbound gateway, so they are not echoed to outbound webhooks.
     pub gateway_echo: HashSet<u32>,
+    /// Persisted identity seed path; only used by the confirmed factory reset (identity rotation).
+    pub identity_seed_path: std::path::PathBuf,
     pub shutdown: tokio::sync::watch::Receiver<bool>,
 }
 
@@ -956,6 +964,13 @@ impl CoreRuntime {
             }
             CommandKind::LeaveChannel(data) => {
                 self.cmd_leave_channel(id.as_deref(), data, &reply, now)
+            }
+            CommandKind::ResetData {
+                new_identity,
+                activity_cleared,
+            } => {
+                self.cmd_reset_data(id.as_deref(), new_identity, activity_cleared, &reply, now)
+                    .await
             }
             CommandKind::SetConfig(value) => {
                 self.cmd_set_config(id.as_deref(), value, &reply, now).await
@@ -1831,6 +1846,19 @@ impl CoreRuntime {
             reply_error(reply, id, "bad_request", "channel name required");
             return Ok(());
         }
+        if data
+            .name
+            .trim()
+            .eq_ignore_ascii_case(openmesh_core::PUBLIC_CHANNEL_NAME)
+        {
+            reply_error(
+                reply,
+                id,
+                "reserved_name",
+                "the Public Mesh channel is built in and cannot be created or replaced",
+            );
+            return Ok(());
+        }
         let psk: [u8; 32] = match data.psk.as_deref() {
             Some(encoded) => match b64_decode(encoded).and_then(|b| <[u8; 32]>::try_from(b).ok()) {
                 Some(psk) => psk,
@@ -1847,6 +1875,7 @@ impl CoreRuntime {
             name: data.name.clone(),
             psk: b64(&psk),
             created_at_ms: now,
+            public: false,
         };
         self.store.put_channel(&record)?;
         self.send_reply(
@@ -1857,6 +1886,7 @@ impl CoreRuntime {
                 channel_id: channel_id.to_hex(),
                 name: data.name,
                 psk: b64(&psk),
+                public: false,
             },
         );
         Ok(())
@@ -1882,12 +1912,28 @@ impl CoreRuntime {
             reply_error(reply, id, "bad_request", "psk must be base64 of 32 bytes");
             return Ok(());
         };
+        if data
+            .name
+            .trim()
+            .eq_ignore_ascii_case(openmesh_core::PUBLIC_CHANNEL_NAME)
+            && psk != openmesh_core::PUBLIC_CHANNEL_PSK
+        {
+            reply_error(
+                reply,
+                id,
+                "reserved_name",
+                "the Public Mesh name is reserved; use the built-in public channel invite",
+            );
+            return Ok(());
+        }
         let channel_id = self.engine.add_channel(&data.name, &psk);
+        let public = channel_id == openmesh_core::PUBLIC_CHANNEL.id;
         let record = ChannelRecord {
             channel_id,
             name: data.name.clone(),
             psk: b64(&psk),
             created_at_ms: now,
+            public,
         };
         self.store.put_channel(&record)?;
         let channels = channels_json(&self.store)?;
@@ -1906,10 +1952,109 @@ impl CoreRuntime {
             reply_error(reply, id, "bad_request", "invalid channel_id");
             return Ok(());
         };
+        if channel == openmesh_core::PUBLIC_CHANNEL.id {
+            reply_error(
+                reply,
+                id,
+                "forbidden",
+                "the public channel cannot be left (it is built in)",
+            );
+            return Ok(());
+        }
         self.engine.remove_channel(channel);
         self.store.remove_channel(channel)?;
         let channels = channels_json(&self.store)?;
         self.send_reply(reply, "channels", id, channels);
+        Ok(())
+    }
+
+    /// Confirmed factory reset: clear messages/contacts/channels/nodes/attachments and the
+    /// activity log, keep the API token + radio config, optionally rotate the node identity,
+    /// recreate+join Public Mesh, announce and push fresh `hello`/`channels`/`status` WS events.
+    async fn cmd_reset_data(
+        &mut self,
+        id: Option<&str>,
+        new_identity: bool,
+        activity_cleared: usize,
+        reply: &mpsc::UnboundedSender<Arc<str>>,
+        now: u64,
+    ) -> Result<()> {
+        let old_node_id = self.engine.node_id().to_hex();
+        // Clear persisted user data first; meta (config, sequence counters) is preserved and the
+        // attachment payload files are removed separately.
+        let counts = self.store.clear_all()?;
+        let _ = self.attachments.clear_files().await?;
+        self.outgoing_resources.clear();
+        self.incoming_resources.clear();
+        self.pending_resources.clear();
+        self.gateway_echo.clear();
+
+        let identity_changed = new_identity;
+        if new_identity {
+            // Persist the new seed before swapping the in-memory engine so a crash/restart cannot
+            // resurrect the old identity. The API token and radio config live elsewhere and stay.
+            let seed = crate::token::replace_seed(&self.identity_seed_path)?;
+            let engine_config = self.config.engine_config();
+            self.engine = Engine::new(Identity::from_seed(&seed), engine_config);
+            self.store.set_meta_json("last_seq", &0u32)?;
+        } else {
+            self.engine.reset_mesh_data();
+        }
+
+        // Build the clean slate: Public Mesh exists again and is joined in the (possibly new) engine.
+        let public_record = ensure_public_channel(&mut self.engine, &self.store)?;
+
+        // Announce the new/cleared identity immediately.
+        if let Ok(processed) = self.engine.announce(now) {
+            self.process(processed, now).await;
+            self.last_announce_ms = now;
+        }
+        self.refresh_snapshot().await;
+        let hello = {
+            let snapshot = self.snapshot.read().await;
+            build_hello(&snapshot)
+        };
+        broadcast_event(&self.events, event_json("hello", Some(hello)));
+        let channels = channels_json(&self.store)?;
+        broadcast_event(&self.events, event_json("channels", Some(channels.clone())));
+        {
+            let snapshot = self.snapshot.read().await;
+            broadcast_event(
+                &self.events,
+                event_json("status", Some(snapshot.status.clone())),
+            );
+        }
+        let public_channel_json = channels
+            .channels
+            .iter()
+            .find(|channel| channel.channel_id == public_record.channel_id.to_hex())
+            .cloned()
+            .unwrap_or(ChannelJson {
+                channel_id: public_record.channel_id.to_hex(),
+                name: public_record.name,
+                psk_set: true,
+                public: true,
+            });
+        self.send_reply(
+            reply,
+            "reset_data",
+            id,
+            json!({
+                "reset": true,
+                "identity_changed": identity_changed,
+                "old_node_id": old_node_id,
+                "node_id": self.engine.node_id().to_hex(),
+                "counts": {
+                    "messages": counts.messages,
+                    "contacts": counts.contacts,
+                    "channels": counts.channels,
+                    "nodes": counts.nodes,
+                    "attachments": counts.attachments,
+                    "activity": activity_cleared,
+                },
+                "public_channel": public_channel_json,
+            }),
+        );
         Ok(())
     }
 
@@ -2253,6 +2398,7 @@ pub fn channels_json(store: &Store) -> Result<ChannelsJson> {
             channel_id: c.channel_id.to_hex(),
             name: c.name,
             psk_set: true,
+            public: c.public,
         })
         .collect();
     Ok(ChannelsJson { channels })
@@ -2463,6 +2609,35 @@ pub fn restore_engine_state(engine: &mut Engine, store: &Store) -> Result<()> {
         tracing::debug!(last_seq, "restored frame sequence floor");
     }
     Ok(())
+}
+
+/// Create or repair the built-in Public Mesh channel record and join it in the engine.
+///
+/// Idempotent: called on bridge startup after restoring user channels and again after a confirmed
+/// data reset. The record is always marked `public: true`; a user-created record with the same
+/// derived id (or a stale record from an older build) is repaired. Returns the stored record.
+pub fn ensure_public_channel(engine: &mut Engine, store: &Store) -> Result<ChannelRecord> {
+    let public = public_channel();
+    let existing = store.get_channel(public.id)?;
+    let needs_repair = existing.as_ref().is_none_or(|record| {
+        record.name != public.name || record.psk != b64(&public.psk) || !record.public
+    });
+    let record = if needs_repair {
+        let record = ChannelRecord {
+            channel_id: public.id,
+            name: public.name.to_string(),
+            psk: b64(&public.psk),
+            // Preserve the original creation time if the record existed; otherwise use now.
+            created_at_ms: existing.map_or_else(util::now_ms, |record| record.created_at_ms),
+            public: true,
+        };
+        store.put_channel(&record)?;
+        record
+    } else {
+        existing.expect("checked Some when !needs_repair")
+    };
+    engine.add_channel(public.name, &public.psk);
+    Ok(record)
 }
 
 /// Aggregated radio link state reported by `status.radio.state`.
@@ -2697,6 +2872,7 @@ pub fn build_snapshot(input: SnapshotInput<'_>) -> Snapshot {
                     channel_id: channel.channel_id,
                     name: channel.name,
                     psk_set: channel.psk_set,
+                    public: channel.public,
                 })
                 .collect()
         })

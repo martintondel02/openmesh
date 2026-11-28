@@ -449,19 +449,37 @@ async fn setup_state_recommend_and_idempotent_quick_setup() {
     assert_eq!(next_steps.len(), 4);
     assert!(next_steps.iter().all(|step| step["help_topic"].is_string()));
 
-    // Channel list never exposes the PSK.
+    // Channel list never exposes the PSK. It contains the built-in Public Mesh channel plus the
+    // channel created by quick setup.
     let channels = get(addr, "/api/channels").await;
-    assert_eq!(channels["channels"].as_array().unwrap().len(), 1);
-    assert_eq!(channels["channels"][0]["psk_set"], true);
+    let channel_id = channel["channel_id"].as_str().unwrap();
+    let listed = channels["channels"].as_array().unwrap();
+    assert_eq!(listed.len(), 2);
+    assert_eq!(
+        listed
+            .iter()
+            .filter(|c| c["channel_id"] == channel_id)
+            .count(),
+        1
+    );
+    assert!(
+        listed
+            .iter()
+            .any(|c| c["name"] == "Public Mesh" && c["public"] == true)
+    );
+    assert!(listed.iter().all(|c| c["psk_set"] == true));
     assert!(!channels.to_string().contains(psk_once));
-    assert!(channels["channels"][0].get("psk").is_none());
+    assert!(listed.iter().all(|c| c.get("psk").is_none()));
 
     // State resumes as completed.
     let state = get(addr, "/api/setup/state").await;
     assert_eq!(state["first_run"], false);
     assert_eq!(state["setup_completed"], true);
     assert_eq!(state["checks"]["channel"]["ok"], true);
-    assert_eq!(state["counts"]["channels"], 1);
+    assert_eq!(
+        state["counts"]["channels"], 2,
+        "Public Mesh + created channel"
+    );
 
     // Idempotent: nothing changes, no duplicate channel, PSK not re-revealed.
     let again = post(
@@ -494,7 +512,8 @@ async fn setup_state_recommend_and_idempotent_quick_setup() {
             .as_array()
             .unwrap()
             .len(),
-        1
+        2,
+        "Public Mesh + the quick-setup channel"
     );
 
     // Bad input is a 400 with code/help_topic.
@@ -576,7 +595,11 @@ async fn rest_write_endpoints_used_by_mcp_work() {
     )
     .await;
     assert_eq!(joined.status, 200, "join: {:?}", joined.json());
-    assert_eq!(joined.json()["channels"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        joined.json()["channels"].as_array().unwrap().len(),
+        2,
+        "Public Mesh + the invited channel"
+    );
 
     // Unauthenticated writes are rejected and not logged.
     let unauth = http(

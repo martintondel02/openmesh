@@ -104,6 +104,39 @@ pub fn load_or_create_seed(path: &Path) -> Result<[u8; 32]> {
     Ok(seed)
 }
 
+/// Replace the identity seed at `path` with a fresh random one (factory reset with new identity).
+///
+/// Writes the new seed before returning so a restart cannot resurrect the old identity. The API
+/// token and radio configuration are untouched.
+pub fn replace_seed(path: &Path) -> Result<[u8; 32]> {
+    let mut seed = [0u8; 32];
+    rand::rngs::OsRng.fill_bytes(&mut seed);
+    write_seed(path, &seed)?;
+    Ok(seed)
+}
+
+fn write_seed(path: &Path, seed: &[u8; 32]) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating identity dir {}", parent.display()))?;
+    }
+    let tmp = path.with_extension(format!(
+        "tmp-{}-{}",
+        std::process::id(),
+        rand::random::<u32>()
+    ));
+    std::fs::write(&tmp, format!("{}\n", hex::encode(seed)))
+        .with_context(|| format!("writing identity seed {}", tmp.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
+    }
+    std::fs::rename(&tmp, path)
+        .with_context(|| format!("replacing identity seed {}", path.display()))?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -137,6 +170,20 @@ mod tests {
         let b = load_or_create_seed(&path).unwrap();
         assert_eq!(a, b);
         assert_eq!(a, openmesh_core::Identity::from_seed(&a).seed());
+    }
+
+    #[test]
+    fn replace_seed_changes_the_persisted_identity() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("identity.key");
+        let first = load_or_create_seed(&path).unwrap();
+        let second = replace_seed(&path).unwrap();
+        assert_ne!(first, second);
+        assert_eq!(load_or_create_seed(&path).unwrap(), second);
+        assert_ne!(
+            openmesh_core::Identity::from_seed(&first).node_id(),
+            openmesh_core::Identity::from_seed(&second).node_id()
+        );
     }
 
     #[test]

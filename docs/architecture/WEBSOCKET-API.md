@@ -67,7 +67,9 @@ Events are pushed after the client sends `hello`-equivalent initial sync (see §
 
 ### 3.1 `hello`
 
-Sent once when the connection is accepted.
+Sent when the connection is accepted, and again after a confirmed factory-reset that rotates the
+bridge identity (§5.1). Clients must refresh the cached node id/public key and re-render contacts
+when a new `hello` arrives.
 
 ```json
 { "v":1, "type":"hello", "data": {
@@ -241,11 +243,26 @@ Full configuration snapshot (reply to `get_config` and pushed after `set_config`
   "radio": { "profile": "MEDIUM_FAST", "region": "EU868", "tx_power_dbm": 14,
              "frequency_mhz": 869.525, "interface": "sim" },
   "features": { "auto_announce": true, "store_forward": true, "position_sharing": true },
-  "channels": [ { "channel_id": "ff00…", "name": "family", "psk_set": true } ]
+  "channels": [ { "channel_id": "ff00…", "name": "family", "psk_set": true, "public": false } ]
 } }
 ```
 
 PSKs are never returned; only whether one is set.
+
+### 3.14 `channels`
+
+Full channel list. Sent in reply to `get_channels`/`sync`, after `create_channel`/`join_channel`, and
+after a confirmed factory reset. `public: true` marks the built-in **Public Mesh** channel (no
+privacy; anyone with the app can read/write; do not offer leave/delete).
+
+```json
+{ "v":1, "type":"channels", "data": {
+  "channels": [
+    { "channel_id":"a16d63142854cef4", "name":"Public Mesh", "psk_set":true, "public":true },
+    { "channel_id":"11223344aabbccdd", "name":"family", "psk_set":true, "public":false }
+  ]
+} }
+```
 
 ---
 
@@ -295,11 +312,29 @@ The server replies with a sequence of `node`, `message`, `group_message`, `confi
 
 | type | data |
 | --- | --- |
-| `create_channel` | `{ "name": "...", "psk": "<base64 32B>" }` (generates PSK if absent) → `channel_created` `{ "channel_id": "...", "name": "...", "psk": "<base64>" }` (PSK returned **once**, never again) |
-| `join_channel` | `{ "name": "...", "psk": "<base64 32B>" }` → `channel_created` (same shape, `psk` omitted) and/or a `channels` event; clients should accept both |
-| `leave_channel` | `{ "channel_id": "..." }` |
+| `create_channel` | `{ "name": "...", "psk": "<base64 32B>" }` (generates PSK if absent) → `channel_created` `{ "channel_id": "...", "name": "...", "psk": "<base64>", "public": false }` (PSK returned **once**, never again). The reserved `Public Mesh` name is rejected (`reserved_name`). |
+| `join_channel` | `{ "name": "...", "psk": "<base64 32B>" }` or `{ "url": "openmesh://channel?..." }` → `channels` event; idempotent for an already-joined channel. Joining the built-in Public Mesh name+PSK returns the existing channel (`public:true`), never a duplicate; a lookalike `Public Mesh` name with a different PSK is rejected (`reserved_name`). |
+| `leave_channel` | `{ "channel_id": "..." }` — refused for the built-in public channel (`forbidden`); normal channels are removed for this client. |
 | `get_channels` | `{}` → `channels` event |
 | `channel_invite` | `{ "channel_id": "..." }` → `channel_url` (`openmesh://channel?...`) |
+
+#### Built-in Public Mesh channel
+
+Every bridge creates/joins one deterministic public channel on startup (fresh store or restored
+store) and re-creates it after a factory reset. It is **not private**: the 32-byte PSK is published
+and anyone with the app can read/write it; sender signatures still prove *who* sent a message.
+
+| Field | Value |
+| --- | --- |
+| name | `Public Mesh` |
+| channel id | `a16d63142854cef4` (protocol-derived `SHA-256("openmesh/v1/chan" ‖ channel_key)[0..8]`, high bit set) |
+| PSK (base64url) | `-w-KmLkWsRmxrtQqcPT2sXrlcTHTiaCNu1F-Qp_YqZI` |
+| join URL | `openmesh://channel?name=Public%20Mesh&psk=-w-KmLkWsRmxrtQqcPT2sXrlcTHTiaCNu1F-Qp_YqZI` (clients derive the id from name+PSK; no id parameter needed) |
+
+The API always shows it with `"public": true`; `leave_channel` returns `forbidden` and there is no
+delete endpoint. It cannot be replaced by creating/joining a lookalike name. The older
+`baac0f9144756da1` value is only a name-derived cosmetic invite identifier, **not** the on-air
+address, and is not returned by the API.
 
 ### 4.5 Configuration and diagnostics
 
@@ -339,11 +374,12 @@ The server replies with a sequence of `node`, `message`, `group_message`, `confi
 | --- | --- | --- |
 | GET | `/api/health` | Public liveness probe. |
 | GET | `/api/status` | Same payload as the `status` event. |
+| POST | `/api/admin/reset` | **Confirmed factory reset** (authenticated): clears messages/contacts/channels/nodes/attachments and activity, keeps the API token + radio config, optionally rotates the bridge identity, re-creates Public Mesh, announces and returns counts + the new node id. Body `{ "confirm": "WIPE", "new_identity": true }`; see §5.1. |
 | GET | `/api/config` | Same as the `config` event. |
 | GET | `/api/nodes` | Array of node objects. |
 | GET | `/api/nodes/:id` | One node. |
 | GET | `/api/messages?peer=<id>&limit=100&before_ms=` | Direct message history. |
-| GET | `/api/channels` | Channels (no PSKs). |
+| GET | `/api/channels` | Channels (no PSKs); includes the built-in Public Mesh channel with `public: true`. |
 | GET | `/api/messages/channel/:id?limit=100` | Group history. |
 | POST | `/api/messages/:id/cancel` | Cancel an outgoing message/in-flight media transfer; returns `{ "ok": true, "cancelled": true, "msg_id": n }`, `404` for unknown ids, `400` for incoming/already-delivered messages, `already_cancelled: true` on repeat. |
 | GET | `/api/contacts` | Contacts. |
@@ -359,6 +395,51 @@ The server replies with a sequence of `node`, `message`, `group_message`, `confi
 | GET | `/api/backbone/links` | Outbound backbone links with per-link status (tokens redacted). |
 | PUT | `/api/backbone/links/:name` | Add/update an outbound link (`openmesh://backbone?...` URL). |
 | DELETE | `/api/backbone/links/:name` | Remove an outbound link. |
+
+### 5.1 Confirmed factory reset (`POST /api/admin/reset`)
+
+Authenticated (`Authorization: Bearer <token>`), JSON body:
+
+```json
+{ "confirm": "WIPE", "new_identity": true }
+```
+
+* `confirm` must be exactly `"WIPE"`; anything else is `400` with
+  `{ "error": "confirmation_required", "code": "confirmation_required", "message": "…" }`.
+* `new_identity` defaults to `true`. `true` **regenerates the bridge node identity** (new seed
+  persisted to the identity file; API token and radio/config are kept); `false` clears data but
+  keeps the current identity.
+* Clears messages/history, contacts, channels, discovered nodes, attachment metadata + payload
+  files, and the bounded activity log. Re-creates and joins the built-in Public Mesh channel.
+* Announces the (new) identity immediately; existing WebSocket clients receive fresh `hello`,
+  `channels` and `status` events. No reconnect/restart is required, but the reset is synchronous
+  (the response is sent after the wipe/recreate/announce completes). With `new_identity: true`,
+  **all old contacts and QR codes for this bridge become invalid**; clients should clear cached
+  identities/contacts and re-add the bridge using the new node id.
+* Success `200`:
+
+```json
+{
+  "reset": true,
+  "identity_changed": true,
+  "old_node_id": "68102c09d9c0aeca",
+  "node_id": "71b2c3d4e5f60718",
+  "counts": {
+    "messages": 12, "contacts": 3, "channels": 4, "nodes": 5,
+    "attachments": 2, "activity": 9
+  },
+  "public_channel": {
+    "channel_id": "a16d63142854cef4", "name": "Public Mesh",
+    "psk_set": true, "public": true
+  }
+}
+```
+
+`counts` are records removed before the wipe (activity is the pre-clear log length). Errors: `401
+unauthorized` without a valid token; `400` for malformed JSON or a wrong/missing `confirm`; `500
+internal` if the wipe/recreate fails. The reset is recorded as one authenticated activity entry
+after the log is cleared (request bodies/PSKs are never logged). Backbone links are not restarted
+by this call; restart the bridge to complete identity rotation for configured backbone peers.
 
 ---
 

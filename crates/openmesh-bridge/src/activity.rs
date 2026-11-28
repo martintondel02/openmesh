@@ -91,6 +91,17 @@ impl ActivityLog {
         entries.push_back(entry);
     }
 
+    /// Clear the bounded log (confirmed factory reset). Returns the number of entries removed.
+    pub fn clear(&self) -> usize {
+        let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+        let removed = entries.len();
+        entries.clear();
+        drop(entries);
+        self.agent_writes.store(0, Ordering::Relaxed);
+        self.last_agent_at_ms.store(0, Ordering::Relaxed);
+        removed
+    }
+
     /// Most recent entries first (newest-first, as shown in the UI/API).
     pub fn recent(&self, limit: usize) -> Vec<Value> {
         let limit = limit.clamp(1, ACTIVITY_CAPACITY);

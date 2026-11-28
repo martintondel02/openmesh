@@ -73,6 +73,10 @@
     {
       "name": "gateways",
       "description": "Authenticated webhook gateways: outbound signed POSTs and inbound signed channel injection (remote-operations.md §2)."
+    },
+    {
+      "name": "admin",
+      "description": "Destructive, explicitly confirmed administration endpoints."
     }
   ],
   "components": {
@@ -840,7 +844,8 @@
         "required": [
           "channel_id",
           "name",
-          "psk_set"
+          "psk_set",
+          "public"
         ],
         "properties": {
           "channel_id": {
@@ -851,12 +856,17 @@
           },
           "psk_set": {
             "type": "boolean"
+          },
+          "public": {
+            "type": "boolean",
+            "description": "True for the built-in Public Mesh channel: deliberately public (no confidentiality) and cannot be left/deleted."
           }
         },
         "example": {
           "channel_id": "11223344aabbccdd",
           "name": "family",
-          "psk_set": true
+          "psk_set": true,
+          "public": false
         }
       },
       "Channels": {
@@ -875,9 +885,16 @@
         "example": {
           "channels": [
             {
+              "channel_id": "a16d63142854cef4",
+              "name": "Public Mesh",
+              "psk_set": true,
+              "public": true
+            },
+            {
               "channel_id": "11223344aabbccdd",
               "name": "family",
-              "psk_set": true
+              "psk_set": true,
+              "public": false
             }
           ]
         }
@@ -889,7 +906,8 @@
           "name",
           "psk_once",
           "invite_url",
-          "shown_once"
+          "shown_once",
+          "public"
         ],
         "properties": {
           "channel_id": {
@@ -908,6 +926,10 @@
           },
           "shown_once": {
             "type": "boolean"
+          },
+          "public": {
+            "type": "boolean",
+            "description": "Always false for user-created channels; the built-in Public Mesh channel is never created via this endpoint."
           }
         },
         "example": {
@@ -915,7 +937,8 @@
           "name": "family",
           "psk_once": "…",
           "invite_url": "openmesh://channel?name=family&id=…&psk=…",
-          "shown_once": true
+          "shown_once": true,
+          "public": false
         }
       },
       "Message": {
@@ -1350,7 +1373,8 @@
             {
               "channel_id": "11223344aabbccdd",
               "name": "family",
-              "psk_set": true
+              "psk_set": true,
+              "public": false
             }
           ],
           "legal": {
@@ -3173,6 +3197,134 @@
           "enabled": {
             "type": "boolean",
             "default": true
+          }
+        }
+      },
+      "AdminResetRequest": {
+        "type": "object",
+        "required": [
+          "confirm"
+        ],
+        "properties": {
+          "confirm": {
+            "type": "string",
+            "const": "WIPE",
+            "description": "Must be the literal string WIPE."
+          },
+          "new_identity": {
+            "type": "boolean",
+            "default": true,
+            "description": "Regenerate the bridge node identity (new seed persisted) when true; false keeps the current identity. Contacts and QR codes become invalid when the identity rotates."
+          }
+        },
+        "example": {
+          "confirm": "WIPE",
+          "new_identity": true
+        }
+      },
+      "AdminResetCounts": {
+        "type": "object",
+        "required": [
+          "messages",
+          "contacts",
+          "channels",
+          "nodes",
+          "attachments",
+          "activity"
+        ],
+        "properties": {
+          "messages": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Messages/history records removed."
+          },
+          "contacts": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Contacts removed."
+          },
+          "channels": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Channels removed before Public Mesh was re-created."
+          },
+          "nodes": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Discovered-node records removed."
+          },
+          "attachments": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Attachment metadata records removed; payload files are deleted too."
+          },
+          "activity": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Activity-log entries cleared (the reset itself is logged afterwards)."
+          }
+        },
+        "example": {
+          "messages": 12,
+          "contacts": 3,
+          "channels": 4,
+          "nodes": 5,
+          "attachments": 2,
+          "activity": 9
+        }
+      },
+      "AdminResetResponse": {
+        "type": "object",
+        "required": [
+          "reset",
+          "identity_changed",
+          "old_node_id",
+          "node_id",
+          "counts",
+          "public_channel"
+        ],
+        "properties": {
+          "reset": {
+            "type": "boolean",
+            "const": true
+          },
+          "identity_changed": {
+            "type": "boolean",
+            "description": "True when a new bridge node identity was generated."
+          },
+          "old_node_id": {
+            "type": "string",
+            "description": "Bridge node id before the reset (8-byte hex)."
+          },
+          "node_id": {
+            "type": "string",
+            "description": "Bridge node id after the reset (new when new_identity=true)."
+          },
+          "counts": {
+            "$ref": "#/components/schemas/AdminResetCounts"
+          },
+          "public_channel": {
+            "$ref": "#/components/schemas/Channel"
+          }
+        },
+        "example": {
+          "reset": true,
+          "identity_changed": true,
+          "old_node_id": "68102c09d9c0aeca",
+          "node_id": "71b2c3d4e5f60718",
+          "counts": {
+            "messages": 12,
+            "contacts": 3,
+            "channels": 4,
+            "nodes": 5,
+            "attachments": 2,
+            "activity": 9
+          },
+          "public_channel": {
+            "channel_id": "a16d63142854cef4",
+            "name": "Public Mesh",
+            "psk_set": true,
+            "public": true
           }
         }
       }
@@ -6618,6 +6770,84 @@
                   "code": "not_found",
                   "message": "unknown message id",
                   "help_topic": "getting-started"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/reset": {
+      "post": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Confirmed factory reset (clear user data, optionally rotate identity, recreate Public Mesh)",
+        "description": "Clears messages/history, contacts, channels, discovered nodes, attachment metadata+files and the activity log; keeps the API token and radio/config; re-creates and joins the built-in Public Mesh channel. With new_identity=true (default) the bridge node identity is regenerated and all old contacts/QR codes for this bridge become invalid. Synchronous: the response is sent after the wipe, Public Mesh re-creation and announce complete. Existing WS clients receive fresh hello/channels/status events.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AdminResetRequest"
+              },
+              "example": {
+                "confirm": "WIPE",
+                "new_identity": true
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Reset complete",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminResetResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing/wrong confirm, malformed JSON, or invalid new_identity",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "error": "confirmation_required",
+                  "code": "confirmation_required",
+                  "message": "confirm must be the literal string WIPE",
+                  "help_topic": "getting-started"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "error": "unauthorized"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Reset failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "error": "internal",
+                  "message": "…"
                 }
               }
             }

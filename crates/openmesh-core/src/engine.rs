@@ -643,6 +643,14 @@ struct OutgoingResource {
     started_ms: u64,
     /// Wall time of the last paced chunk release (rate-limits `RESOURCE_TX_BATCH` per interval).
     paced_ms: u64,
+    /// Whether the peer has acknowledged this resource at least once (any `resource_window` ACK).
+    ///
+    /// A window ACK with `next_expected = 0`/empty bitmap while no chunk is acked means the peer has
+    /// the manifest but none of our payload chunks: typically the initial paced batch was lost. The
+    /// sender then retransmits those sent-but-unacked chunks before releasing more never-sent ones,
+    /// otherwise a manifest-only ACK can keep being answered with only later chunks the receiver
+    /// cannot use yet.
+    ack_seen: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -1661,6 +1669,7 @@ impl Engine {
                 sender,
                 started_ms: now_ms,
                 paced_ms: now_ms,
+                ack_seen: false,
             };
             // Release only the first paced batch: the rest of the window follows on later ticks
             // instead of hitting the transport as one burst.
@@ -1775,6 +1784,42 @@ impl Engine {
             .collect();
         out.sort_by_key(|(id, _)| id.0);
         out
+    }
+
+    /// Clear all mesh/user state while preserving the node identity and its monotonic counters.
+    ///
+    /// Used by an embedder's confirmed "factory reset": contacts, channels, peers, seen/dedup
+    /// state, in-flight messages/resources and the store-and-forward queue are dropped, but the
+    /// [`Identity`], frame sequence, message-id counter and resource counter are retained. The
+    /// caller re-adds the built-in public channel afterwards (or replaces the whole engine when
+    /// rotating the identity). No frames are emitted.
+    pub fn reset_mesh_data(&mut self) {
+        let capacity = Self::store_capacity(&self.config.role);
+        let ttl = match &self.config.role {
+            Role::Relay(relay) => relay.store_ttl_ms,
+            Role::Client => STORE_TTL_MS,
+        };
+        self.peers.clear();
+        self.contacts.clear();
+        self.channels.clear();
+        self.dedup = DedupCache::new(DEDUP_CAPACITY, DEDUP_TTL_MS);
+        self.heard_at.clear();
+        self.peer_knows_us.clear();
+        self.ack_sent_at.clear();
+        self.pending_msgs.clear();
+        self.outgoing.clear();
+        self.incoming.clear();
+        self.completed.clear();
+        self.seen_msgs.clear();
+        self.seen_refs.clear();
+        self.store = StoreQueue::new(capacity, ttl);
+        self.store_offer_at.clear();
+        self.stats.known_nodes = 0;
+        self.stats.channels = 0;
+        self.stats.stored_envelopes = 0;
+        self.last_announce_ms = u64::MAX;
+        self.orig_window_start_ms = 0;
+        self.orig_count = 0;
     }
 
     /// Known nodes, sorted by node id.
@@ -2601,14 +2646,32 @@ impl Engine {
                             //
                             // Both tick and ack releases share the same duty-aware interval so a
                             // fast-acking/fast-ticking embedder cannot outpace the radio.
+                            resource.ack_seen = true;
                             let batch = usize::from(RESOURCE_TX_BATCH).max(1);
                             let paced = now_ms.saturating_sub(resource.paced_ms) >= pace_interval;
+                            // A window ACK with no acknowledged progress after a paced burst means
+                            // the peer has the manifest but not even the first payload batch (e.g. the
+                            // companion radio lost it). Resend those sent-but-unacked chunks before
+                            // releasing more never-sent ones, otherwise the receiver can never make
+                            // progress and its ACK stays at next_expected=0.
+                            let repair_first = resource.ack_seen
+                                && resource.sender.acked_count() == 0
+                                && resource.sender.next_unsent > 0;
                             let mut release = if paced {
-                                resource.sender.take_unsent(batch)
+                                if repair_first {
+                                    resource
+                                        .sender
+                                        .pending_window()
+                                        .into_iter()
+                                        .take(batch)
+                                        .collect()
+                                } else {
+                                    resource.sender.take_unsent(batch)
+                                }
                             } else {
                                 Vec::new()
                             };
-                            if paced && release.len() < batch {
+                            if paced && !repair_first && release.len() < batch {
                                 let pending = resource.sender.pending_window();
                                 release.extend(
                                     pending
@@ -2628,6 +2691,8 @@ impl Engine {
                                 pending = resource.sender.pending_window().len(),
                                 released = release.len(),
                                 paced,
+                                repair_first,
+                                ack_seen = resource.ack_seen,
                                 retries = resource.sender.retries,
                                 deadline_ms = resource.sender.deadline_ms,
                                 "resource window ack applied"
@@ -3205,12 +3270,25 @@ impl Engine {
             // Paced emission: release at most `RESOURCE_TX_BATCH` never-sent chunks per tick. The
             // bridge ticks at 1 Hz, so a duty-cycle-paced companion TX path is not flooded by the
             // whole window in one burst (the live photo failure).
-            let unsent = match self.outgoing.get_mut(&res_id) {
+            let (unsent, repair_first) = match self.outgoing.get_mut(&res_id) {
                 Some(resource) => {
                     if now_ms.saturating_sub(resource.paced_ms) < self.resource_pace_interval_ms {
-                        Vec::new()
+                        (Vec::new(), false)
+                    } else if resource.ack_seen
+                        && resource.sender.acked_count() == 0
+                        && resource.sender.next_unsent > 0
+                    {
+                        // The peer acknowledged the manifest but has no payload chunks (the initial
+                        // paced batch was lost). Retransmit that first batch before newer chunks;
+                        // this is the manifest-only-ACK recovery path seen on phone→PC media.
+                        let mut repair = resource.sender.pending_window();
+                        repair.truncate(usize::from(RESOURCE_TX_BATCH).max(1));
+                        (repair, true)
                     } else {
-                        resource.sender.take_unsent(RESOURCE_TX_BATCH as usize)
+                        (
+                            resource.sender.take_unsent(RESOURCE_TX_BATCH as usize),
+                            false,
+                        )
                     }
                 }
                 None => continue,
@@ -3225,6 +3303,8 @@ impl Engine {
                     tracing::debug!(
                         res_id,
                         released = unsent.len(),
+                        repair_first,
+                        ack_seen = resource.ack_seen,
                         next_unsent = resource.sender.next_unsent,
                         total = resource.sender.total_chunks,
                         "paced resource batch released"
@@ -4328,6 +4408,251 @@ mod tests {
         let next_id = sender.allocate_message_id();
         assert_ne!(next_id, msg_id, "a cancelled id must not be reissued");
         assert_ne!(next_id, 0);
+    }
+
+    fn resource_chunk_index(out: &Outbound) -> Option<u16> {
+        let frame = &out.frame;
+        (frame.typ == FrameType::Resource && frame.body.len() >= 11)
+            .then(|| u16::from_be_bytes([frame.body[9], frame.body[10]]))
+    }
+
+    /// Deliver an A→B frame list, ignoring the initial payload chunks (simulates the companion
+    /// radio losing the first paced batch while the manifest gets through) and return B's events.
+    fn deliver_after_dropping_initial_chunks(
+        frames: Vec<Outbound>,
+        phone: &mut Engine,
+        now: u64,
+        drop_resources: bool,
+    ) -> Vec<Event> {
+        let mut events = Vec::new();
+        for out in frames {
+            if drop_resources && out.frame.typ == FrameType::Resource {
+                continue;
+            }
+            let processed = phone.on_frame(out.frame, None, now);
+            events.extend(processed.events);
+        }
+        events
+    }
+
+    fn manifest_only_ack_batch(
+        phone: &mut Engine,
+        sender: NodeId,
+        msg_id: u32,
+        res_id: u32,
+        now: u64,
+    ) {
+        let ack = crate::services::Ack {
+            kind: crate::services::AckKind::ResourceWindow,
+            msg_id,
+            res_id: Some(res_id),
+            next_expected: Some(0),
+            bitmap: Some(0),
+            timestamp_ms: now,
+        };
+        let processed = phone.send_ack(sender, ack, now).expect("ack");
+        assert!(!processed.outbound.is_empty());
+    }
+
+    #[test]
+    fn manifest_only_ack_releases_the_lost_initial_batch() {
+        // Hardware shape: the sender's manifest arrives, the receiver ACKs the manifest with
+        // next_expected=0/bitmap=0, but the initial payload batch was lost. The sender must retransmit
+        // that first batch (not only later never-sent chunks) and then complete the transfer.
+        let mut sender = engine(161);
+        let mut phone = engine(162);
+        sender.add_contact(phone.public_identity(), Some("phone".into()));
+        phone.add_contact(sender.public_identity(), Some("sender".into()));
+        sender.set_resource_pace_interval_ms(12_220);
+        let data = vec![17u8; 2_500];
+        let res_id = 0xC001_0001u32;
+        let msg_id = 0xC001_0002u32;
+        let start = sender
+            .send_resource(
+                Target::Direct(phone.node_id()),
+                msg_id,
+                res_id,
+                ResourceKind::Attachment,
+                "image/webp",
+                &data,
+                0,
+            )
+            .expect("send");
+        let sender_id = sender.node_id();
+        // Only the manifest reaches the phone; the initial paced batch is lost.
+        let _ = deliver_after_dropping_initial_chunks(start.outbound, &mut phone, 0, true);
+
+        // Receiver asks for chunks 0.. with an empty bitmap.
+        manifest_only_ack_batch(&mut phone, sender_id, msg_id, res_id, 6_000);
+        let ack_frames = phone
+            .send_ack(
+                sender_id,
+                crate::services::Ack {
+                    kind: crate::services::AckKind::ResourceWindow,
+                    msg_id,
+                    res_id: Some(res_id),
+                    next_expected: Some(0),
+                    bitmap: Some(0),
+                    timestamp_ms: 6_000,
+                },
+                6_000,
+            )
+            .expect("ack");
+        let mut frames: Vec<Outbound> = Vec::new();
+        for out in ack_frames.outbound {
+            let applied = sender.on_frame(out.frame, None, 6_000);
+            frames.extend(applied.outbound);
+        }
+
+        let mut now = 6_000u64;
+        let mut repair_seen = false;
+        let mut completed = false;
+        for _step in 0..300u32 {
+            now += 1_000;
+            let mut next: Vec<Outbound> = Vec::new();
+            let mut emitted: Vec<Outbound> = Vec::new();
+            for out in frames.drain(..) {
+                if let Some(index) = resource_chunk_index(&out) {
+                    if !repair_seen && index < 2 {
+                        repair_seen = true;
+                    }
+                }
+                let received = phone.on_frame(out.frame, None, now);
+                for ack in received.outbound {
+                    let applied = sender.on_frame(ack.frame, None, now);
+                    next.extend(applied.outbound);
+                }
+            }
+            let tick = sender.tick(now);
+            for out in &tick.outbound {
+                if let Some(index) = resource_chunk_index(out) {
+                    if !repair_seen && now >= 6_000 && index < 2 {
+                        repair_seen = true;
+                    }
+                }
+            }
+            emitted.extend(tick.outbound);
+            next.extend(emitted);
+            let phone_tick = phone.tick(now);
+            for ack in phone_tick.outbound {
+                let applied = sender.on_frame(ack.frame, None, now);
+                next.extend(applied.outbound);
+            }
+            frames = next;
+            if !sender.outgoing.contains_key(&res_id) {
+                completed = true;
+                break;
+            }
+        }
+        assert!(
+            repair_seen,
+            "the sender must retransmit the lost initial batch after the manifest-only ACK"
+        );
+        assert!(
+            completed,
+            "transfer must complete after the initial batch is repaired (now={now})"
+        );
+    }
+
+    #[test]
+    fn manifest_only_ack_recovers_eight_chunk_window_variant() {
+        // Same recovery path with an 8-chunk resource and the receiver's normal 8-chunk/5 s window
+        // ACK cadence (small resources complete as soon as the repaired first batch is acked).
+        let mut sender = engine(171);
+        let mut phone = engine(172);
+        sender.add_contact(phone.public_identity(), Some("phone".into()));
+        phone.add_contact(sender.public_identity(), Some("sender".into()));
+        sender.set_resource_pace_interval_ms(12_220);
+        let data = vec![18u8; 1_300];
+        let res_id = 0xC002_0001u32;
+        let msg_id = 0xC002_0002u32;
+        let start = sender
+            .send_resource(
+                Target::Direct(phone.node_id()),
+                msg_id,
+                res_id,
+                ResourceKind::Attachment,
+                "image/webp",
+                &data,
+                0,
+            )
+            .expect("send");
+        let sender_id = sender.node_id();
+        let _ = deliver_after_dropping_initial_chunks(start.outbound, &mut phone, 0, true);
+        manifest_only_ack_batch(&mut phone, sender_id, msg_id, res_id, 6_000);
+        let ack_frames = phone
+            .send_ack(
+                sender_id,
+                crate::services::Ack {
+                    kind: crate::services::AckKind::ResourceWindow,
+                    msg_id,
+                    res_id: Some(res_id),
+                    next_expected: Some(0),
+                    bitmap: Some(0),
+                    timestamp_ms: 6_000,
+                },
+                6_000,
+            )
+            .expect("ack");
+        let mut frames: Vec<Outbound> = Vec::new();
+        for out in ack_frames.outbound {
+            let applied = sender.on_frame(out.frame, None, 6_000);
+            frames.extend(applied.outbound);
+        }
+        let mut now = 6_000u64;
+        let mut completed = false;
+        for _step in 0..300u32 {
+            now += 1_000;
+            let mut next: Vec<Outbound> = Vec::new();
+            for out in frames.drain(..) {
+                let received = phone.on_frame(out.frame, None, now);
+                for ack in received.outbound {
+                    let applied = sender.on_frame(ack.frame, None, now);
+                    next.extend(applied.outbound);
+                }
+            }
+            next.extend(sender.tick(now).outbound);
+            let phone_tick = phone.tick(now);
+            for ack in phone_tick.outbound {
+                let applied = sender.on_frame(ack.frame, None, now);
+                next.extend(applied.outbound);
+            }
+            frames = next;
+            if !sender.outgoing.contains_key(&res_id) {
+                completed = true;
+                break;
+            }
+        }
+        assert!(
+            completed,
+            "8-chunk manifest-only ACK transfer must complete (now={now})"
+        );
+    }
+
+    #[test]
+    fn reset_mesh_data_keeps_identity_and_counters_but_clears_channels_and_contacts() {
+        let mut engine = engine(181);
+        let node = engine.node_id();
+        let seq = engine.last_seq();
+        let channel = engine.add_channel("family", &[7u8; 32]);
+        assert!(engine.channels().iter().any(|(id, _)| *id == channel));
+        engine.add_contact(
+            crate::Identity::from_seed(&[182u8; 32]).public(),
+            Some("friend".into()),
+        );
+        assert!(!engine.known_nodes().is_empty());
+
+        engine.reset_mesh_data();
+
+        assert_eq!(engine.node_id(), node);
+        assert_eq!(engine.last_seq(), seq);
+        assert!(engine.channels().is_empty());
+        assert!(engine.known_nodes().is_empty());
+        // The built-in public channel can be re-added immediately after a reset.
+        let public = crate::public_channel();
+        let id = engine.add_channel(public.name, &public.psk);
+        assert_eq!(id, public.id);
+        assert_eq!(engine.channels().len(), 1);
     }
 
     #[test]

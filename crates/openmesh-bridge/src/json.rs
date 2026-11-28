@@ -756,6 +756,8 @@ pub struct ConfigChannelJson {
     pub channel_id: String,
     pub name: String,
     pub psk_set: bool,
+    /// True for the built-in Public Mesh channel (deliberately public; no leave/delete).
+    pub public: bool,
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
@@ -792,6 +794,9 @@ pub struct ChannelJson {
     pub channel_id: String,
     pub name: String,
     pub psk_set: bool,
+    /// True for the built-in, deliberately public "Public Mesh" channel; clients must not offer
+    /// leave/delete and must label it PUBLIC.
+    pub public: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -805,6 +810,8 @@ pub struct ChannelCreatedJson {
     pub name: String,
     /// Base64 32-byte PSK; returned exactly once on creation.
     pub psk: String,
+    /// Always false here: the public channel is built in and never created through this path.
+    pub public: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]

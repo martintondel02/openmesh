@@ -110,6 +110,29 @@ impl AttachmentStore {
         }
     }
 
+    /// Remove every payload file in the attachment directory (confirmed factory reset).
+    ///
+    /// Metadata is cleared separately through [`Store::clear_all`]; this only deletes bytes. Returns
+    /// the number of files removed.
+    pub async fn clear_files(&self) -> Result<usize> {
+        let mut removed = 0usize;
+        let mut entries = match tokio::fs::read_dir(&self.dir).await {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+            Err(e) => {
+                return Err(e)
+                    .with_context(|| format!("reading attachment dir {}", self.dir.display()));
+            }
+        };
+        while let Some(entry) = entries.next_entry().await? {
+            if entry.file_type().await?.is_file() {
+                tokio::fs::remove_file(entry.path()).await?;
+                removed += 1;
+            }
+        }
+        Ok(removed)
+    }
+
     /// Total bytes of attachment payloads on disk.
     pub fn total_bytes(&self) -> u64 {
         let Ok(entries) = std::fs::read_dir(&self.dir) else {

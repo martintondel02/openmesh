@@ -26,6 +26,7 @@ pub mod crypto;
 pub mod engine;
 pub mod error;
 pub mod fragment;
+pub mod public_channel;
 pub mod regulatory;
 pub mod resource;
 pub mod routing;
@@ -42,6 +43,11 @@ pub use engine::{
     Target, engine_from_seed,
 };
 pub use error::{Error, Result};
+pub use public_channel::{
+    PUBLIC_CHANNEL, PUBLIC_CHANNEL_ID_HEX, PUBLIC_CHANNEL_INVITE_ID_HEX, PUBLIC_CHANNEL_JOIN_URL,
+    PUBLIC_CHANNEL_NAME, PUBLIC_CHANNEL_PSK, PUBLIC_CHANNEL_PSK_BASE64URL, PublicChannel,
+    public_channel, public_channel_id,
+};
 pub use regulatory::{OVERRIDE_WARNING, RegulatoryOverride, RegulatoryOverrideError};
 pub use services::{
     Ack, AckKind, Announce, AppMessage, AttachmentRef, MessageKind, NodeClass, Position,

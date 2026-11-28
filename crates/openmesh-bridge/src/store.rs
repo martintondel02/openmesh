@@ -204,6 +204,10 @@ pub struct ChannelRecord {
     /// Base64 32-byte PSK; never leaves the daemon except on `create_channel`.
     pub psk: String,
     pub created_at_ms: u64,
+    /// True for the built-in Public Mesh channel (deliberately public, cannot be left/deleted).
+    /// Old records without the field deserialize as `false`.
+    #[serde(default)]
+    pub public: bool,
 }
 
 impl ChannelRecord {
@@ -211,6 +215,16 @@ impl ChannelRecord {
         let raw = b64_decode(&self.psk)?;
         raw.try_into().ok()
     }
+}
+
+/// Records removed by [`Store::clear_all`] (returned by the confirmed admin reset endpoint).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct ClearedCounts {
+    pub messages: usize,
+    pub contacts: usize,
+    pub channels: usize,
+    pub nodes: usize,
+    pub attachments: usize,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -508,6 +522,48 @@ impl Store {
         Ok(table.len()? as usize)
     }
 
+    /// Clear all user/mesh data: messages + history, contacts, channels, discovered nodes and
+    /// attachment metadata. `meta` (identity/sequence counters/config) is deliberately preserved;
+    /// the engine task re-creates the built-in Public Mesh channel after calling this.
+    ///
+    /// Returns the number of records removed per table. Attachment payload files on disk are
+    /// removed separately by [`crate::attachments::AttachmentStore::clear_files`].
+    pub fn clear_all(&self) -> Result<ClearedCounts> {
+        let txn = self.db.begin_write()?;
+        let mut counts = ClearedCounts::default();
+        {
+            let mut table = txn.open_table(MESSAGES)?;
+            counts.messages = table.len()? as usize;
+            while table.pop_first()?.is_some() {}
+        }
+        {
+            let mut table = txn.open_table(HISTORY)?;
+            while table.pop_first()?.is_some() {}
+        }
+        {
+            let mut table = txn.open_table(CONTACTS)?;
+            counts.contacts = table.len()? as usize;
+            while table.pop_first()?.is_some() {}
+        }
+        {
+            let mut table = txn.open_table(CHANNELS)?;
+            counts.channels = table.len()? as usize;
+            while table.pop_first()?.is_some() {}
+        }
+        {
+            let mut table = txn.open_table(NODES)?;
+            counts.nodes = table.len()? as usize;
+            while table.pop_first()?.is_some() {}
+        }
+        {
+            let mut table = txn.open_table(ATTACHMENTS)?;
+            counts.attachments = table.len()? as usize;
+            while table.pop_first()?.is_some() {}
+        }
+        txn.commit()?;
+        Ok(counts)
+    }
+
     // -----------------------------------------------------------------------------------------
     // Nodes
     // -----------------------------------------------------------------------------------------
@@ -749,6 +805,7 @@ mod tests {
                     name: "family".into(),
                     psk: b64(&[7u8; 32]),
                     created_at_ms: 1,
+                    public: false,
                 })
                 .unwrap();
             let ident = openmesh_core::Identity::from_seed(&[2u8; 32]).public();
@@ -770,6 +827,66 @@ mod tests {
         let contacts = store.list_contacts().unwrap();
         assert_eq!(contacts.len(), 1);
         assert!(contacts[0].ident().is_some());
+    }
+
+    #[test]
+    fn clear_all_removes_user_data_but_keeps_meta() {
+        let (_dir, store) = temp_store();
+        let peer = NodeId::new([7; 8]);
+        store.put_message(&msg(1, peer, 100, true)).unwrap();
+        let ident = openmesh_core::Identity::from_seed(&[2u8; 32]).public();
+        store
+            .put_contact(&ContactRecord {
+                node_id: ident.node_id,
+                name: Some("bob".into()),
+                identity: identity_b64(&ident),
+                last_seen_ms: 5,
+                added_at_ms: 5,
+            })
+            .unwrap();
+        store
+            .put_channel(&ChannelRecord {
+                channel_id: NodeId::new([3; 8]),
+                name: "family".into(),
+                psk: b64(&[7u8; 32]),
+                created_at_ms: 1,
+                public: false,
+            })
+            .unwrap();
+        store
+            .put_node(&NodeJson::from_identity(&ident, "bob", false))
+            .unwrap();
+        let meta = AttachmentMeta {
+            id: "att_0123456789ab".into(),
+            mime: "image/png".into(),
+            size: 3,
+            sha256: "ab".repeat(32),
+            name: None,
+            duration_ms: None,
+            created_at_ms: 1,
+        };
+        store.put_attachment(&meta).unwrap();
+        store
+            .set_meta_json("config", &serde_json::json!({"name":"keep"}))
+            .unwrap();
+
+        let counts = store.clear_all().unwrap();
+        assert_eq!(counts.messages, 1);
+        assert_eq!(counts.contacts, 1);
+        assert_eq!(counts.channels, 1);
+        assert_eq!(counts.nodes, 1);
+        assert_eq!(counts.attachments, 1);
+        assert_eq!(store.message_count().unwrap(), 0);
+        assert_eq!(store.contact_count().unwrap(), 0);
+        assert_eq!(store.channel_count().unwrap(), 0);
+        assert_eq!(store.list_nodes().unwrap().len(), 0);
+        assert!(store.get_attachment(&meta.id).unwrap().is_none());
+        let config: Option<serde_json::Value> = store.get_meta_json("config").unwrap();
+        assert_eq!(
+            config.unwrap()["name"],
+            "keep",
+            "meta/config must be preserved"
+        );
     }
 
     #[test]

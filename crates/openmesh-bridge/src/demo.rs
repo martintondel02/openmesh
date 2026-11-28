@@ -141,6 +141,7 @@ pub fn seed_demo(
         name: "family".to_string(),
         psk: crate::json::b64(&psk),
         created_at_ms: now.saturating_sub(172_800_000),
+        public: false,
     })?;
 
     if store.message_count()? > 0 {

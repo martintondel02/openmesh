@@ -286,6 +286,48 @@ async fn route(request: &HttpRequest, state: &Arc<HttpState>) -> HttpResponse {
     }
 
     match (request.method.as_str(), path) {
+        ("POST", "/api/admin/reset") => {
+            let body = match parse_json_body(request) {
+                Ok(value) => value,
+                Err(response) => return response,
+            };
+            if body.get("confirm").and_then(|v| v.as_str()) != Some("WIPE") {
+                return HttpResponse::json(
+                    400,
+                    serde_json::json!({
+                        "error": "confirmation_required",
+                        "code": "confirmation_required",
+                        "message": "confirm must be the literal string WIPE",
+                        "help_topic": "getting-started",
+                    }),
+                );
+            }
+            let new_identity = match body.get("new_identity") {
+                Some(value) => match value.as_bool() {
+                    Some(value) => value,
+                    None => return bad_request("new_identity must be a boolean"),
+                },
+                None => true,
+            };
+            let activity_cleared = state.activity.len();
+            match runtime::run_command(
+                &state.shared,
+                CommandKind::ResetData {
+                    new_identity,
+                    activity_cleared,
+                },
+            )
+            .await
+            {
+                Ok(value) => {
+                    // Clear the in-memory activity log after the wipe; record_activity() then adds
+                    // the single successful reset entry for this authenticated request.
+                    state.activity.clear();
+                    HttpResponse::json(200, value)
+                }
+                Err(e) => command_error_response(e),
+            }
+        }
         ("GET", "/api/status") => {
             let snapshot = state.shared.snapshot.read().await;
             HttpResponse::json(200, crate::json::json_value(&snapshot.status))
@@ -662,6 +704,7 @@ async fn route(request: &HttpRequest, state: &Arc<HttpState>) -> HttpResponse {
                             "channel_id": created.get("channel_id"),
                             "name": created.get("name"),
                             "psk_once": created.get("psk"),
+                            "public": created.get("public"),
                             "invite_url": invite_url,
                             "shown_once": true,
                         }),
@@ -914,6 +957,14 @@ fn summarize_activity(request: &HttpRequest) -> String {
         ),
         ("POST", "/api/position") => "share position".to_string(),
         ("POST", "/api/announce") => "announce".to_string(),
+        ("POST", "/api/admin/reset") => {
+            let new_identity = body
+                .as_ref()
+                .and_then(|body| body.get("new_identity"))
+                .and_then(|value| value.as_bool())
+                .unwrap_or(true);
+            format!("factory reset confirmed (new_identity={new_identity})")
+        }
         ("PATCH", "/api/config") | ("POST", "/api/config") => {
             let override_patch = body
                 .as_ref()

@@ -1402,3 +1402,317 @@ async fn cancel_message_rest_and_ws_set_terminal_cancelled_state() {
 
     test.bridge.shutdown().await;
 }
+
+#[tokio::test]
+async fn public_mesh_channel_is_builtin_join_is_idempotent_and_leave_is_forbidden() {
+    let test = start_bridge().await;
+    let public = openmesh_core::public_channel();
+
+    let channels = raw_http(
+        test.addr,
+        "GET",
+        "/api/channels",
+        Some(TEST_TOKEN),
+        None,
+        b"",
+    )
+    .await;
+    assert_eq!(channels.status, 200);
+    let listed = channels.json();
+    let public_entry = listed["channels"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|channel| channel["channel_id"] == public.id_hex)
+        .expect("Public Mesh channel exists on startup");
+    assert_eq!(public_entry["name"], "Public Mesh");
+    assert_eq!(public_entry["public"], true);
+    assert_eq!(public_entry["psk_set"], true);
+
+    // Joining via the canonical invite URL is idempotent and returns the same public channel.
+    let joined = raw_http(
+        test.addr,
+        "POST",
+        "/api/channels/join",
+        Some(TEST_TOKEN),
+        Some("application/json"),
+        serde_json::to_vec(&json!({ "url": public.join_url }))
+            .unwrap()
+            .as_slice(),
+    )
+    .await;
+    assert_eq!(joined.status, 200, "join response: {:?}", joined.json());
+    let after_join = raw_http(
+        test.addr,
+        "GET",
+        "/api/channels",
+        Some(TEST_TOKEN),
+        None,
+        b"",
+    )
+    .await
+    .json();
+    let public_count = after_join["channels"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|channel| channel["channel_id"] == public.id_hex)
+        .count();
+    assert_eq!(public_count, 1, "public channel is not duplicated by join");
+
+    // The server refuses to leave the built-in channel.
+    let mut ws = ws_connect(test.addr, TEST_TOKEN).await;
+    let _hello = next_json(&mut ws, Duration::from_secs(5))
+        .await
+        .expect("hello");
+    ws.send(Message::Text(
+        json!({"v":1,"type":"leave_channel","id":"leave-public","data":{"channel_id":public.id_hex}})
+            .to_string(),
+    ))
+    .await
+    .unwrap();
+    let frames = read_until(&mut ws, Duration::from_secs(5), |value| {
+        value["type"] == "error"
+    })
+    .await;
+    let error = frames.last().expect("leave error");
+    assert_eq!(error["id"], "leave-public");
+    assert_eq!(error["data"]["code"], "forbidden");
+
+    let still_there = raw_http(
+        test.addr,
+        "GET",
+        "/api/channels",
+        Some(TEST_TOKEN),
+        None,
+        b"",
+    )
+    .await
+    .json();
+    assert!(
+        still_there["channels"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|channel| channel["channel_id"] == public.id_hex),
+        "public channel survives a refused leave attempt"
+    );
+    test.bridge.shutdown().await;
+}
+
+#[tokio::test]
+async fn admin_reset_requires_auth_and_explicit_wipe_confirmation() {
+    let test = start_bridge().await;
+    let public = openmesh_core::public_channel();
+
+    let unauthorized = raw_http(
+        test.addr,
+        "POST",
+        "/api/admin/reset",
+        None,
+        Some("application/json"),
+        br#"{"confirm":"WIPE","new_identity":true}"#,
+    )
+    .await;
+    assert_eq!(unauthorized.status, 401);
+
+    let wrong_confirm = raw_http(
+        test.addr,
+        "POST",
+        "/api/admin/reset",
+        Some(TEST_TOKEN),
+        Some("application/json"),
+        br#"{"confirm":"nope","new_identity":true}"#,
+    )
+    .await;
+    assert_eq!(wrong_confirm.status, 400);
+    assert_eq!(wrong_confirm.json()["error"], "confirmation_required");
+
+    // A rejected reset must not touch data or the channel list.
+    let channels = raw_http(
+        test.addr,
+        "GET",
+        "/api/channels",
+        Some(TEST_TOKEN),
+        None,
+        b"",
+    )
+    .await
+    .json();
+    assert!(
+        channels["channels"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|channel| channel["channel_id"] == public.id_hex),
+        "rejected reset leaves the public channel intact"
+    );
+    test.bridge.shutdown().await;
+}
+
+#[tokio::test]
+async fn admin_reset_data_only_keeps_identity_and_recreates_public_mesh() {
+    let test = start_bridge().await;
+    let public = openmesh_core::public_channel();
+    let before = raw_http(
+        test.addr,
+        "GET",
+        "/api/channels",
+        Some(TEST_TOKEN),
+        None,
+        b"",
+    )
+    .await
+    .json();
+    let seed_before = std::fs::read(test._dir.path().join("identity.key")).unwrap();
+
+    let reset = raw_http(
+        test.addr,
+        "POST",
+        "/api/admin/reset",
+        Some(TEST_TOKEN),
+        Some("application/json"),
+        br#"{"confirm":"WIPE","new_identity":false}"#,
+    )
+    .await;
+    assert_eq!(reset.status, 200, "reset response: {:?}", reset.json());
+    let body = reset.json();
+    assert_eq!(body["reset"], true);
+    assert_eq!(body["identity_changed"], false);
+    assert!(body["node_id"].is_string());
+    assert_eq!(
+        body["counts"]["channels"],
+        before["channels"].as_array().unwrap().len() as u64
+    );
+    assert!(body["counts"]["activity"].is_number());
+    assert_eq!(body["public_channel"]["channel_id"], public.id_hex);
+    assert_eq!(body["public_channel"]["public"], true);
+    assert_eq!(
+        std::fs::read(test._dir.path().join("identity.key")).unwrap(),
+        seed_before,
+        "data-only reset keeps the persisted identity"
+    );
+
+    let channels = raw_http(
+        test.addr,
+        "GET",
+        "/api/channels",
+        Some(TEST_TOKEN),
+        None,
+        b"",
+    )
+    .await
+    .json();
+    assert_eq!(channels["channels"].as_array().unwrap().len(), 1);
+    assert_eq!(channels["channels"][0]["channel_id"], public.id_hex);
+    assert_eq!(channels["channels"][0]["public"], true);
+    let messages = raw_http(
+        test.addr,
+        "GET",
+        &format!("/api/messages/channel/{}?limit=10", public.id_hex),
+        Some(TEST_TOKEN),
+        None,
+        b"",
+    )
+    .await
+    .json();
+    assert_eq!(
+        messages["messages"].as_array().unwrap().len(),
+        0,
+        "messages are cleared"
+    );
+    let activity = raw_http(
+        test.addr,
+        "GET",
+        "/api/activity?limit=5",
+        Some(TEST_TOKEN),
+        None,
+        b"",
+    )
+    .await
+    .json();
+    let entries = activity["entries"].as_array().unwrap();
+    assert_eq!(
+        entries.len(),
+        1,
+        "old activity is cleared; the reset is logged"
+    );
+    assert_eq!(entries[0]["path"], "/api/admin/reset");
+    assert_eq!(entries[0]["ok"], true);
+    assert!(
+        !activity.to_string().contains("WIPE") && !activity.to_string().contains("psk"),
+        "activity entries never contain request bodies/PSKs"
+    );
+    test.bridge.shutdown().await;
+}
+
+#[tokio::test]
+async fn admin_reset_with_new_identity_rotates_seed_and_pushes_fresh_hello() {
+    let test = start_bridge().await;
+    let public = openmesh_core::public_channel();
+    let mut ws = ws_connect(test.addr, TEST_TOKEN).await;
+    let hello = next_json(&mut ws, Duration::from_secs(5))
+        .await
+        .expect("hello");
+    let old_node_id = hello["data"]["node"]["node_id"]
+        .as_str()
+        .expect("old node id")
+        .to_string();
+    let seed_before = std::fs::read(test._dir.path().join("identity.key")).unwrap();
+
+    let reset = raw_http(
+        test.addr,
+        "POST",
+        "/api/admin/reset",
+        Some(TEST_TOKEN),
+        Some("application/json"),
+        br#"{"confirm":"WIPE","new_identity":true}"#,
+    )
+    .await;
+    assert_eq!(reset.status, 200, "reset response: {:?}", reset.json());
+    let body = reset.json();
+    assert_eq!(body["reset"], true);
+    assert_eq!(body["identity_changed"], true);
+    assert_eq!(body["old_node_id"], old_node_id);
+    let new_node_id = body["node_id"].as_str().expect("new node id").to_string();
+    assert_ne!(new_node_id, old_node_id);
+    assert!(body["counts"]["messages"].is_number());
+    assert_eq!(body["public_channel"]["channel_id"], public.id_hex);
+    assert_eq!(body["public_channel"]["public"], true);
+    let seed_after = std::fs::read(test._dir.path().join("identity.key")).unwrap();
+    assert_ne!(seed_before, seed_after, "new identity seed is persisted");
+
+    // The old token still authenticates and the token/config state is preserved.
+    let config = raw_http(test.addr, "GET", "/api/config", Some(TEST_TOKEN), None, b"").await;
+    assert_eq!(config.status, 200);
+
+    // The reset pushes a fresh hello with the new node id to existing WS clients.
+    let frames = read_until(&mut ws, Duration::from_secs(5), |value| {
+        value["type"] == "hello" && value["data"]["node"]["node_id"] == new_node_id
+    })
+    .await;
+    let fresh = frames.last().expect("fresh hello after reset");
+    assert_eq!(fresh["data"]["node"]["node_id"], new_node_id);
+    let channel_frames = read_until(&mut ws, Duration::from_secs(5), |value| {
+        value["type"] == "channels"
+    })
+    .await;
+    assert!(
+        !channel_frames.is_empty(),
+        "reset pushes a fresh channels event"
+    );
+
+    let channels = raw_http(
+        test.addr,
+        "GET",
+        "/api/channels",
+        Some(TEST_TOKEN),
+        None,
+        b"",
+    )
+    .await
+    .json();
+    assert_eq!(channels["channels"].as_array().unwrap().len(), 1);
+    assert_eq!(channels["channels"][0]["channel_id"], public.id_hex);
+    test.bridge.shutdown().await;
+}

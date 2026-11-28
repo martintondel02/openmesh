@@ -175,6 +175,8 @@ impl Bridge {
         // 3. Protocol engine with persisted contacts and channels.
         let mut engine = Engine::new(identity, config.engine_config());
         runtime::restore_engine_state(&mut engine, &store)?;
+        // Built-in Public Mesh channel: always present, even on a fresh store.
+        runtime::ensure_public_channel(&mut engine, &store)?;
         let node_id = engine.node_id();
         let bridge_ident = engine.public_identity();
 
@@ -384,6 +386,7 @@ impl Bridge {
                 backbone.clone(),
                 backbone_envelopes.clone(),
                 gateways.clone(),
+                options.identity_seed_path.clone(),
             );
             task_handles.push(tokio::spawn(engine_task));
 
@@ -510,6 +513,7 @@ async fn core_task(
     backbone: Arc<BackboneManager>,
     backbone_envelopes: Arc<AtomicUsize>,
     gateways: Arc<gateway::GatewayManager>,
+    identity_seed_path: std::path::PathBuf,
 ) {
     let mut runtime = CoreRuntime {
         engine,
@@ -530,6 +534,7 @@ async fn core_task(
         backbone_envelopes,
         gateways,
         gateway_echo: std::collections::HashSet::new(),
+        identity_seed_path,
         shutdown: shutdown.clone(),
     };
     // Pace resource chunk offers to the radio's legal airtime (duty-aware hint from profile/region).
