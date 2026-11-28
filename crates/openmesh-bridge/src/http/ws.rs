@@ -323,6 +323,15 @@ async fn dispatch(
             )
             .await;
         }
+        "cancel_message" => {
+            return forward_command(
+                state,
+                reply_tx,
+                id,
+                parse_data::<MsgIdData>(&msg).map(CommandKind::CancelMessage),
+            )
+            .await;
+        }
         "add_contact" => {
             return forward_command(
                 state,
@@ -465,6 +474,7 @@ fn ws_write_summary(msg: &ClientMsg) -> Option<String> {
         "send_position" => "ws send_position".to_string(),
         "mark_read" => "ws mark_read".to_string(),
         "retry" => "ws retry".to_string(),
+        "cancel_message" => "ws cancel_message".to_string(),
         "add_contact" => "ws add_contact".to_string(),
         "remove_contact" => "ws remove_contact".to_string(),
         "create_channel" => "ws create_channel".to_string(),

@@ -94,6 +94,9 @@ pub struct StoredMessage {
     pub outgoing: bool,
     pub delivered: bool,
     pub read: bool,
+    /// True when the user cancelled this outgoing message/resource transfer (terminal state).
+    #[serde(default)]
+    pub cancelled: bool,
     #[serde(default)]
     pub reply_to: Option<u32>,
     #[serde(default)]
@@ -143,6 +146,7 @@ impl StoredMessage {
             outgoing: self.outgoing,
             delivered: self.delivered,
             read: self.read,
+            cancelled: self.cancelled,
             reply_to: self.reply_to,
             thread: self.thread,
             attachment: self.attachment.as_ref().map(StoredAttachment::to_json),
@@ -165,6 +169,7 @@ impl StoredMessage {
             text: self.text.clone(),
             sent_at_ms: self.sent_at_ms,
             outgoing: self.outgoing,
+            cancelled: self.cancelled,
             signature_valid: self.signature_valid,
             attachment: self.attachment.as_ref().map(StoredAttachment::to_json),
             position: self
@@ -634,6 +639,7 @@ mod tests {
             outgoing,
             delivered: false,
             read: false,
+            cancelled: false,
             reply_to: None,
             thread: None,
             attachment: None,

@@ -750,6 +750,17 @@ async fn route(request: &HttpRequest, state: &Arc<HttpState>) -> HttpResponse {
             };
             command_response(state, CommandKind::Retry(crate::json::MsgIdData { msg_id })).await
         }
+        ("POST", _) if path.starts_with("/api/messages/") && path.ends_with("/cancel") => {
+            let id = &path["/api/messages/".len()..path.len() - "/cancel".len()];
+            let Some(msg_id) = id.parse::<u32>().ok() else {
+                return bad_request("invalid message id");
+            };
+            command_response(
+                state,
+                CommandKind::CancelMessage(crate::json::MsgIdData { msg_id }),
+            )
+            .await
+        }
         ("GET", _) if path.starts_with("/api/") => HttpResponse::error(404, "not_found"),
         ("GET", _) | ("HEAD", _) => serve_static(request, state).await,
         _ if path.starts_with("/api/") => HttpResponse::error(405, "method_not_allowed"),
@@ -992,6 +1003,12 @@ fn summarize_activity(request: &HttpRequest) -> String {
             format!(
                 "retry message {}",
                 &path["/api/messages/".len()..path.len() - "/retry".len()]
+            )
+        }
+        ("POST", _) if path.starts_with("/api/messages/") && path.ends_with("/cancel") => {
+            format!(
+                "cancel message {}",
+                &path["/api/messages/".len()..path.len() - "/cancel".len()]
             )
         }
         (method, path) => format!("{method} {path}"),

@@ -1236,3 +1236,169 @@ async fn sse_stream_pushes_events() {
     assert_eq!(unauthorized.status, 401);
     test.bridge.shutdown().await;
 }
+
+#[tokio::test]
+async fn cancel_message_rest_and_ws_set_terminal_cancelled_state() {
+    let test = start_bridge().await;
+    let mut ws = ws_connect(test.addr, TEST_TOKEN).await;
+    let _hello = next_json(&mut ws, Duration::from_secs(5))
+        .await
+        .expect("hello");
+
+    // Fetch the seeded history so we have real direct message ids.
+    ws.send(Message::Text(
+        json!({"v":1,"type":"sync","id":"s1","data":{"since_ms":0}}).to_string(),
+    ))
+    .await
+    .unwrap();
+    let frames = read_until(&mut ws, Duration::from_secs(5), |v| {
+        v["type"] == "sync_done"
+    })
+    .await;
+    let messages: Vec<Value> = frames
+        .iter()
+        .filter(|v| v["type"] == "message")
+        .cloned()
+        .collect();
+    let incoming_id = messages
+        .iter()
+        .find(|m| m["data"]["outgoing"] == false)
+        .map(|m| m["data"]["msg_id"].as_u64().unwrap())
+        .expect("incoming message");
+    let outgoing: Vec<Value> = messages
+        .iter()
+        .filter(|m| m["data"]["outgoing"] == true)
+        .cloned()
+        .collect();
+    assert!(outgoing.len() >= 2, "demo seeds at least two outgoing DMs");
+    let rest_id = outgoing[0]["data"]["msg_id"].as_u64().unwrap() as u32;
+    let ws_id = outgoing[1]["data"]["msg_id"].as_u64().unwrap() as u32;
+    let rest_peer = outgoing[0]["data"]["peer"].as_str().unwrap().to_string();
+    let ws_peer = outgoing[1]["data"]["peer"].as_str().unwrap().to_string();
+
+    // Simulate in-flight/queued sends (demo seeds are delivered): mark both as not delivered so
+    // the bridge's terminal-state guard allows cancellation.
+    for id in [rest_id, ws_id] {
+        let mut record = test
+            .bridge
+            .shared
+            .store
+            .get_message(id)
+            .expect("store read")
+            .expect("seeded message");
+        record.delivered = false;
+        record.cancelled = false;
+        test.bridge
+            .shared
+            .store
+            .put_message(&record)
+            .expect("store");
+    }
+
+    // Unknown id -> 404; inbound message -> 400.
+    let unknown = raw_http(
+        test.addr,
+        "POST",
+        "/api/messages/4294967290/cancel",
+        Some(TEST_TOKEN),
+        None,
+        b"",
+    )
+    .await;
+    assert_eq!(unknown.status, 404, "{}", unknown.json());
+    let inbound = raw_http(
+        test.addr,
+        "POST",
+        &format!("/api/messages/{incoming_id}/cancel"),
+        Some(TEST_TOKEN),
+        None,
+        b"",
+    )
+    .await;
+    assert_eq!(inbound.status, 400, "{}", inbound.json());
+
+    // REST cancel -> 200 with cancelled=true; second call is idempotent (already_cancelled).
+    let cancelled = raw_http(
+        test.addr,
+        "POST",
+        &format!("/api/messages/{rest_id}/cancel"),
+        Some(TEST_TOKEN),
+        None,
+        b"",
+    )
+    .await;
+    assert_eq!(cancelled.status, 200, "{}", cancelled.json());
+    let body = cancelled.json();
+    assert_eq!(body["ok"], true);
+    assert_eq!(body["cancelled"], true);
+    assert_eq!(body["msg_id"].as_u64(), Some(u64::from(rest_id)));
+    let again = raw_http(
+        test.addr,
+        "POST",
+        &format!("/api/messages/{rest_id}/cancel"),
+        Some(TEST_TOKEN),
+        None,
+        b"",
+    )
+    .await;
+    assert_eq!(again.status, 200);
+    assert_eq!(again.json()["already_cancelled"], true);
+    // Drain the REST cancel's broadcast update before driving the same WS stream.
+    let rest_updates = read_until(&mut ws, Duration::from_secs(5), |v| {
+        v["type"] == "message_update"
+            && v["data"]["msg_id"].as_u64() == Some(u64::from(rest_id))
+            && v["data"]["cancelled"] == true
+    })
+    .await;
+    assert!(
+        !rest_updates.is_empty(),
+        "REST cancel must push a cancelled message_update"
+    );
+
+    // WS cancel_message -> cancel_result reply and message_update cancelled=true.
+    ws.send(Message::Text(
+        json!({"v":1,"type":"cancel_message","id":"c1","data":{"msg_id":ws_id}}).to_string(),
+    ))
+    .await
+    .unwrap();
+    let frames = read_until(&mut ws, Duration::from_secs(5), |v| {
+        v["type"] == "cancel_result" && v["id"] == "c1"
+    })
+    .await;
+    let reply = frames
+        .iter()
+        .find(|v| v["type"] == "cancel_result" && v["id"] == "c1")
+        .expect("cancel_result reply");
+    assert_eq!(reply["data"]["cancelled"], true);
+    assert_eq!(reply["data"]["msg_id"].as_u64(), Some(u64::from(ws_id)));
+    let ws_updates = read_until(&mut ws, Duration::from_secs(5), |v| {
+        v["type"] == "message_update"
+            && v["data"]["msg_id"].as_u64() == Some(u64::from(ws_id))
+            && v["data"]["cancelled"] == true
+    })
+    .await;
+    assert!(
+        !ws_updates.is_empty(),
+        "WS cancel must push message_update with cancelled=true"
+    );
+
+    // The persisted rows expose the terminal cancelled flag in history (one peer each).
+    for (peer, id) in [(rest_peer, rest_id), (ws_peer, ws_id)] {
+        let history = ws_roundtrip(
+            &mut ws,
+            "get_messages",
+            json!({"peer": peer, "limit": 50}),
+            "h1",
+            "messages",
+        )
+        .await;
+        let rows = history["data"]["messages"].as_array().expect("messages");
+        let row = rows
+            .iter()
+            .find(|row| row["msg_id"].as_u64() == Some(u64::from(id)))
+            .unwrap_or_else(|| panic!("cancelled row {id} for peer {peer} missing: {history}"));
+        assert_eq!(row["cancelled"], true, "row must be cancelled: {row}");
+    }
+
+    test.bridge.shutdown().await;
+}

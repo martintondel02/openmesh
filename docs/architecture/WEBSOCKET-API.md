@@ -150,6 +150,7 @@ A direct message, incoming or an echo of a locally-sent one (echoes carry `outgo
   "outgoing": false,
   "delivered": true,
   "read": false,
+  "cancelled": false,
   "reply_to": null,
   "thread": null,
   "attachment": {
@@ -163,9 +164,12 @@ A direct message, incoming or an echo of a locally-sent one (echoes carry `outgo
 
 * `attachment.progress` is 0..1 while a resource is transferring and 1.0 when complete.
   The bridge emits a `message_update` event with the same `msg_id` when progress changes.
+* `cancelled` is `true` once the user cancelled an outgoing message/resource transfer. It is a
+  terminal state: no further chunks or retransmissions are emitted for that message, and retry is
+  refused. A cancelled message keeps its id (ids are never reissued).
 * `message_update` carries **only changed fields plus `msg_id`**; clients merge it into the
   existing message. A failed send stays failed until a `delivered`/`read` ack arrives or the
-  client retries.
+  client retries; a cancel emits `message_update` with `cancelled: true` (and `delivered: false`).
 * Channel read state (`mark_group_read`) is client-side only in v1: there is no per-member read
   receipt for groups, because group frames are broadcast and ack-free.
 
@@ -180,7 +184,7 @@ Same shape as `message`; only changed fields are present plus `msg_id`.
   "msg_id": 123456790, "channel_id": "ff00…", "channel_name": "family",
   "from": "ab12…", "from_name": "martin", "sender_key": "…base64…",
   "kind": "text", "text": "on my way", "sent_at_ms": 1760000000000,
-  "outgoing": false, "signature_valid": true,
+  "outgoing": false, "cancelled": false, "signature_valid": true,
   "attachment": null, "position": null
 } }
 ```
@@ -268,6 +272,7 @@ The server replies with a sequence of `node`, `message`, `group_message`, `confi
 | `send_position` | `{ "to": "<node_id>" }` or `{ "channel_id": "..." }` | Uses the bridge's configured position (or `{"position": {...}}` to override once). |
 | `mark_read` | `{ "msg_id": n }` | Sends a `read` ack when possible. |
 | `retry` | `{ "msg_id": n }` | Re-send an unacked message. |
+| `cancel_message` | `{ "msg_id": n }` | Cancel an outgoing message/in-flight resource transfer; stops chunks and retransmissions immediately, persists `cancelled: true`, emits `message_update` and replies `cancel_result` with `{ok, cancelled, msg_id}` (idempotent: `already_cancelled: true` once cancelled). No cancellation frame is sent on air. |
 | `delete_message` | `{ "msg_id": n }` | Local-only delete. |
 
 `send_*` commands get a response:
@@ -340,6 +345,7 @@ The server replies with a sequence of `node`, `message`, `group_message`, `confi
 | GET | `/api/messages?peer=<id>&limit=100&before_ms=` | Direct message history. |
 | GET | `/api/channels` | Channels (no PSKs). |
 | GET | `/api/messages/channel/:id?limit=100` | Group history. |
+| POST | `/api/messages/:id/cancel` | Cancel an outgoing message/in-flight media transfer; returns `{ "ok": true, "cancelled": true, "msg_id": n }`, `404` for unknown ids, `400` for incoming/already-delivered messages, `already_cancelled: true` on repeat. |
 | GET | `/api/contacts` | Contacts. |
 | GET | `/api/attachments/:id` | Raw bytes with `Content-Type` from the stored metadata. |
 | POST | `/api/attachments` | Raw body upload (`Content-Type` required, `X-OpenMesh-Filename` optional). Returns `{ "id": "att_…", "size": n, "sha256": "…" }`. Max 32 MiB. |

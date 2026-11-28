@@ -929,7 +929,8 @@
           "sent_at_ms",
           "outgoing",
           "delivered",
-          "read"
+          "read",
+          "cancelled"
         ],
         "properties": {
           "msg_id": {
@@ -1009,6 +1010,9 @@
                 "type": "null"
               }
             ]
+          },
+          "cancelled": {
+            "type": "boolean"
           }
         },
         "example": {
@@ -1026,7 +1030,8 @@
           "reply_to": null,
           "thread": null,
           "attachment": null,
-          "position": null
+          "position": null,
+          "cancelled": false
         }
       },
       "GroupMessage": {
@@ -1039,7 +1044,8 @@
           "kind",
           "sent_at_ms",
           "outgoing",
-          "signature_valid"
+          "signature_valid",
+          "cancelled"
         ],
         "properties": {
           "msg_id": {
@@ -1098,6 +1104,9 @@
                 "type": "null"
               }
             ]
+          },
+          "cancelled": {
+            "type": "boolean"
           }
         },
         "example": {
@@ -1113,7 +1122,8 @@
           "outgoing": false,
           "signature_valid": true,
           "attachment": null,
-          "position": null
+          "position": null,
+          "cancelled": false
         }
       },
       "Messages": {
@@ -1507,6 +1517,9 @@
           },
           "detail": {
             "type": "string"
+          },
+          "cancelled": {
+            "type": "boolean"
           }
         },
         "example": {
@@ -6519,6 +6532,91 @@
                   "error": "unauthorized",
                   "code": "unauthorized",
                   "message": "…",
+                  "help_topic": "getting-started"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/messages/{message_id}/cancel": {
+      "post": {
+        "tags": [
+          "messages"
+        ],
+        "summary": "Cancel an outgoing message or in-flight media transfer",
+        "description": "Stops chunk releases and retransmissions for an outgoing message/resource transfer and persists a terminal `cancelled` state. No cancellation frame is sent on air. Emits `message_update` with `cancelled: true`. Idempotent once cancelled.",
+        "parameters": [
+          {
+            "name": "message_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Cancelled (or already cancelled)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ActionOk"
+                },
+                "example": {
+                  "ok": true,
+                  "cancelled": true,
+                  "msg_id": 42
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Incoming message or already delivered",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "error": "bad_request",
+                  "code": "bad_request",
+                  "message": "…",
+                  "help_topic": "getting-started"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing/invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "error": "unauthorized",
+                  "code": "unauthorized",
+                  "message": "…",
+                  "help_topic": "getting-started"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown message id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "error": "not_found",
+                  "code": "not_found",
+                  "message": "unknown message id",
                   "help_topic": "getting-started"
                 }
               }

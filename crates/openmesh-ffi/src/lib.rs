@@ -344,6 +344,11 @@ pub enum FfiEvent {
         /// Number of envelopes offered.
         count: i64,
     },
+    /// An outgoing message/resource transfer was cancelled locally by the app.
+    MessageCancelled {
+        /// Message whose transfer was cancelled.
+        msg_id: i64,
+    },
     /// A non-fatal protocol problem worth surfacing in logs/UI.
     Error {
         /// Plain-language message (never contains secrets).
@@ -426,6 +431,9 @@ pub struct OpenMeshNode {
     received_from: Mutex<HashMap<u32, NodeId>>,
     /// Channel id → PSK, so channel invite URLs can be regenerated.
     channel_keys: Mutex<HashMap<NodeId, [u8; 32]>>,
+    /// Events produced by synchronous calls that return a plain value (e.g. `cancelMessage`), delivered
+    /// on the next call that returns an `FfiProcessed` so the UI's event callback sees them.
+    pending_events: Mutex<Vec<Event>>,
 }
 
 impl fmt::Debug for OpenMeshNode {
@@ -473,6 +481,7 @@ impl OpenMeshNode {
             incoming_attachments: Mutex::new(HashMap::new()),
             received_from: Mutex::new(HashMap::new()),
             channel_keys: Mutex::new(HashMap::new()),
+            pending_events: Mutex::new(Vec::new()),
         }))
     }
 
@@ -620,6 +629,56 @@ impl OpenMeshNode {
         let mut engine = self.lock_engine()?;
         engine.set_resource_pace_interval_ms(ms);
         Ok(())
+    }
+
+    /// Sequence number of the most recently originated frame (`seq` in the OMP header).
+    ///
+    /// Persist this value cheaply (for example in SharedPreferences) after sending and restore it
+    /// with [`OpenMeshNode::set_sequence_floor`] immediately after the next process start / state
+    /// import. Peers deduplicate frames by `(src, seq)` for 30 minutes (`DEDUP_TTL_MS`); if the app
+    /// rewinds its sequence counter after a restart, the peer silently drops the new frames as
+    /// duplicates (the "phone→PC media never arrives after app restart" failure).
+    pub fn last_seq(&self) -> u32 {
+        match self.engine.lock() {
+            Ok(engine) => engine.last_seq(),
+            Err(poisoned) => poisoned.into_inner().last_seq(),
+        }
+    }
+
+    /// Raise the frame sequence floor so the next originated frame has `seq > floor`.
+    ///
+    /// Call this after [`OpenMeshNode::import_state`] / engine start with the persisted
+    /// [`OpenMeshNode::last_seq`] value, and keep persisting `last_seq` as frames are sent. It is
+    /// idempotent and monotonic: a lower value never rewinds the engine.
+    pub fn set_sequence_floor(&self, seq: u32) -> Result<(), FfiError> {
+        let mut engine = self.lock_engine()?;
+        engine.set_sequence_floor(seq);
+        Ok(())
+    }
+
+    /// Cancel an outgoing message and/or its in-flight resource transfer.
+    ///
+    /// Stops chunk releases and retransmissions immediately and never sends a cancellation frame
+    /// on air (wire-compatible: the peer cleans up on its own timeout). The message id stays used.
+    /// Returns `true` when something was cancelled, `false` when the id is unknown or already
+    /// complete/delivered. The [`FfiEvent::MessageCancelled`] event is delivered by the next call
+    /// that returns [`FfiProcessed`] (e.g. the next `tick`), so the Android event callback settles
+    /// the UI.
+    pub fn cancel_message(&self, msg_id: u32) -> bool {
+        let (cancelled, processed) = {
+            let mut engine = match self.engine.lock() {
+                Ok(engine) => engine,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            engine.cancel_message(msg_id)
+        };
+        if cancelled {
+            self.pending_events
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .extend(processed.events);
+        }
+        cancelled
     }
 
     /// Feed one complete OMP frame received from the radio.
@@ -1075,7 +1134,17 @@ impl OpenMeshNode {
         })
     }
 
-    fn map_processed(&self, processed: Processed) -> Result<FfiProcessed, FfiError> {
+    fn map_processed(&self, mut processed: Processed) -> Result<FfiProcessed, FfiError> {
+        let pending: Vec<Event> = {
+            let mut queue = self
+                .pending_events
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            std::mem::take(&mut *queue)
+        };
+        if !pending.is_empty() {
+            processed.events.splice(0..0, pending);
+        }
         let now = self.current_now();
         let msg_id = processed.outbound.iter().find_map(|outbound| {
             let frame = &outbound.frame;
@@ -1244,6 +1313,9 @@ impl OpenMeshNode {
                     msg_id: i64::from(msg_id),
                 }
             }
+            Event::MessageCancelled { msg_id, .. } => FfiEvent::MessageCancelled {
+                msg_id: i64::from(msg_id),
+            },
             Event::Error(message) => FfiEvent::Error { message },
         }
     }
@@ -1815,6 +1887,128 @@ mod tests {
             }
         }
         all
+    }
+
+    #[test]
+    fn sequence_floor_roundtrips_through_ffi_state_and_floor() {
+        let source = node("sequence", 21);
+        let sent = source.announce(0).expect("announce");
+        assert!(!sent.outbound.is_empty());
+        let seq = source.last_seq();
+        assert!(seq > 0, "an emitted frame must advance last_seq");
+        let state = source.export_state().expect("export");
+
+        let restored = node("sequence", 21);
+        restored.import_state(state).expect("import");
+        assert_eq!(restored.last_seq(), seq, "state import restores last_seq");
+
+        // The app persists the floor separately and applies it even if the full state snapshot is
+        // stale: the floor must only move forward and new frames must stay above it.
+        restored.set_sequence_floor(seq + 100).expect("set floor");
+        assert_eq!(restored.last_seq(), seq + 100);
+        restored
+            .set_sequence_floor(seq)
+            .expect("lower floor is ignored");
+        assert_eq!(restored.last_seq(), seq + 100);
+
+        let next = restored.announce(120_000).expect("announce after floor");
+        assert!(!next.outbound.is_empty());
+        assert!(restored.last_seq() > seq + 100);
+    }
+
+    #[test]
+    fn stale_state_plus_persisted_floor_prevents_sequence_reuse() {
+        // Reproduces the Android failure shape: full state restored from an older snapshot, then the
+        // separate persisted floor (taken after more sends) is applied before sending again.
+        let source = node("stale", 22);
+        source.announce(0).expect("first announce");
+        let stale_state = source.export_state().expect("export");
+        let old_floor = source.last_seq();
+        source.announce(61_000).expect("second announce");
+        let fresh_floor = source.last_seq();
+        assert!(fresh_floor > old_floor);
+
+        let restarted = node("stale", 22);
+        restarted
+            .import_state(stale_state)
+            .expect("import stale state");
+        assert_eq!(restarted.last_seq(), old_floor);
+        restarted
+            .set_sequence_floor(fresh_floor)
+            .expect("apply persisted floor");
+        assert_eq!(restarted.last_seq(), fresh_floor);
+        let next = restarted.announce(122_000).expect("post-floor announce");
+        assert!(!next.outbound.is_empty());
+        assert!(
+            restarted.last_seq() > fresh_floor,
+            "frames after a stale-state restore must never reuse an old sequence number"
+        );
+    }
+
+    #[test]
+    fn cancel_message_stops_an_in_flight_attachment_and_surfaces_the_event() {
+        let node = node("cancel", 31);
+        let channel = node
+            .join_channel("cancel-test".into(), b64(&[7u8; 32]))
+            .expect("channel");
+        let target = FfiTarget::Channel {
+            channel_id_hex: channel.channel_id_hex.clone(),
+        };
+        let sent = node
+            .send_attachment(
+                target.clone(),
+                "image/webp".into(),
+                None,
+                vec![1u8; 1_200],
+                None,
+                1_000,
+            )
+            .expect("attachment");
+        let msg_id = sent.msg_id.expect("msg id");
+        let res_ids: Vec<u32> = sent
+            .outbound
+            .iter()
+            .filter_map(|out| {
+                let frame = &out.frame;
+                (frame.len() >= 14 && frame[0] >> 3 == 3)
+                    .then(|| u32::from_be_bytes([frame[10], frame[11], frame[12], frame[13]]))
+            })
+            .collect();
+
+        assert!(
+            node.cancel_message(msg_id as u32),
+            "in-flight send must cancel"
+        );
+        assert!(
+            !node.cancel_message(msg_id as u32),
+            "cancel is not idempotent-active"
+        );
+
+        // The cancelled event is delivered by the next processed call (Android calls tick).
+        let processed = node.tick(2_000).expect("tick");
+        assert!(processed.events.iter().any(|event| matches!(
+            event,
+            FfiEvent::MessageCancelled { msg_id: id } if *id == msg_id
+        )));
+        // No later tick may emit a frame that belongs to the cancelled message/resource.
+        for step in 3..40u64 {
+            let processed = node.tick((step * 1_000) as i64).expect("tick");
+            for out in processed.outbound {
+                let frame = &out.frame;
+                if frame.len() >= 14 && matches!(frame[0] >> 3, 1 | 3) {
+                    let msg_ref = u32::from_be_bytes([frame[2], frame[3], frame[4], frame[5]]);
+                    assert_ne!(
+                        msg_ref, msg_id as u32,
+                        "cancelled attachment emitted a frame on tick {step}"
+                    );
+                    let res_id = u32::from_be_bytes([frame[6], frame[7], frame[8], frame[9]]);
+                    assert!(
+                        !res_ids.contains(&res_id),
+                        "cancelled resource still emitting"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

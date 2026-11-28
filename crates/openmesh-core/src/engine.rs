@@ -461,6 +461,18 @@ pub enum Event {
         /// Resource id.
         res_id: u32,
     },
+    /// A locally-originated message/resource transfer was cancelled by the embedder.
+    ///
+    /// Nothing is emitted on air for a cancellation: the sender simply stops releasing chunks and
+    /// retransmissions. The message id stays used (ids are never reissued), so it is safe to keep
+    /// the local row in a terminal `cancelled` state.
+    MessageCancelled {
+        /// Message whose transfer was cancelled.
+        msg_id: u32,
+        /// Outgoing resource ids that were removed (empty when only a pending ack message was
+        /// cancelled).
+        res_ids: Vec<u32>,
+    },
     /// Non-fatal protocol problem worth surfacing in logs/UI.
     Error(String),
 }
@@ -1348,6 +1360,44 @@ impl Engine {
         let mut out = Processed::default();
         self.emit_frame(&mut out, frame, SendMode::Direct(peer.node_id));
         Ok(out)
+    }
+
+    /// Cancel a locally-originated message and/or its in-flight resource transfer.
+    ///
+    /// Removes every outgoing resource owned by `msg_id` (so ticks can no longer release chunks or
+    /// retransmit manifests) and drops a pending direct message waiting for a delivery ack. No
+    /// frames are emitted; the peer learns about the cancellation only through message-level
+    /// timeout/cleanup (wire-compatible phase 1).
+    ///
+    /// Returns `(cancelled, processed)`: `cancelled` is `false` when the id is unknown or already
+    /// complete/delivered, so embedders can distinguish "nothing to cancel" from a real
+    /// cancellation. [`Event::MessageCancelled`] is surfaced in `processed` on success.
+    ///
+    /// Message ids stay used after cancellation; [`Engine::allocate_message_id`] never reissues
+    /// them.
+    pub fn cancel_message(&mut self, msg_id: u32) -> (bool, Processed) {
+        let mut out = Processed::default();
+        let res_ids: Vec<u32> = self
+            .outgoing
+            .iter()
+            .filter(|(_, resource)| resource.msg_id == msg_id)
+            .map(|(res_id, _)| *res_id)
+            .collect();
+        for res_id in &res_ids {
+            self.outgoing.remove(res_id);
+        }
+        let had_pending = self.pending_msgs.remove(&msg_id).is_some();
+        let cancelled = !res_ids.is_empty() || had_pending;
+        if cancelled {
+            tracing::debug!(
+                msg_id,
+                res_ids = ?res_ids,
+                had_pending,
+                "outgoing message cancelled"
+            );
+            out.events.push(Event::MessageCancelled { msg_id, res_ids });
+        }
+        (cancelled, out)
     }
 
     fn send_app_message(
@@ -4062,6 +4112,222 @@ mod tests {
         assert_eq!(sender.stats().window_acks_rx, 1);
         assert!(sender.stats().acks_rx >= 1);
         assert!(sender.stats().rx_frames >= 1);
+    }
+
+    fn outbound_msg_ref(out: &Outbound) -> Option<u32> {
+        let frame = &out.frame;
+        (matches!(frame.typ, FrameType::Data | FrameType::Resource) && frame.body.len() >= 5).then(
+            || u32::from_be_bytes([frame.body[1], frame.body[2], frame.body[3], frame.body[4]]),
+        )
+    }
+
+    #[test]
+    fn cancel_in_flight_resource_stops_all_further_chunks() {
+        let mut sender = engine(101);
+        let mut peer = engine(102);
+        sender.add_contact(peer.public_identity(), Some("peer".into()));
+        peer.add_contact(sender.public_identity(), Some("sender".into()));
+        let peer_id = peer.node_id();
+        let data = vec![21u8; 6_018];
+        let msg_id = 0x1111_2222u32;
+        let res_id = 0x3333_4444u32;
+        let sent = sender
+            .send_resource(
+                Target::Direct(peer_id),
+                msg_id,
+                res_id,
+                ResourceKind::Attachment,
+                "image/webp",
+                &data,
+                0,
+            )
+            .expect("send");
+        assert!(!sent.outbound.is_empty());
+        // Let at least one paced batch leave before cancelling.
+        let _ = sender.tick(1_000);
+
+        let (cancelled, processed) = sender.cancel_message(msg_id);
+        assert!(cancelled, "an in-flight resource must be cancellable");
+        assert!(matches!(
+            processed.events.as_slice(),
+            [Event::MessageCancelled {
+                msg_id: cancelled_id,
+                res_ids,
+            }] if *cancelled_id == msg_id && res_ids.contains(&res_id)
+        ));
+        assert!(!sender.outgoing.contains_key(&res_id));
+
+        // No ticks may emit anything for the cancelled resource any more.
+        for step in 1..=60u64 {
+            let processed = sender.tick(step * 1_000);
+            assert!(
+                processed
+                    .outbound
+                    .iter()
+                    .all(|out| outbound_msg_ref(out) != Some(msg_id)),
+                "cancelled resource emitted a frame at tick {step}"
+            );
+        }
+        // Cancelling again is a no-op (nothing left to cancel).
+        assert!(!sender.cancel_message(msg_id).0);
+    }
+
+    #[test]
+    fn cancel_pending_message_stops_retransmissions() {
+        let mut sender = engine(111);
+        let mut peer = engine(112);
+        sender.add_contact(peer.public_identity(), Some("peer".into()));
+        peer.add_contact(sender.public_identity(), Some("sender".into()));
+        let sent = sender
+            .send_text(Target::Direct(peer.node_id()), "cancel me", 0)
+            .expect("send");
+        let msg_id = sent
+            .outbound
+            .iter()
+            .find_map(outbound_msg_ref)
+            .expect("message id");
+        let (cancelled, processed) = sender.cancel_message(msg_id);
+        assert!(cancelled, "a queued direct message must be cancellable");
+        assert!(matches!(
+            processed.events.as_slice(),
+            [Event::MessageCancelled { msg_id: id, res_ids }]
+                if *id == msg_id && res_ids.is_empty()
+        ));
+        // ACK timeout would normally retransmit; cancellation removed it from pending.
+        for step in 1..=10u64 {
+            let processed = sender.tick(step * 10_000);
+            assert!(
+                processed
+                    .outbound
+                    .iter()
+                    .all(|out| outbound_msg_ref(out) != Some(msg_id)),
+                "cancelled pending message was retransmitted"
+            );
+        }
+    }
+
+    #[test]
+    fn cancel_unknown_or_delivered_returns_false() {
+        let mut sender = engine(121);
+        let (cancelled, processed) = sender.cancel_message(0xDEAD_BEEF);
+        assert!(!cancelled);
+        assert!(processed.events.is_empty());
+
+        // A completed resource is gone from the outgoing map; cancelling reports nothing to do.
+        let mut peer = engine(122);
+        sender.add_contact(peer.public_identity(), Some("peer".into()));
+        peer.add_contact(sender.public_identity(), Some("sender".into()));
+        let data = vec![22u8; 400];
+        let msg_id = 0x5555_6666u32;
+        let res_id = 0x7777_8888u32;
+        let sent = sender
+            .send_resource(
+                Target::Direct(peer.node_id()),
+                msg_id,
+                res_id,
+                ResourceKind::Attachment,
+                "image/webp",
+                &data,
+                0,
+            )
+            .expect("send");
+        let mut frames: Vec<Outbound> = sent.outbound;
+        let mut now = 0u64;
+        let mut received_complete = false;
+        for _ in 0..60 {
+            now += 1_000;
+            let mut next: Vec<Outbound> = Vec::new();
+            for out in frames.drain(..) {
+                let processed = peer.on_frame(out.frame, None, now);
+                received_complete |= processed
+                    .events
+                    .iter()
+                    .any(|event| matches!(event, Event::ResourceReceived { .. }));
+                for ack in processed.outbound {
+                    let applied = sender.on_frame(ack.frame, None, now);
+                    next.extend(applied.outbound);
+                }
+            }
+            next.extend(sender.tick(now).outbound);
+            frames = next;
+            if received_complete && !sender.outgoing.contains_key(&res_id) {
+                break;
+            }
+        }
+        assert!(received_complete, "test setup must complete the transfer");
+        let (cancelled, processed) = sender.cancel_message(msg_id);
+        assert!(!cancelled, "a completed message has nothing to cancel");
+        assert!(processed.events.is_empty());
+    }
+
+    #[test]
+    fn cancel_only_affects_the_target_transfer() {
+        let mut sender = engine(131);
+        let mut peer = engine(132);
+        sender.add_contact(peer.public_identity(), Some("peer".into()));
+        peer.add_contact(sender.public_identity(), Some("sender".into()));
+        let peer_id = peer.node_id();
+        let first_id = 0x1010_2020u32;
+        let second_id = 0x3030_4040u32;
+        sender
+            .send_resource(
+                Target::Direct(peer_id),
+                first_id,
+                0xA1A1_0001,
+                ResourceKind::Attachment,
+                "image/webp",
+                &vec![1u8; 1_200],
+                0,
+            )
+            .expect("first");
+        sender
+            .send_resource(
+                Target::Direct(peer_id),
+                second_id,
+                0xA2A2_0002,
+                ResourceKind::Attachment,
+                "image/webp",
+                &vec![2u8; 1_200],
+                0,
+            )
+            .expect("second");
+        let (cancelled, _) = sender.cancel_message(first_id);
+        assert!(cancelled);
+        let mut frames = Vec::new();
+        for step in 1..=5u64 {
+            frames.extend(sender.tick(step * 2_000).outbound);
+        }
+        assert!(
+            frames
+                .iter()
+                .all(|out| outbound_msg_ref(out) != Some(first_id)),
+            "cancelled transfer must stay silent"
+        );
+        assert!(
+            frames
+                .iter()
+                .any(|out| outbound_msg_ref(out) == Some(second_id)),
+            "the other transfer must keep progressing"
+        );
+    }
+
+    #[test]
+    fn cancelled_message_id_stays_used() {
+        let mut sender = engine(141);
+        let peer = engine(142);
+        sender.add_contact(peer.public_identity(), Some("peer".into()));
+        let sent = sender
+            .send_text(Target::Direct(peer.node_id()), "cancel id", 0)
+            .expect("send");
+        let msg_id = sent
+            .outbound
+            .iter()
+            .find_map(outbound_msg_ref)
+            .expect("message id");
+        assert!(sender.cancel_message(msg_id).0);
+        let next_id = sender.allocate_message_id();
+        assert_ne!(next_id, msg_id, "a cancelled id must not be reissued");
+        assert_ne!(next_id, 0);
     }
 
     #[test]

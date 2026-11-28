@@ -174,6 +174,7 @@ pub enum CommandKind {
     SendPosition(SendPositionData),
     MarkRead(MsgIdData),
     Retry(MsgIdData),
+    CancelMessage(MsgIdData),
     AddContact(AddContactData),
     RemoveContact(String),
     CreateChannel(ChannelCreateData),
@@ -489,6 +490,9 @@ impl CoreRuntime {
             Event::ResourceSent { peer: _, res_id } => {
                 self.on_resource_sent(res_id)?;
             }
+            Event::MessageCancelled { msg_id, res_ids } => {
+                self.on_message_cancelled(msg_id, res_ids)?;
+            }
             Event::Error(message) => {
                 tracing::warn!(message, "protocol error reported by engine");
             }
@@ -549,6 +553,7 @@ impl CoreRuntime {
             outgoing: false,
             delivered: true,
             read: false,
+            cancelled: false,
             reply_to: msg.reply_to,
             thread: msg.thread,
             attachment,
@@ -631,6 +636,7 @@ impl CoreRuntime {
             outgoing: false,
             delivered: true,
             read: false,
+            cancelled: false,
             reply_to: msg.reply_to,
             thread: msg.thread,
             attachment: None,
@@ -685,6 +691,7 @@ impl CoreRuntime {
                     self.emit(
                         "message_update",
                         MessageUpdateJson {
+                            cancelled: None,
                             msg_id: record.msg_id,
                             delivered: Some(record.delivered),
                             read: Some(record.read),
@@ -743,6 +750,7 @@ impl CoreRuntime {
                     self.emit(
                         "message_update",
                         MessageUpdateJson {
+                            cancelled: None,
                             msg_id: record.msg_id,
                             delivered: None,
                             read: None,
@@ -767,6 +775,7 @@ impl CoreRuntime {
                     self.emit(
                         "message_update",
                         MessageUpdateJson {
+                            cancelled: None,
                             msg_id: record.msg_id,
                             delivered: Some(record.delivered),
                             read: None,
@@ -776,6 +785,33 @@ impl CoreRuntime {
                 }
             }
         }
+        Ok(())
+    }
+
+    fn on_message_cancelled(&mut self, msg_id: u32, res_ids: Vec<u32>) -> Result<()> {
+        for res_id in res_ids {
+            self.outgoing_resources.remove(&res_id);
+        }
+        self.outgoing_resources.retain(|_, (_, id)| *id != msg_id);
+        if let Some(mut record) = self.store.get_message(msg_id)? {
+            record.cancelled = true;
+            record.delivered = false;
+            self.store.put_message(&record)?;
+            self.emit(
+                "message_update",
+                MessageUpdateJson {
+                    msg_id: record.msg_id,
+                    delivered: Some(false),
+                    read: None,
+                    cancelled: Some(true),
+                    attachment: record.attachment.as_ref().map(StoredAttachment::to_json),
+                },
+            );
+        }
+        tracing::debug!(
+            msg_id,
+            "outgoing message cancelled; retransmissions stopped"
+        );
         Ok(())
     }
 
@@ -866,6 +902,7 @@ impl CoreRuntime {
         self.emit(
             "message_update",
             MessageUpdateJson {
+                cancelled: None,
                 msg_id: record.msg_id,
                 delivered: Some(record.delivered),
                 read: None,
@@ -903,6 +940,10 @@ impl CoreRuntime {
                 self.cmd_mark_read(id.as_deref(), data, &reply, now).await
             }
             CommandKind::Retry(data) => self.cmd_retry(id.as_deref(), data, &reply, now).await,
+            CommandKind::CancelMessage(data) => {
+                self.cmd_cancel_message(id.as_deref(), data, &reply, now)
+                    .await
+            }
             CommandKind::AddContact(data) => self.cmd_add_contact(id.as_deref(), data, &reply, now),
             CommandKind::RemoveContact(node) => {
                 self.cmd_remove_contact(id.as_deref(), node, &reply, now)
@@ -1114,6 +1155,7 @@ impl CoreRuntime {
             outgoing: true,
             delivered: false,
             read: false,
+            cancelled: false,
             reply_to: data.reply_to,
             thread: None,
             attachment: stored_attachment,
@@ -1260,6 +1302,7 @@ impl CoreRuntime {
             outgoing: true,
             delivered: false,
             read: false,
+            cancelled: false,
             reply_to: None,
             thread: None,
             attachment: stored_attachment,
@@ -1348,6 +1391,7 @@ impl CoreRuntime {
             outgoing: true,
             delivered: false,
             read: false,
+            cancelled: false,
             reply_to: None,
             thread: None,
             attachment: None,
@@ -1482,6 +1526,7 @@ impl CoreRuntime {
         self.emit(
             "message_update",
             MessageUpdateJson {
+                cancelled: None,
                 msg_id: record.msg_id,
                 delivered: Some(record.delivered),
                 read: Some(true),
@@ -1613,6 +1658,78 @@ impl CoreRuntime {
                 est_airtime_ms: est,
                 queued: true,
             },
+        );
+        Ok(())
+    }
+
+    async fn cmd_cancel_message(
+        &mut self,
+        id: Option<&str>,
+        data: MsgIdData,
+        reply: &mpsc::UnboundedSender<Arc<str>>,
+        now: u64,
+    ) -> Result<()> {
+        let Some(record) = self.store.get_message(data.msg_id)? else {
+            reply_error(reply, id, "not_found", "unknown message id");
+            return Ok(());
+        };
+        if !record.outgoing {
+            reply_error(
+                reply,
+                id,
+                "bad_request",
+                "only outgoing messages can be cancelled",
+            );
+            return Ok(());
+        }
+        if record.cancelled {
+            self.send_reply(
+                reply,
+                "cancel_result",
+                id,
+                serde_json::json!({
+                    "ok": true,
+                    "cancelled": true,
+                    "msg_id": record.msg_id,
+                    "already_cancelled": true,
+                }),
+            );
+            return Ok(());
+        }
+        if record.delivered {
+            reply_error(reply, id, "bad_request", "message was already delivered");
+            return Ok(());
+        }
+        // Stop chunk release and retransmissions in the engine (no cancellation frame is sent).
+        let (cancelled, processed) = self.engine.cancel_message(data.msg_id);
+        if cancelled {
+            self.process(processed, now).await;
+        }
+        // The engine has nothing in flight after a bridge restart: still settle the stored row so a
+        // client cannot retry a cancelled message and the UI leaves the pending state.
+        self.outgoing_resources
+            .retain(|_, (_, msg_id)| *msg_id != data.msg_id);
+        if let Some(mut record) = self.store.get_message(data.msg_id)? {
+            if !record.cancelled {
+                record.cancelled = true;
+                self.store.put_message(&record)?;
+                self.emit(
+                    "message_update",
+                    MessageUpdateJson {
+                        msg_id: record.msg_id,
+                        delivered: Some(false),
+                        read: None,
+                        cancelled: Some(true),
+                        attachment: record.attachment.as_ref().map(StoredAttachment::to_json),
+                    },
+                );
+            }
+        }
+        self.send_reply(
+            reply,
+            "cancel_result",
+            id,
+            serde_json::json!({ "ok": true, "cancelled": true, "msg_id": data.msg_id }),
         );
         Ok(())
     }

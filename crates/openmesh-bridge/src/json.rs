@@ -464,6 +464,8 @@ pub struct MessageJson {
     pub outgoing: bool,
     pub delivered: bool,
     pub read: bool,
+    /// True when this outgoing message/resource transfer was cancelled by the user.
+    pub cancelled: bool,
     pub reply_to: Option<u32>,
     pub thread: Option<u32>,
     pub attachment: Option<AttachmentJson>,
@@ -484,6 +486,8 @@ pub struct GroupMessageJson {
     pub text: Option<String>,
     pub sent_at_ms: u64,
     pub outgoing: bool,
+    /// True when this outgoing message/resource transfer was cancelled by the user.
+    pub cancelled: bool,
     pub signature_valid: bool,
     pub attachment: Option<AttachmentJson>,
     pub position: Option<PositionJson>,
@@ -499,6 +503,8 @@ pub struct MessageUpdateJson {
     pub read: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub attachment: Option<AttachmentJson>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cancelled: Option<bool>,
 }
 
 #[derive(Clone, Debug, Serialize)]
