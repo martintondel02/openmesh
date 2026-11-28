@@ -566,7 +566,9 @@ fun SettingsScreen(
             },
             confirmButton = {
                 TextButton(
-                    enabled = resetConfirmText == "RESET",
+                    // IMEs can append a trailing space / use lowercase; the typed confirmation is
+                    // about intent, so trim and compare case-insensitively.
+                    enabled = resetConfirmText.trim().equals("RESET", ignoreCase = true),
                     onClick = {
                         showFactoryReset = false
                         resetConfirmText = ""
