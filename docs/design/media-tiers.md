@@ -24,9 +24,9 @@ Single source for web, Android and tests. The bridge does not need it at runtime
   "version": 1,
   "airtime_note": "Tier sizes are targets; clients show the measured bytes and estimated airtime before sending.",
   "images": {
-    "tiny":   { "max_dim": 320,  "quality": 0.35, "mime": "image/webp" },
-    "medium": { "max_dim": 640,  "quality": 0.55, "mime": "image/webp" },
-    "high":   { "max_dim": 1280, "quality": 0.70, "mime": "image/webp" },
+    "tiny":   { "max_dim": 256,  "quality": 0.28, "mime": "image/avif" },
+    "medium": { "max_dim": 512,  "quality": 0.40, "mime": "image/avif" },
+    "high":   { "max_dim": 1024, "quality": 0.50, "mime": "image/avif" },
     "original": { "max_dim": null, "quality": null, "mime": "original" }
   },
   "voice": {
@@ -50,10 +50,23 @@ Single source for web, Android and tests. The bridge does not need it at runtime
 }
 ```
 
+Encoder policy for image tiers:
+
+* **AVIF is the preferred encoder.** Before encoding, a client probes the platform encoder
+  (web: canvas `toBlob('image/avif', quality)`) and treats AVIF as available only when the returned
+  blob's `type` is really `image/avif`; browsers that silently return PNG for an unknown type are
+  detected and rejected. Clients then try AVIF first, WebP second and JPEG third, and always label
+  the attachment with the **actual** encoded MIME and matching filename extension. A requested type
+  that comes back as something else must never be sent under the requested name.
+* `mime` in the preset is the **preferred** MIME; the capability-gated fallback chain above is part
+  of the contract. `original` passes the picked bytes through unchanged (the client does not
+  transcode or relabel it).
+
 Rules:
 
-* **Image tiers** are targets: clients downscale to `max_dim`, encode WebP at `quality`, then show
-  the *actual* bytes and airtime. If the result exceeds the active profile's attachment cap
+* **Image tiers** are targets: clients downscale to `max_dim`, encode at `quality` with the first
+  capability-supported encoder (AVIF → WebP → JPEG), then show the *actual* bytes, actual MIME and
+  airtime. If the result exceeds the active profile's attachment cap
   (`util::max_attachment_bytes`), the next smaller tier is suggested; `original` is allowed only
   with an explicit confirmation and is blocked by default on long-range profiles.
 * **Voice tiny/medium** are **raw Codec2 frame streams** (no container): fixed frame sizes
@@ -67,6 +80,27 @@ Rules:
   bytes_per_second(tier)))`; show the cap and the estimated airtime before recording/sending.
 * Airtime labels: "≈N s airtime at <PROFILE> · ~M % of the hourly duty budget" using the existing
   `util::lora_airtime_ms` math (240-byte frames incl. resource overhead).
+
+### 1.1 Measured encoder output (2026-11-28)
+
+Honest browser measurement on a 768×512 Kodak test photo (canvas downscale, preset quality,
+returned Blob size; no relays/retries):
+
+| Tier | Output | WebP bytes | JPEG bytes | AVIF request |
+| --- | --- | --- | --- | --- |
+| tiny | 256×171 q0.28 | 3,066 B | 3,940 B | not encodable — returned PNG (96,756 B) |
+| medium | 512×341 q0.40 | 8,714 B | 12,318 B | not encodable — returned PNG (362,152 B) |
+| high | 768×512 q0.50 | 17,290 B | 26,633 B | not encodable — returned PNG (783,179 B) |
+
+Compared with the previous presets (320/640/1280 px at q0.35/0.55/0.70) the same photo encodes
+**29 % / 37 % / 22 % smaller** with WebP. Chromium 159 (headless, canvas) **cannot encode AVIF at
+all**: `toBlob('image/avif')` returns an `image/png` blob (e.g. 11,005 B vs 1,502 B WebP for the
+capability probe), which is exactly why the runtime type check is mandatory. Real AVIF *decode* is
+supported (a 12,877 B, 2048×858 sample renders via `createImageBitmap` and `<img>`), and the web
+client renders received `image/avif` attachments in the bubble, fullscreen viewer and Save dialog.
+In Chromium the AVIF branch therefore stays dormant and the client sends WebP with the correct
+MIME; browsers that can genuinely produce AVIF will use it for all three non-original tiers. These
+are content-dependent examples — clients always display the measured bytes for the actual file.
 
 ## 2. Rust crate `openmesh-voice`
 
@@ -143,10 +177,12 @@ Generated Kotlin names must be confirmed by the implementer and relayed to platf
 
 ## 5. Web UX (web-client)
 
-* Composer image attach: tier menu **Tiny / Medium / High / Original** (with dims/quality and
-  target size), compression, then a pre-send preview card showing **actual size**, **estimated
-  airtime**, **% of hourly duty**, and a warning when it exceeds the profile cap; `Original`
-  requires a confirmation and is disabled by default for `LONG_*`.
+* Composer image attach: tier menu **Tiny (≤256 px, q0.28) / Medium (≤512 px, q0.40) / High
+  (≤1024 px, q0.50) / Original**, labelled with the encoder this browser can really produce
+  (AVIF when the verified probe succeeds, otherwise WebP/JPEG), compression, then a pre-send
+  preview card showing **actual size**, **actual MIME**, **estimated airtime**, **% of hourly
+  duty**, and a warning when it exceeds the profile cap; `Original` requires a confirmation and is
+  disabled by default for `LONG_*`.
 * Voice recorder: tier selector **Tiny (Codec2 1.3k) / Medium (Codec2 3.2k) / High (Opus)**;
   record ≤ effective cap; show bytes + airtime before send. Tiny/medium: capture PCM via
   `AudioContext`/`AudioWorklet` (or `MediaRecorder` decode), resample to 8 kHz mono via
@@ -162,8 +198,10 @@ Generated Kotlin names must be confirmed by the implementer and relayed to platf
 
 ## 6. Android UX (platform-docs)
 
-* Image attach: tier chooser (Tiny 320 / Medium 640 / High 1280 / Original) → compress
-  (`Bitmap` + WebP quality) → preview with actual bytes + airtime + duty %; `Original` gated.
+* Image attach: tier chooser (Tiny ≤256 px / Medium ≤512 px / High ≤1024 px / Original) →
+  compress with the platform image encoder (AVIF first when it genuinely emits `image/avif`, else
+  WebP, then JPEG; the attachment MIME follows the actual bytes) → preview with actual bytes,
+  MIME and airtime + duty %; `Original` gated.
 * Voice: tier chooser; tiny/medium record with `AudioRecord` (8 kHz mono s16le) → FFI
   `openmeshVoiceEncode` → `sendAttachment(mime)`; high: existing MediaRecorder path (OGG/Opus when
   API ≥29, else AAC/MP4). Effective cap per tier/profile shown before recording.

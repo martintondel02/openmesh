@@ -202,9 +202,9 @@ the hourly duty budget**, and the app suggests the largest tier that fits the ac
 
 | Tier | Images | Voice | 8 s voice |
 | --- | --- | --- | --- |
-| **Tiny** | 320 px WebP | **Codec2 1.3 kbps** | ≈ **1.4 KiB** (≈ 7 s airtime at `MEDIUM_FAST`) |
-| **Medium** | 640 px WebP | **Codec2 3.2 kbps** | ≈ 3.2 KiB |
-| **High** | 1280 px WebP | **Opus 12 kbps** (Android may use AAC/MP4) | ≈ 12 KiB |
+| **Tiny** | 256 px, AVIF preferred (WebP fallback) | **Codec2 1.3 kbps** | ≈ **1.4 KiB** (≈ 7 s airtime at `MEDIUM_FAST`) |
+| **Medium** | 512 px, AVIF preferred (WebP fallback) | **Codec2 3.2 kbps** | ≈ 3.2 KiB |
+| **High** | 1024 px, AVIF preferred (WebP fallback) | **Opus 12 kbps** (Android may use AAC/MP4) | ≈ 12 KiB |
 | **Original** | untouched | — | confirmation-gated; disabled on `LONG_*` |
 
 Codec2 is pure Rust (`codec2` crate, LGPL-2.1/MIT): the same code runs in the browser through a

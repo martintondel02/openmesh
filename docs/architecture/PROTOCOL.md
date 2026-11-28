@@ -468,7 +468,7 @@ Voice notes use three tiers; tiny/medium are **Codec2** (raw frame streams, no c
 Codec2 payloads are concatenated frames with fixed byte lengths (7 and 8 bytes); decoders MUST
 ignore a trailing partial frame and MUST reject payloads with an unsupported mode. Encoders drop
 a trailing partial PCM frame. The tiny tier is the intended default on constrained profiles: an
-8-second intelligible voice note costs less than one 640 px image. Tier metadata (sizes, MIME,
+8-second intelligible voice note costs less than one 512 px image. Tier metadata (sizes, MIME,
 sample rates, duration caps) lives in `content/presets/media.json` and is shared by all clients.
 No wire-format change: resources already carry MIME + bytes.
 
