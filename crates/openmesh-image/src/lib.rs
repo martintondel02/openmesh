@@ -10,15 +10,24 @@
 //! `0.50`). [`quality_from_fraction`] maps that to the ravif/rav1e 1–100 quality scale used by
 //! [`encode_avif_rgba`]. Speed is chosen by quality unless the caller overrides it:
 //!
-//! | Tier | max_dim | quality | ravif quality | ravif speed |
-//! | --- | --- | --- | --- | --- |
-//! | tiny | 256 | 0.28 | 28 | 10 |
-//! | medium | 512 | 0.40 | 40 | 8 |
-//! | high | 1024 | 0.50 | 50 | 8 |
+//! | Tier | max_dim | preset quality | WebP/JPEG q | AVIF q (auto) | ravif speed |
+//! | --- | --- | --- | --- | --- | --- |
+//! | tiny | 256 | 0.28 | 28 | 35 | 10 |
+//! | medium | 512 | 0.40 | 40 | 50 | 8 |
+//! | high | 1024 | 0.50 | 50 | 62 | 8 |
 //!
-//! Measured on the fixture/real photos in task-33: medium/high are 21–31 % smaller than WebP at
-//! the same nominal quality; tiny is ~16–18 % smaller. Speed 10 is for the tiny tier (smallest
-//! payload, fastest); speed 7–8 for medium/high keeps phone encode < ~1 s in practice.
+//! The `AVIF q (auto)` column is [`calibrated_avif_quality`] (1.25×, capped 100), used by the
+//! size-aware "encode both, send the smaller" client policy. ravif's numeric quality is
+//! perceptually lower than libwebp/platform WebP at the same number (measured: matching WebP SSIM
+//! on typical real photos needs ~1.2–1.3× the WebP quality; detail-heavy photos need more), so
+//! comparing same-numeric-q sizes would often choose AVIF at lower visual quality. Clients encode
+//! the AVIF candidate at the calibrated quality, compare its bytes with the tier WebP bytes, and
+//! send the smaller one (WebP wins ties; AVIF only when it truly wins at comparable quality), with
+//! the actual MIME/filename and the platform WebP/JPEG fallback. See
+//! `docs/design/media-tiers.md` §1.2 for the SSIM methodology and the 126-encode results.
+//!
+//! `AVIF q` (28/40/50) remains the direct encoder quality when a caller wants the central mapping
+//! without calibration; it is not changed by this client policy.
 //!
 //! The encoder is deterministic for a fixed input/quality/speed, so clients can cache encoded
 //! bytes and tests can assert byte-for-byte stability. No wire-format impact: AVIF bytes are just
@@ -76,6 +85,40 @@ pub fn quality_from_fraction(fraction: f32) -> u8 {
 /// [`encode_avif_rgba_with_speed`].
 pub fn speed_for_quality(quality: u8) -> u8 {
     if quality <= 30 { 10 } else { 8 }
+}
+
+/// Numerator of the quality-matched AVIF/WebP calibration factor (5/4 = 1.25×).
+pub const AVIF_QUALITY_CALIBRATION_NUMERATOR: u16 = 5;
+/// Denominator of the quality-matched AVIF/WebP calibration factor (5/4 = 1.25×).
+pub const AVIF_QUALITY_CALIBRATION_DENOMINATOR: u16 = 4;
+/// Upper bound for [`calibrated_avif_quality`] (ravif's 1–100 scale).
+pub const AVIF_QUALITY_CALIBRATION_MAX: u8 = 100;
+
+/// Quality to request from the bundled AVIF encoder when comparing its output against a platform
+/// WebP encode made at the tier's `webp_quality` (0–100).
+///
+/// ravif quality is perceptually lower than libwebp at the same numeric value; on typical real
+/// photos, matching WebP's SSIM needs about 1.2–1.3× the WebP quality (detail-heavy photos need
+/// more). This helper applies the documented 1.25× heuristic, capped at 100, for the size-aware
+/// client policy: encode WebP at the preset quality and AVIF at this calibrated quality, then send
+/// the smaller bytes (WebP wins ties; AVIF only when it truly wins at comparable quality).
+///
+/// - tiny preset 0.28 → WebP q28 → AVIF q35
+/// - medium preset 0.40 → WebP q40 → AVIF q50
+/// - high preset 0.50 → WebP q50 → AVIF q62
+///
+/// The central [`quality_from_fraction`] mapping is intentionally unchanged; callers that do not
+/// compare against a WebP candidate should keep using it directly.
+pub fn calibrated_avif_quality(webp_quality: u8) -> u8 {
+    (u16::from(webp_quality) * AVIF_QUALITY_CALIBRATION_NUMERATOR
+        / AVIF_QUALITY_CALIBRATION_DENOMINATOR)
+        .clamp(1, u16::from(AVIF_QUALITY_CALIBRATION_MAX)) as u8
+}
+
+/// [`calibrated_avif_quality`] for a normalized preset quality (`0.28`, `0.40`, `0.50`):
+/// applies [`quality_from_fraction`] first.
+pub fn calibrated_avif_quality_from_fraction(fraction: f32) -> u8 {
+    calibrated_avif_quality(quality_from_fraction(fraction))
 }
 
 /// Encode an RGBA8 buffer to an AVIF file.
@@ -162,6 +205,25 @@ mod tests {
         assert_eq!(speed_for_quality(28), 10);
         assert_eq!(speed_for_quality(40), 8);
         assert_eq!(speed_for_quality(50), 8);
+    }
+
+    #[test]
+    fn calibrated_avif_quality_matches_the_quality_matched_policy() {
+        // Preset tiers: WebP q28/40/50 -> AVIF q35/50/62 (1.25x, integer floor).
+        assert_eq!(calibrated_avif_quality_from_fraction(0.28), 35);
+        assert_eq!(calibrated_avif_quality_from_fraction(0.40), 50);
+        assert_eq!(calibrated_avif_quality_from_fraction(0.50), 62);
+        // Clamping and monotonicity.
+        assert_eq!(calibrated_avif_quality(0), 1);
+        assert_eq!(calibrated_avif_quality(1), 1);
+        assert_eq!(calibrated_avif_quality(80), 100);
+        assert_eq!(calibrated_avif_quality(100), 100);
+        let qualities: Vec<u8> = (1..=100).map(calibrated_avif_quality).collect();
+        assert!(qualities.windows(2).all(|pair| pair[0] <= pair[1]));
+        // Calibration never lowers the encoder quality relative to the central mapping.
+        for q in 1..=80u8 {
+            assert!(calibrated_avif_quality(q) >= q);
+        }
     }
 
     #[test]

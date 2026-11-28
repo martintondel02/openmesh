@@ -102,6 +102,53 @@ In Chromium the AVIF branch therefore stays dormant and the client sends WebP wi
 MIME; browsers that can genuinely produce AVIF will use it for all three non-original tiers. These
 are content-dependent examples — clients always display the measured bytes for the actual file.
 
+### 1.2 Quality-calibrated AVIF/WebP choice (2026-11-28)
+
+The bundled pure-Rust AVIF encoder (`crates/openmesh-image`, ravif/rav1e) is now available through
+`crates/openmesh-image-wasm` (web) and `openmesh-ffi` (`encodeAvif`, Android). Its **ravif quality
+is perceptually lower than libwebp/platform WebP at the same numeric value**, so a same-q byte
+comparison would often choose AVIF at lower visual quality. The policy is therefore
+**Auto (smallest, quality-matched)**, not blind AVIF preference:
+
+* Encode the tier WebP candidate at the preset quality (`0.28`/`0.40`/`0.50` → q28/40/50) and the
+  AVIF candidate at [`openmesh_image::calibrated_avif_quality`] — the documented **1.25×**
+  calibration, integer-floored and capped at 100: **tiny q28 → AVIF q35, medium q40 → AVIF q50,
+  high q50 → AVIF q62**. (Constants/functions: `AVIF_QUALITY_CALIBRATION_NUMERATOR` /
+  `DENOMINATOR` / `MAX`, `calibrated_avif_quality`, `calibrated_avif_quality_from_fraction`.)
+* Send the **strictly smaller** result; **WebP wins ties**. AVIF is only chosen when it truly wins
+  at comparable quality, and the central encoder mapping (q28/40/50) is unchanged.
+* If the AVIF encoder is unavailable, over budget, or fails, use WebP (or JPEG) and label the
+  attachment with the **actual** MIME/filename. Never send fallback bytes under an AVIF name.
+* Composer default: **Auto (smallest, quality-matched)** with the actual format/bytes/airtime shown;
+  explicit **force AVIF** / **force WebP** choices can be added later as user overrides.
+* This policy is implemented in the clients (task-37: Android size-aware selection; web follows
+  when the lazy AVIF WASM is wired). The encoder API/capability contract above is unchanged.
+
+**Measurement (SSIM-matched quality, 126 encodes).** Three real 2048×1536 sample photos
+(Picsum/Unsplash: one typical scene, one portrait-style scene, one detail-heavy star-field
+lighthouse), Lanczos-resized to the 256/512/1024 tier bounds. WebP via Pillow/libwebp method 6 at
+q28/40/50; AVIF via `crates/openmesh-image` at q20–70 (tier speeds 10/8/8); decoded with
+ffmpeg/libdav1d; SSIM computed against the resized reference. For each WebP point, the ravif quality
+and byte size that match its SSIM were linearly interpolated between AVIF points. 126 = 3 photos ×
+3 tiers × (3 WebP + 11 AVIF) encodes; SSIM is an engineering proxy, not a full perceptual metric.
+
+Matching WebP SSIM needs roughly **1.2–1.3× the WebP quality** on typical photos (q28 → ravif
+q39–41; q40 → q46–48; q50 → q54–55) and far more on detail-heavy content (up to q66–70+). At that
+matched quality, AVIF bytes relative to WebP bytes were:
+
+| Tier (preset WebP q) | typical photo A | typical photo B | detail-heavy lighthouse |
+| --- | --- | --- | --- |
+| tiny (q28) | **+19 %** | **−8 %** | **+133 %** |
+| medium (q40) | **−10 %** | **−9 %** | **+86 %** |
+| high (q50) | **−6 %** | **−8 %** | **+97 %** |
+
+Negative means AVIF is smaller. Realistic expectation on typical photos: single-digit savings at
+medium/high, roughly parity or slightly worse at tiny; AVIF-hostile detail-heavy photos can be
+~2× larger, which the dynamic choice correctly sends as WebP. The earlier same-numeric-q
+comparisons (e.g. “AVIF 21–31 % smaller”) overstated the equal-quality win because AVIF's quality
+was lower at the same number. Re-check these numbers with device-side logs on representative
+photos; the platform WebP encoder and content mix can shift them.
+
 ## 2. Rust crate `openmesh-voice`
 
 Public API (host, FFI and wasm wrap this; no IO):

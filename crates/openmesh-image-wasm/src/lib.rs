@@ -17,7 +17,9 @@
 
 use std::slice;
 
-use openmesh_image::{encode_avif_rgba_with_speed, quality_from_fraction, speed_for_quality};
+use openmesh_image::{
+    calibrated_avif_quality, encode_avif_rgba_with_speed, quality_from_fraction, speed_for_quality,
+};
 
 /// Host-testable encode wrapper (same path as the C ABI).
 pub fn encode_bytes(
@@ -79,6 +81,13 @@ pub unsafe extern "C" fn om_image_free(ptr: *mut u8, len: u32) {
 #[unsafe(no_mangle)]
 pub extern "C" fn om_image_quality_from_fraction(fraction: f32) -> u8 {
     quality_from_fraction(fraction)
+}
+
+/// Quality-calibration helper for the size-aware client policy: the AVIF candidate quality to use
+/// when comparing against a WebP encode at `webp_quality` (1.25×, integer floor, capped 100).
+#[unsafe(no_mangle)]
+pub extern "C" fn om_image_calibrated_quality(webp_quality: u8) -> u8 {
+    calibrated_avif_quality(webp_quality)
 }
 
 /// Speed mapping helper for JS (ravif quality → default speed 7/8/10).
@@ -143,6 +152,9 @@ mod tests {
         assert_eq!(&first[4..12], b"ftypavif");
         assert_eq!(om_image_quality_from_fraction(0.28), 28);
         assert_eq!(om_image_speed_for_quality(40), 8);
+        assert_eq!(om_image_calibrated_quality(28), 35);
+        assert_eq!(om_image_calibrated_quality(40), 50);
+        assert_eq!(om_image_calibrated_quality(50), 62);
     }
 
     #[test]
